@@ -1,0 +1,771 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI Passport 随身工具箱 · 界面原型</title>
+<style>
+  :root{
+    --bg:#0B0E13; --surface:#151A22; --surface2:#1E242E;
+    --text:#E8EDF4; --muted:#93A0B4; --line:#232A35;
+    --accent:#22D3EE; --live:#FF4757; --soon:#FFB020;
+    --done:#6B7280; --ok:#34D399; --warn:#F59E0B;
+    --page:#070A0E; --page2:#0E131A;
+  }
+  html[data-theme="light"]{
+    --bg:#F5F7FA; --surface:#FFFFFF; --surface2:#EEF2F7;
+    --text:#10141A; --muted:#5B6577; --line:#DDE4EC;
+    --accent:#0891B2; --live:#E11D48; --soon:#B45309;
+    --done:#9AA3B2; --ok:#059669; --warn:#B45309;
+    --page:#E9EDF2; --page2:#F5F7FA;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{
+    background:linear-gradient(180deg,var(--page),var(--page2));
+    color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+    padding:32px 24px 64px; min-height:100vh;
+  }
+  header{max-width:1180px;margin:0 auto 28px;display:flex;flex-wrap:wrap;gap:16px;align-items:flex-end;justify-content:space-between}
+  h1{font-size:22px;font-weight:600;letter-spacing:.2px}
+  header p{color:var(--muted);font-size:13px;margin-top:6px;max-width:640px;line-height:1.6}
+  .toggle{
+    background:var(--surface);border:1px solid var(--line);color:var(--text);
+    border-radius:8px;padding:8px 14px;font-size:13px;cursor:pointer;
+  }
+  .toggle:hover{border-color:var(--accent)}
+  h2{max-width:1180px;margin:0 auto 16px;font-size:14px;font-weight:600;color:var(--muted);letter-spacing:.5px}
+
+  .tokens{max-width:1180px;margin:0 auto 36px;display:flex;flex-wrap:wrap;gap:10px}
+  .swatch{display:flex;align-items:center;gap:8px;background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:8px 12px;font-size:12px}
+  .swatch i{width:14px;height:14px;border-radius:4px;display:block;border:1px solid rgba(128,128,128,.25)}
+  .swatch span{color:var(--muted)}
+
+  .grid{max-width:1180px;margin:0 auto;display:flex;flex-wrap:wrap;gap:34px 30px;justify-content:flex-start}
+  .wrap{width:336px}
+  .device{
+    position:relative;width:240px;height:320px;background:var(--bg);
+    border:1px solid var(--line);border-radius:14px;overflow:hidden;
+    transform:scale(1.4);transform-origin:top left;
+    box-shadow:0 18px 40px rgba(0,0,0,.35);
+    display:flex;flex-direction:column;
+  }
+  .wrap{height:472px}
+  .cap{margin-top:6px;font-size:12px;color:var(--muted)}
+  .cap b{color:var(--text);font-weight:500}
+
+  /* 状态栏 */
+  .sb{height:26px;flex:0 0 26px;display:flex;align-items:center;justify-content:space-between;
+      padding:0 8px;font-size:11px;color:var(--muted);border-bottom:1px solid var(--line)}
+  .sb .r{display:flex;align-items:center;gap:6px}
+  .dot{width:6px;height:6px;border-radius:50%;background:var(--live);display:inline-block}
+  .live-tag{color:var(--live);font-weight:600;font-size:10px}
+  .bat{color:var(--ok)}
+  .bat.low{color:var(--live)}
+
+  /* 内容区 */
+  .content{flex:1;overflow:hidden;padding:8px;display:flex;flex-direction:column;gap:8px}
+  .hint{flex:0 0 24px;height:24px;display:flex;align-items:center;justify-content:center;
+        font-size:10px;color:var(--muted);border-top:1px solid var(--line);padding:0 6px;
+        white-space:nowrap;overflow:hidden}
+
+  /* 卡片 */
+  .card{background:var(--surface);border-radius:8px;padding:8px 10px;position:relative;overflow:hidden}
+  .card .k{font-size:10px;color:var(--muted)}
+  .card .big{font-size:28px;font-weight:600;font-variant-numeric:tabular-nums;line-height:1.15;letter-spacing:.5px}
+  .card .sub{font-size:11px;color:var(--muted);margin-top:2px}
+  .card .accent{position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--accent)}
+  .card .accent.live{background:var(--live)}
+  .card .accent.soon{background:var(--soon)}
+
+  /* 列表 */
+  .list{background:var(--surface);border-radius:8px;overflow:hidden}
+  .row{display:flex;align-items:center;gap:8px;height:28px;padding:0 8px;font-size:13px;
+       border-bottom:1px solid var(--line);white-space:nowrap}
+  .row:last-child{border-bottom:0}
+  .row .n{flex:1;overflow:hidden;text-overflow:ellipsis}
+  .row .t{color:var(--muted);font-size:11px;font-variant-numeric:tabular-nums}
+  .row.sel{background:var(--surface2);box-shadow:inset 3px 0 0 var(--accent)}
+  .row.past{opacity:.45}
+  .row.cur{box-shadow:inset 3px 0 0 var(--accent);background:var(--surface2)}
+  .row .badge{font-size:9px;padding:1px 5px;border-radius:99px;border:1px solid var(--line);color:var(--muted)}
+  .row .badge.live{color:var(--live);border-color:var(--live)}
+  .row .badge.soon{color:var(--soon);border-color:var(--soon)}
+  .row .badge.done{color:var(--done);border-color:var(--done)}
+  .row .badge.ok{color:var(--ok);border-color:var(--ok)}
+  .row .ind{width:10px;text-align:center;color:var(--muted);font-size:11px}
+  .row .ind.cur{color:var(--accent)}
+
+  .title{font-size:15px;font-weight:600;padding:2px 2px 0}
+  .muted{color:var(--muted);font-size:11px}
+  .tabs{display:flex;gap:12px;font-size:12px;padding:2px 2px 6px;border-bottom:1px solid var(--line)}
+  .tabs .on{color:var(--accent);font-weight:600;box-shadow:0 8px 0 -6px var(--accent)}
+
+  /* 时间进度格子 */
+  .pct{display:grid;grid-template-columns:repeat(12,1fr);gap:3px}
+  .pct i{display:block;aspect-ratio:1;border-radius:2px;background:var(--surface2)}
+  .pct i.on{background:var(--accent)}
+  .pct i.now{background:var(--soon)}
+  .legend{display:flex;gap:12px;font-size:10px;color:var(--muted)}
+  .legend b{font-weight:500;color:var(--text)}
+
+  /* 番茄钟 */
+  .center{display:flex;flex-direction:column;align-items:center;justify-content:center;flex:1;gap:10px}
+  .timer{font-size:44px;font-weight:600;font-variant-numeric:tabular-nums;letter-spacing:1px}
+  .bar{width:150px;height:6px;border-radius:99px;background:var(--surface2);overflow:hidden}
+  .bar i{display:block;height:100%;background:var(--accent)}
+
+  /* 工牌 */
+  .badge-wrap{display:flex;gap:10px;background:var(--surface);border-radius:8px;padding:10px}
+  .avatar{width:56px;height:56px;border-radius:8px;background:var(--surface2);display:flex;align-items:center;justify-content:center;font-size:10px;color:var(--muted);flex:0 0 56px}
+  .fields{font-size:11px;line-height:1.7;color:var(--muted)}
+  .fields b{color:var(--text);font-weight:500}
+  .qr{width:64px;height:64px;background:
+     repeating-conic-gradient(var(--text) 0 25%, transparent 0 50%) 0 0/8px 8px;
+     border-radius:6px;opacity:.85}
+
+  /* TOTP */
+  .totp{background:var(--surface);border-radius:8px;padding:12px 10px;display:flex;flex-direction:column;align-items:center;gap:8px}
+  .totp .acct{font-size:11px;color:var(--muted);align-self:flex-start}
+  .totp .code{font-size:34px;font-weight:600;font-variant-numeric:tabular-nums;letter-spacing:3px}
+  .ring{position:relative;width:56px;height:56px}
+  .ring svg{transform:rotate(-90deg)}
+  .ring .sec{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:13px;font-variant-numeric:tabular-nums}
+  .next{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
+  .next b{color:var(--text);font-weight:500;letter-spacing:1px}
+  .sync{font-size:10px;color:var(--ok)}
+  .sync.bad{color:var(--warn)}
+
+  /* 自检 */
+  .check{display:flex;align-items:center;justify-content:space-between;height:30px;font-size:12px;border-bottom:1px solid var(--line)}
+  .check:last-child{border-bottom:0}
+  .check .s{font-size:11px}
+  .check .s.ok{color:var(--ok)}
+  .check .s.wait{color:var(--muted)}
+
+  /* 快捷面板 */
+  .sheet{margin-top:auto;background:var(--surface);border-radius:10px 10px 0 0;padding:10px;border-top:1px solid var(--line)}
+  .sheet .r{display:flex;justify-content:space-between;align-items:center;height:30px;font-size:12px;border-bottom:1px solid var(--line)}
+  .sheet .r:last-child{border-bottom:0}
+  .pill{font-size:10px;padding:2px 8px;border-radius:99px;background:var(--surface2);color:var(--accent);border:1px solid var(--line)}
+
+  /* 空状态 */
+  .empty{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;text-align:center;padding:16px}
+  .empty .ic{width:40px;height:40px;border-radius:50%;border:1px dashed var(--line);display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:16px}
+  .empty .t{font-size:13px}
+  .empty .d{font-size:11px;color:var(--muted);line-height:1.6}
+
+  .banner{font-size:10px;padding:4px 8px;border-radius:6px;background:color-mix(in srgb,var(--warn) 16%,transparent);color:var(--warn);border:1px solid color-mix(in srgb,var(--warn) 40%,transparent)}
+  .banner.off{background:color-mix(in srgb,var(--muted) 16%,transparent);color:var(--muted);border-color:var(--line)}
+  footer{max-width:1180px;margin:56px auto 0;color:var(--muted);font-size:12px;line-height:1.8}
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>AI Passport 随身工具箱 · 界面原型</h1>
+    <p>240×320 逻辑画布，三键操作，离线优先。深色为默认主题，仅用于夜间护眼，不代表省电。主页时钟、作息倒计时与动态口令为实时演示，口令由设备端同一套 TOTP 算法在本地生成，不联网。主页与各页底部提示条常驻显示当前按键含义，不依赖用户记忆。</p>
+  </div>
+  <button class="toggle" id="themeBtn">切换浅色主题</button>
+</header>
+
+<h2>设计令牌</h2>
+<div class="tokens">
+  <div class="swatch"><i style="background:var(--bg)"></i>背景 <span>--bg</span></div>
+  <div class="swatch"><i style="background:var(--surface)"></i>卡片 <span>--surface</span></div>
+  <div class="swatch"><i style="background:var(--accent)"></i>强调 <span>--accent</span></div>
+  <div class="swatch"><i style="background:var(--live)"></i>进行中 <span>--live</span></div>
+  <div class="swatch"><i style="background:var(--soon)"></i>即将开始 <span>--soon</span></div>
+  <div class="swatch"><i style="background:var(--ok)"></i>通过 <span>--ok</span></div>
+  <div class="swatch"><i style="background:var(--warn)"></i>警示 <span>--warn</span></div>
+  <div class="swatch"><i style="background:var(--done)"></i>已结束 <span>--done</span></div>
+</div>
+
+<h2>关键界面</h2>
+<div class="grid" id="grid"></div>
+
+<footer>
+  原型说明：本页为界面设计示意，用于确认布局、信息层级与交互状态，不是最终视觉稿。所有数据为演示数据。<br>
+  动态口令使用演示密钥在浏览器本地按 RFC 6238 计算，仅用于展示“当前口令 + 剩余时间 + 下一个口令”的呈现方式。
+</footer>
+
+<script>
+/* ================= 数据与工具 ================= */
+const ROUTINE = [
+  {name:'到校',   s:'07:50', e:'08:00', t:'custom'},
+  {name:'第一节', s:'08:00', e:'08:45', t:'class'},
+  {name:'课间',   s:'08:45', e:'08:55', t:'break'},
+  {name:'第二节', s:'08:55', e:'09:40', t:'class'},
+  {name:'课间',   s:'09:40', e:'09:55', t:'break'},
+  {name:'第三节', s:'09:55', e:'10:40', t:'class'},
+  {name:'第四节', s:'10:50', e:'11:35', t:'class'},
+  {name:'午休',   s:'11:35', e:'14:00', t:'lunch'},
+  {name:'第五节', s:'14:00', e:'14:45', t:'class'},
+  {name:'第六节', s:'14:55', e:'15:40', t:'class'},
+  {name:'放学',   s:'17:30', e:'18:00', t:'off'},
+  {name:'晚自习', s:'19:00', e:'21:30', t:'study'},
+];
+const NODE_LABEL = {class:'上课', break:'课间', lunch:'午休', off:'放学', study:'晚自习', custom:'其他'};
+
+function toMin(hhmm){const [h,m]=hhmm.split(':').map(Number);return h*60+m;}
+function nowMin(d){return d.getHours()*60+d.getMinutes()+d.getSeconds()/60;}
+function hms(totalSec){
+  totalSec=Math.max(0,Math.round(totalSec));
+  const h=Math.floor(totalSec/3600), m=Math.floor(totalSec%3600/60), s=totalSec%60;
+  const p=n=>String(n).padStart(2,'0');
+  return h>0?`${h}:${p(m)}:${p(s)}`:`${p(m)}:${p(s)}`;
+}
+function p2(n){return String(n).padStart(2,'0');}
+function pad6(n){return String(n).padStart(6,'0');}
+
+function routineState(d){
+  const n=nowMin(d);
+  let cur=null,next=null;
+  for(let i=0;i<ROUTINE.length;i++){
+    const a=toMin(ROUTINE[i].s), b=toMin(ROUTINE[i].e);
+    if(n>=a&&n<b){cur=ROUTINE[i];next=ROUTINE[i+1]||null;break;}
+  }
+  if(!cur){
+    for(let i=0;i<ROUTINE.length;i++){
+      if(toMin(ROUTINE[i].s)>n){next=ROUTINE[i];break;}
+    }
+  }
+  let label,secs;
+  if(cur){label='距离下课';secs=(toMin(cur.e)-n)*60;}
+  else if(next){label='距离'+next.name;secs=(toMin(next.s)-n)*60;}
+  else {label='今日作息已结束';secs=0;}
+  return {cur,next,label,secs};
+}
+
+/* ================= TOTP（本地，纯 JS） ================= */
+function rotl(n,b){return ((n<<b)|(n>>>(32-b)))>>>0;}
+function sha1Bytes(bytes){
+  const ml=bytes.length*8, withOne=bytes.length+1;
+  const total=withOne+((56-withOne%64)+64)%64+8;
+  const msg=new Uint8Array(total); msg.set(bytes); msg[bytes.length]=0x80;
+  const dv=new DataView(msg.buffer);
+  dv.setUint32(total-4,ml>>>0,false); dv.setUint32(total-8,Math.floor(ml/4294967296),false);
+  let h0=0x67452301,h1=0xEFCDAB89,h2=0x98BADCFE,h3=0x10325476,h4=0xC3D2E1F0;
+  const w=new Uint32Array(80);
+  for(let i=0;i<total;i+=64){
+    for(let j=0;j<16;j++) w[j]=dv.getUint32(i+j*4,false);
+    for(let j=16;j<80;j++) w[j]=rotl(w[j-3]^w[j-8]^w[j-14]^w[j-16],1);
+    let a=h0,b=h1,c=h2,d=h3,e=h4;
+    for(let j=0;j<80;j++){
+      let f,k;
+      if(j<20){f=(b&c)|((~b)&d);k=0x5A827999;}
+      else if(j<40){f=b^c^d;k=0x6ED9EBA1;}
+      else if(j<60){f=(b&c)|(b&d)|(c&d);k=0x8F1BBCDC;}
+      else {f=b^c^d;k=0xCA62C1D6;}
+      const tmp=(rotl(a,5)+f+e+k+w[j])>>>0;
+      e=d;d=c;c=rotl(b,30);b=a;a=tmp;
+    }
+    h0=(h0+a)>>>0;h1=(h1+b)>>>0;h2=(h2+c)>>>0;h3=(h3+d)>>>0;h4=(h4+e)>>>0;
+  }
+  const out=new Uint8Array(20), odv=new DataView(out.buffer);
+  odv.setUint32(0,h0,false);odv.setUint32(4,h1,false);odv.setUint32(8,h2,false);
+  odv.setUint32(12,h3,false);odv.setUint32(16,h4,false);
+  return out;
+}
+function hmacSha1(key,msg){
+  const B=64;
+  let k=key.length>B?sha1Bytes(key):key;
+  const kp=new Uint8Array(B); kp.set(k);
+  const o=new Uint8Array(B),i=new Uint8Array(B);
+  for(let j=0;j<B;j++){o[j]=kp[j]^0x5c;i[j]=kp[j]^0x36;}
+  const inner=new Uint8Array(B+msg.length); inner.set(i); inner.set(msg,B);
+  const ih=sha1Bytes(inner);
+  const outer=new Uint8Array(B+20); outer.set(o); outer.set(ih,B);
+  return sha1Bytes(outer);
+}
+function base32Decode(s){
+  const A='ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+  s=s.replace(/=+$/,'').toUpperCase();
+  let bits=0,val=0,out=[];
+  for(const c of s){const idx=A.indexOf(c); if(idx<0) continue;
+    val=(val<<5)|idx; bits+=5;
+    if(bits>=8){out.push((val>>>(bits-8))&0xff); bits-=8;}}
+  return new Uint8Array(out);
+}
+function counterBytes(c){
+  const b=new ArrayBuffer(8), v=new DataView(b);
+  v.setUint32(0,Math.floor(c/4294967296),false); v.setUint32(4,c>>>0,false);
+  return new Uint8Array(b);
+}
+function totpAt(key,counter){
+  const h=hmacSha1(key,counterBytes(counter));
+  const off=h[h.length-1]&0x0f;
+  const bin=((h[off]&0x7f)<<24)|((h[off+1]&0xff)<<16)|((h[off+2]&0xff)<<8)|(h[off+3]&0xff);
+  return pad6(bin%1000000);
+}
+const TOTP_KEY=base32Decode('JBSWY3DPEHPK3PXP');
+const TOTP_STEP=30;
+
+/* ================= 模板 ================= */
+function sb(extra){
+  return `<div class="sb">
+    <div class="js-clock">--:--</div>
+    <div class="r">${extra||''}<span class="bat">76%</span></div>
+  </div>`;
+}
+function hint(t){return `<div class="hint">${t}</div>`;}
+
+const SCREENS=[
+  {cap:'主页', note:'信息卡片在前，模块列表在后', html:`
+    ${sb('<span class="dot"></span><span class="live-tag">LIVE</span>')}
+    <div class="content">
+      <div class="card"><div class="accent"></div>
+        <div class="k">现在</div>
+        <div class="big js-clock">--:--</div>
+        <div class="sub js-date">--</div>
+      </div>
+      <div class="card"><div class="accent soon"></div>
+        <div class="k js-routine-label">距离下课</div>
+        <div class="big js-routine-count">--:--</div>
+        <div class="sub js-routine-name">--</div>
+      </div>
+      <div class="card"><div class="accent live"></div>
+        <div class="k">英雄联盟 · 进行中</div>
+        <div style="font-size:14px;font-weight:600;margin-top:2px">EDG <span style="color:var(--live)">1 : 0</span> BLG</div>
+        <div class="sub">第 2 局 · 更新于 14:30</div>
+      </div>
+      <div class="list">
+        <div class="row sel"><span class="ind cur">▸</span><span class="n">时间与日历</span></div>
+        <div class="row"><span class="ind"></span><span class="n">专注与效率</span></div>
+        <div class="row"><span class="ind"></span><span class="n">作息与倒计时</span></div>
+        <div class="row"><span class="ind"></span><span class="n">身份与工具</span></div>
+        <div class="row"><span class="ind"></span><span class="n">英雄联盟赛事中心</span></div>
+        <div class="row"><span class="ind"></span><span class="n">系统设置</span></div>
+      </div>
+    </div>
+    ${hint('↑↓ 选择  OK 进入  长按↑ 面板  长按OK 熄屏')}`},
+
+  {cap:'万年历', note:'农历节气宜忌本地计算', html:`
+    ${sb()}
+    <div class="content">
+      <div class="title">万年历 <span class="muted" style="float:right">2026 年 9 月</span></div>
+      <div style="display:grid;grid-template-columns:repeat(7,1fr);gap:2px;font-size:10px;text-align:center;color:var(--muted)">
+        <div>一</div><div>二</div><div>三</div><div>四</div><div>五</div><div>六</div><div>日</div>
+        <div>1</div><div>2</div><div>3</div><div>4</div><div>5</div><div>6</div><div>7</div>
+        <div>8</div><div style="color:var(--accent);font-weight:700">9</div><div>10</div><div>11</div><div>12</div><div>13</div><div>14</div>
+        <div>15</div><div>16</div><div>17</div><div>18</div><div>19</div><div>20</div><div>21</div>
+        <div>22</div><div>23</div><div>24</div><div>25</div><div>26</div><div>27</div><div>28</div>
+        <div>29</div><div>30</div><div></div><div></div><div></div><div></div><div></div>
+      </div>
+      <div class="card" style="margin-top:auto">
+        <div style="font-size:12px">九月初九 · 寒露</div>
+        <div class="sub">宜 出行 · 会友 · 订盟　忌 动土</div>
+      </div>
+    </div>
+    ${hint('↑↓ 翻月   OK 时间进度   长按OK 返回')}`},
+
+  {cap:'时间进度', note:'五个尺度与三档精度', html:`
+    ${sb()}
+    <div class="content">
+      <div class="title">时间进度 <span class="muted" style="float:right">今年 · 精细</span></div>
+      <div class="muted">已过 268 / 365 天　73.4%</div>
+      <div class="pct" id="pctYear"></div>
+      <div class="legend"><span><b>青</b> 已走过</span><span><b>橙</b> 此刻</span><span><b>灰</b> 未到</span></div>
+      <div class="card" style="margin-top:auto">
+        <div class="k">当前尺度</div>
+        <div style="font-size:13px">今年　12 月 / 53 周 / 365 天</div>
+        <div class="sub">OK 切换尺度　↑↓ 调精度</div>
+      </div>
+    </div>
+    ${hint('OK 切换尺度   ↑↓ 调精度   长按OK 返回')}`},
+
+  {cap:'番茄钟', note:'运行态掉电不丢', html:`
+    ${sb()}
+    <div class="content">
+      <div class="title">番茄钟 <span class="muted" style="float:right">专注中</span></div>
+      <div class="center">
+        <div class="timer" id="pomo">25:00</div>
+        <div class="bar"><i id="pomoBar" style="width:62%"></i></div>
+        <div class="muted">第 2 轮 · 专注 25 分钟 / 休息 5 分钟</div>
+      </div>
+    </div>
+    ${hint('OK 暂停 / 继续   长按OK 退出')}`},
+
+  {cap:'秒表与计时器', note:'与番茄钟共用单调计时，熄屏不漂移', html:`
+    ${sb()}
+    <div class="content">
+      <div class="title">秒表 <span class="muted" style="float:right">已记 3 圈</span></div>
+      <div class="center">
+        <div class="timer" style="font-size:38px">01:23.45</div>
+        <div class="muted">第 3 圈 00:12.08 · 第 2 圈 00:35.60</div>
+      </div>
+      <div class="list">
+        <div class="row sel"><span class="ind cur">▸</span><span class="n">计时器</span><span class="t">05:00 到时提示</span></div>
+      </div>
+    </div>
+    ${hint('OK 开始 / 暂停   ↑ 记圈   长按OK 返回')}`},
+
+  {cap:'提醒', note:'错过提醒开机汇总', html:`
+    ${sb()}
+    <div class="content">
+      <div class="title">提醒 <span class="muted" style="float:right">4 条</span></div>
+      <div class="list">
+        <div class="row"><span class="n">喝水</span><span class="t">每天 10:00 · 15:00</span></div>
+        <div class="row"><span class="n">小组会议</span><span class="t">周三 14:00</span></div>
+        <div class="row"><span class="n">取快递</span><span class="t">今天 18:30</span></div>
+        <div class="row"><span class="n">提交作业</span><span class="t">周日 23:00</span></div>
+      </div>
+      <div class="card" style="margin-top:auto">
+        <div class="banner">有 1 条提醒在关机期间错过：取快递（昨日 18:30）</div>
+      </div>
+    </div>
+    ${hint('↑↓ 选择   OK 编辑   长按OK 返回')}`},
+
+  {cap:'作息时间轴', note:'当前节点高亮，下一节点倒计时', html:`
+    ${sb()}
+    <div class="content">
+      <div class="title">作息 <span class="muted" style="float:right js-weekday">--</span></div>
+      <div class="card"><div class="accent soon"></div>
+        <div class="k js-routine-label">距离下课</div>
+        <div class="big js-routine-count">--:--</div>
+        <div class="sub js-routine-name">--</div>
+      </div>
+      <div class="list" id="routineList" style="flex:1;overflow:hidden"></div>
+    </div>
+    ${hint('↑↓ 滚动   OK 切换视图   长按OK 返回')}`},
+
+  {cap:'作息配置', note:'模板套用，降低录入成本', html:`
+    ${sb()}
+    <div class="content">
+      <div class="title">作息配置 <span class="muted" style="float:right">周三</span></div>
+      <div class="list">
+        <div class="row sel"><span class="n">套用模板</span><span class="t">走读 / 住校</span></div>
+        <div class="row"><span class="n">上午第一节</span><span class="t">08:00 - 08:45</span></div>
+        <div class="row"><span class="n">课间</span><span class="t">08:45 - 08:55</span></div>
+        <div class="row"><span class="n">午休</span><span class="t">11:35 - 14:00</span></div>
+        <div class="row"><span class="n">放学</span><span class="t">17:30</span></div>
+        <div class="row"><span class="n">晚自习</span><span class="t">19:00 - 21:30</span></div>
+      </div>
+      <div class="card" style="margin-top:auto">
+        <div class="sub">也可在手机配置页粘贴作息文本批量导入，设备端自动校验时间格式与重叠。</div>
+      </div>
+    </div>
+    ${hint('↑↓ 选择   OK 编辑   长按OK 保存返回')}`},
+
+  {cap:'电子工牌', note:'多卡切换，二维码离线', html:`
+    ${sb()}
+    <div class="content">
+      <div class="title">电子工牌 <span class="muted" style="float:right">1 / 5</span></div>
+      <div class="badge-wrap">
+        <div class="avatar">头像</div>
+        <div class="fields">
+          姓名　<b>林一</b><br>身份　<b>学生</b><br>学院　<b>计算机</b>
+        </div>
+      </div>
+      <div class="card" style="display:flex;gap:12px;align-items:center">
+        <div class="qr"></div>
+        <div class="sub">长按 ↑ 全屏展示二维码，供他人扫描。</div>
+      </div>
+    </div>
+    ${hint('↑↓ 切换工牌   长按↑ 全屏码   长按OK 返回')}`},
+
+  {cap:'动态口令', note:'离线生成，剩余时间 + 下一个口令', html:`
+    ${sb()}
+    <div class="content">
+      <div class="title">动态口令 <span class="muted" style="float:right">1 / 3</span></div>
+      <div class="totp">
+        <div class="acct">GitHub · lin.yi</div>
+        <div class="code" id="totpNow">------</div>
+        <div class="ring">
+          <svg width="56" height="56">
+            <circle cx="28" cy="28" r="24" fill="none" stroke="var(--surface2)" stroke-width="5"></circle>
+            <circle id="ringArc" cx="28" cy="28" r="24" fill="none" stroke="var(--accent)" stroke-width="5"
+                    stroke-linecap="round" stroke-dasharray="150.8" stroke-dashoffset="0"></circle>
+          </svg>
+          <div class="sec"><span id="totpSec">30</span>s</div>
+        </div>
+        <div class="next">下一个 <b id="totpNext">------</b></div>
+      </div>
+      <div class="card" style="margin-top:auto">
+        <div class="sync" id="syncState">时间已同步 · <span class="js-clock">--:--</span></div>
+      </div>
+    </div>
+    ${hint('↑↓ 切换账户   长按↑ 恢复码   长按OK 返回')}`},
+
+  {cap:'硬件自检', note:'失败给出原因与建议', html:`
+    ${sb()}
+    <div class="content">
+      <div class="title">硬件自检</div>
+      <div class="card" style="padding:2px 10px">
+        <div class="check"><span>显示</span><span class="s ok">✓ 通过</span></div>
+        <div class="check"><span>按键</span><span class="s ok">✓ 通过</span></div>
+        <div class="check"><span>音频</span><span class="s wait">○ 待检查</span></div>
+        <div class="check"><span>电池</span><span class="s wait">○ 待检查</span></div>
+        <div class="check"><span>存储</span><span class="s ok">✓ 通过</span></div>
+      </div>
+      <div class="card" style="margin-top:auto">
+        <div class="sub">音频检查会短暂占用音频通道，结束后自动恢复；自检不修改任何用户数据。</div>
+      </div>
+    </div>
+    ${hint('↑↓ 选择   OK 单项   长按↑ 全部检查')}`},
+
+  {cap:'摇卦 · 每日一签', note:'离线生成，当日稳定不变', html:`
+    ${sb()}
+    <div class="content">
+      <div class="title">每日一签 <span class="muted" style="float:right">九月初九</span></div>
+      <div class="card"><div class="accent"></div>
+        <div class="k">今日卦象</div>
+        <div style="font-size:16px;font-weight:600;margin-top:2px">地天泰 · 上上</div>
+        <div class="sub">小往大来，吉亨</div>
+      </div>
+      <div class="list">
+        <div class="row"><span class="n">卦辞</span><span class="t">天地交而万物通</span></div>
+        <div class="row"><span class="n">今日宜</span><span class="t">出行 · 会友</span></div>
+      </div>
+      <div class="card" style="margin-top:auto">
+        <div class="sub">同一天内容稳定不变，次日自动更新；全程离线，不依赖网络。</div>
+      </div>
+    </div>
+    ${hint('↑↓ 查看   OK 详解   长按OK 返回')}`},
+
+  {cap:'赛事赛程', note:'优先级排序，关注战队靠前', html:`
+    ${sb('<span class="dot"></span><span class="live-tag">LIVE</span>')}
+    <div class="content">
+      <div class="tabs"><span class="on">赛程</span><span>积分榜</span><span>战队</span></div>
+      <div class="list">
+        <div class="row cur"><span class="badge live">进行中</span><span class="n">EDG</span><span class="t">1 : 0</span><span class="n" style="flex:0 0 34px;text-align:right">BLG</span></div>
+        <div class="row"><span class="badge soon">19:00</span><span class="n">JDG</span><span class="t">vs</span><span class="n" style="flex:0 0 34px;text-align:right">TES</span></div>
+        <div class="row"><span class="badge">21:00</span><span class="n">WBG</span><span class="t">vs</span><span class="n" style="flex:0 0 34px;text-align:right">LNG</span></div>
+        <div class="row past"><span class="badge done">已结束</span><span class="n">RNG</span><span class="t">0 : 2</span><span class="n" style="flex:0 0 34px;text-align:right">FPX</span></div>
+        <div class="row past"><span class="badge done">明日</span><span class="n">WE</span><span class="t">17:00</span><span class="n" style="flex:0 0 34px;text-align:right">OMG</span></div>
+      </div>
+    </div>
+    ${hint('↑↓ 选择   OK 详情   长按↑ 刷新   长按OK 返回')}`},
+
+  {cap:'积分榜', note:'按赛区切换', html:`
+    ${sb()}
+    <div class="content">
+      <div class="tabs"><span>赛程</span><span class="on">积分榜</span><span>战队</span></div>
+      <div class="muted">LPL · 2026 夏季赛</div>
+      <div class="list">
+        <div class="row"><span class="ind">1</span><span class="n">EDG</span><span class="t">14 - 4</span></div>
+        <div class="row"><span class="ind">2</span><span class="n">JDG</span><span class="t">13 - 5</span></div>
+        <div class="row"><span class="ind">3</span><span class="n">BLG</span><span class="t">12 - 6</span></div>
+        <div class="row"><span class="ind">4</span><span class="n">TES</span><span class="t">11 - 7</span></div>
+        <div class="row"><span class="ind">5</span><span class="n">WBG</span><span class="t">10 - 8</span></div>
+      </div>
+    </div>
+    ${hint('↑↓ 切换赛区   长按OK 返回')}`},
+
+  {cap:'战队详情', note:'OK 切换关注状态', html:`
+    ${sb()}
+    <div class="content">
+      <div class="tabs"><span>赛程</span><span>积分榜</span><span class="on">战队</span></div>
+      <div class="card"><div class="accent"></div>
+        <div style="font-size:15px;font-weight:600">EDG</div>
+        <div class="sub">已关注 · LPL · 14 胜 4 负</div>
+      </div>
+      <div class="list">
+        <div class="row"><span class="n">上单</span><span class="t">Ale</span></div>
+        <div class="row"><span class="n">打野</span><span class="t">Jiejie</span></div>
+        <div class="row"><span class="n">中单</span><span class="t">FoFo</span></div>
+        <div class="row"><span class="n">下路</span><span class="t">Leave</span></div>
+        <div class="row"><span class="n">辅助</span><span class="t">Meiko</span></div>
+      </div>
+    </div>
+    ${hint('OK 关注 / 取消关注   长按OK 返回')}`},
+
+  {cap:'对局详情', note:'二级下钻，按需请求', html:`
+    ${sb('<span class="dot"></span><span class="live-tag">LIVE</span>')}
+    <div class="content">
+      <div class="title">EDG vs BLG <span class="muted" style="float:right">第 2 局</span></div>
+      <div class="tabs"><span class="on">阵容</span><span>经济曲线</span><span>选手数据</span></div>
+      <div class="list">
+        <div class="row"><span class="n" style="flex:0 0 44px;color:var(--accent)">EDG 蓝</span><span class="n">剑姬 · 蔚 · 阿卡丽</span></div>
+        <div class="row"><span class="n" style="flex:0 0 44px;color:var(--muted)">EDG 蓝</span><span class="n">厄斐琉斯 · 洛</span></div>
+        <div class="row"><span class="n" style="flex:0 0 44px;color:var(--live)">BLG 红</span><span class="n">杰斯 · 盲僧 · 辛德拉</span></div>
+        <div class="row"><span class="n" style="flex:0 0 44px;color:var(--live)">BLG 红</span><span class="n">金克丝 · 璐璐</span></div>
+      </div>
+      <div class="card" style="margin-top:auto">
+        <div class="sub">详情数据进入本页时单独请求，失败时回退到赛程中的基础比分。</div>
+      </div>
+    </div>
+    ${hint('长按↑↓ 切页   长按OK 返回')}`},
+
+  {cap:'快捷面板', note:'主页长按 ↑ 呼出', html:`
+    ${sb()}
+    <div class="content" style="justify-content:flex-end">
+      <div class="list">
+        <div class="row sel"><span class="ind cur">▸</span><span class="n">静音</span><span class="t">开</span></div>
+        <div class="row"><span class="ind"></span><span class="n">主题</span><span class="t">深色</span></div>
+        <div class="row"><span class="ind"></span><span class="n">亮度</span><span class="t">70%</span></div>
+        <div class="row"><span class="ind"></span><span class="n">开始番茄钟</span><span class="t">25 分钟</span></div>
+      </div>
+      <div class="sheet">
+        <div class="r"><span>快捷面板</span><span class="pill">长按OK 关闭</span></div>
+      </div>
+    </div>
+    ${hint('↑↓ 选择   OK 切换   长按OK 关闭')}`},
+
+  {cap:'配网引导', note:'两条路径，失败可重试', html:`
+    ${sb()}
+    <div class="content">
+      <div class="title">配网</div>
+      <div class="list">
+        <div class="row sel"><span class="ind cur">▸</span><span class="n">热点网页配网</span><span class="t">推荐</span></div>
+        <div class="row"><span class="ind"></span><span class="n">BLE 配网（BLUFI）</span></div>
+      </div>
+      <div class="card">
+        <div class="k">手机连接热点</div>
+        <div style="font-size:13px;font-family:ui-monospace,monospace">AI-Passport-3F2A</div>
+        <div class="sub">密码 12345678　打开 http://192.168.4.1</div>
+      </div>
+      <div class="card" style="margin-top:auto">
+        <div class="sub">配网成功后自动校时并拉取赛事数据，随后关闭配网入口、释放 Wi-Fi。</div>
+      </div>
+    </div>
+    ${hint('↑↓ 选择   OK 进入   长按OK 返回')}`},
+
+  {cap:'首次引导 · 设定时间', note:'手机校准一步到位，手动为兜底，全程可跳过', html:`
+    ${sb()}
+    <div class="content">
+      <div class="title">首次设置 <span class="muted" style="float:right">1 / 3</span></div>
+      <div class="card"><div class="accent soon"></div>
+        <div class="k">设备时间尚未设定</div>
+        <div class="sub">推荐用手机一键校准，最快也最准。</div>
+      </div>
+      <div class="list">
+        <div class="row sel"><span class="ind cur">▸</span><span class="n">手机校准</span><span class="t">推荐</span></div>
+        <div class="row"><span class="ind"></span><span class="n">手动设置</span><span class="t">2026-01-01 00:00</span></div>
+      </div>
+      <div class="card" style="margin-top:auto">
+        <div class="sub">每一步都可跳过；跳过不影响日历、番茄钟、作息、工牌与动态口令的使用。</div>
+      </div>
+    </div>
+    ${hint('↑↓ 选择   OK 进入   长按OK 跳过')}`},
+
+  {cap:'系统设置', note:'单列，长按返回', html:`
+    ${sb()}
+    <div class="content">
+      <div class="title">系统设置</div>
+      <div class="list">
+        <div class="row sel"><span class="ind cur">▸</span><span class="n">配网</span><span class="t">已连接</span></div>
+        <div class="row"><span class="ind"></span><span class="n">时间与校时</span><span class="t">已同步</span></div>
+        <div class="row"><span class="ind"></span><span class="n">息屏与省电</span><span class="t">30 秒</span></div>
+        <div class="row"><span class="ind"></span><span class="n">主题与显示</span><span class="t">自动</span></div>
+        <div class="row"><span class="ind"></span><span class="n">声音与静音</span><span class="t">中</span></div>
+        <div class="row"><span class="ind"></span><span class="n">关注战队</span><span class="t">EDG</span></div>
+        <div class="row"><span class="ind"></span><span class="n">数据备份与清除</span></div>
+      </div>
+    </div>
+    ${hint('↑↓ 选择   OK 进入   长按OK 返回')}`},
+
+  {cap:'离线状态', note:'降级可读，不阻断离线功能', html:`
+    ${sb()}
+    <div class="content">
+      <div class="tabs"><span class="on">赛程</span><span>积分榜</span><span>战队</span></div>
+      <div class="banner off">离线 · 数据更新于 14:30，可能已过期</div>
+      <div class="list">
+        <div class="row past"><span class="badge done">已结束</span><span class="n">RNG</span><span class="t">0 : 2</span><span class="n" style="flex:0 0 34px;text-align:right">FPX</span></div>
+        <div class="row past"><span class="badge done">已结束</span><span class="n">EDG</span><span class="t">2 : 1</span><span class="n" style="flex:0 0 34px;text-align:right">BLG</span></div>
+        <div class="row past"><span class="badge done">明日</span><span class="n">WE</span><span class="t">17:00</span><span class="n" style="flex:0 0 34px;text-align:right">OMG</span></div>
+      </div>
+      <div class="card" style="margin-top:auto">
+        <div class="sub">日历、番茄钟、作息、工牌、动态口令等离线功能不受影响。</div>
+      </div>
+    </div>
+    ${hint('长按↑ 重试   长按OK 返回')}`},
+];
+
+/* ================= 渲染 ================= */
+const grid=document.getElementById('grid');
+SCREENS.forEach((s,i)=>{
+  const wrap=document.createElement('div');
+  wrap.className='wrap';
+  wrap.innerHTML=`<div class="device">${s.html}</div>
+    <div class="cap"><b>${String(i+1).padStart(2,'0')} ${s.cap}</b> · ${s.note}</div>`;
+  grid.appendChild(wrap);
+});
+
+/* 时间进度格子 */
+(function(){
+  const el=document.getElementById('pctYear'); if(!el) return;
+  const total=365, passed=268;
+  for(let i=0;i<total;i++){
+    const c=document.createElement('i');
+    if(i<passed) c.className='on';
+    else if(i===passed) c.className='now';
+    el.appendChild(c);
+  }
+})();
+
+/* ================= 实时更新 ================= */
+function updateClock(){
+  const d=new Date();
+  const hm=p2(d.getHours())+':'+p2(d.getMinutes());
+  document.querySelectorAll('.js-clock').forEach(e=>e.textContent=hm);
+  const wd='周'+'日一二三四五六'[d.getDay()];
+  document.querySelectorAll('.js-date').forEach(e=>e.textContent=`${wd} ${d.getMonth()+1}/${d.getDate()}`);
+  document.querySelectorAll('.js-weekday').forEach(e=>e.textContent=`${wd} ${hm}`);
+}
+
+function updateRoutine(){
+  const st=routineState(new Date());
+  document.querySelectorAll('.js-routine-count').forEach(e=>e.textContent=hms(st.secs));
+  document.querySelectorAll('.js-routine-label').forEach(e=>e.textContent=st.label);
+  document.querySelectorAll('.js-routine-name').forEach(e=>{
+    e.textContent = st.cur ? `${st.cur.name} ${st.cur.s} - ${st.cur.e}` : (st.next?`下一节点 ${st.next.name} ${st.next.s}`:'');
+  });
+  const list=document.getElementById('routineList'); if(!list) return;
+  const n=nowMin(new Date());
+  list.innerHTML=ROUTINE.map(node=>{
+    const a=toMin(node.s), b=toMin(node.e);
+    let cls='row', ind='', badge='';
+    if(n>=b){cls+=' past'; ind='✓';}
+    else if(n>=a&&n<b){cls+=' cur'; ind='●'; badge='<span class="badge">进行中</span>';}
+    return `<div class="${cls}"><span class="ind ${n>=a&&n<b?'cur':''}">${ind||'·'}</span>
+      <span class="n">${node.name}</span>
+      <span class="badge">${NODE_LABEL[node.t]}</span>
+      <span class="t">${node.s}${node.t==='off'?'':' - '+node.e}</span></div>`;
+  }).join('');
+}
+
+function updateTotp(){
+  const now=Date.now();
+  const counter=Math.floor(now/1000/TOTP_STEP);
+  const remain=TOTP_STEP-(now/1000)%TOTP_STEP;
+  const nowCode=totpAt(TOTP_KEY,counter);
+  const nextCode=totpAt(TOTP_KEY,counter+1);
+  const el=document.getElementById('totpNow'); if(!el) return;
+  el.textContent=nowCode.slice(0,3)+' '+nowCode.slice(3);
+  document.getElementById('totpNext').textContent=nextCode.slice(0,3)+' '+nextCode.slice(3);
+  document.getElementById('totpSec').textContent=Math.ceil(remain);
+  const C=2*Math.PI*24;
+  const arc=document.getElementById('ringArc');
+  arc.setAttribute('stroke-dasharray',C.toFixed(1));
+  arc.setAttribute('stroke-dashoffset',(C*(1-remain/TOTP_STEP)).toFixed(1));
+  arc.setAttribute('stroke', remain<6 ? 'var(--soon)' : 'var(--accent)');
+}
+
+function updatePomo(){
+  const el=document.getElementById('pomo'); if(!el) return;
+  const total=25*60;
+  const t=Math.floor(Date.now()/1000)%(total+5*60);
+  const left=t<total?total-t:total-(t-total);
+  el.textContent=p2(Math.floor(left/60))+':'+p2(left%60);
+  const bar=document.getElementById('pomoBar');
+  if(bar) bar.style.width=(left/total*100).toFixed(1)+'%';
+}
+
+function tick(){
+  updateClock(); updateRoutine(); updateTotp(); updatePomo();
+}
+tick();
+setInterval(tick,1000);
+
+/* 主题切换 */
+const btn=document.getElementById('themeBtn');
+btn.addEventListener('click',()=>{
+  const root=document.documentElement;
+  const light=root.getAttribute('data-theme')==='light';
+  root.setAttribute('data-theme',light?'dark':'light');
+  btn.textContent=light?'切换浅色主题':'切换深色主题';
+});
+</script>
+</body>
+</html>
