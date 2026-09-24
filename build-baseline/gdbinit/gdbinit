@@ -1,0 +1,2 @@
+source /workspace/build-baseline/gdbinit/symbols
+source /workspace/build-baseline/gdbinit/connect

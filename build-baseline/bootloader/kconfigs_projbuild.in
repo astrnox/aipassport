@@ -1,0 +1,5 @@
+source "/root/esp/esp-idf-v5.5.3/components/bootloader/Kconfig.projbuild"
+source "/root/esp/esp-idf-v5.5.3/components/esp_app_format/Kconfig.projbuild"
+source "/root/esp/esp-idf-v5.5.3/components/esp_rom/Kconfig.projbuild"
+source "/root/esp/esp-idf-v5.5.3/components/esptool_py/Kconfig.projbuild"
+source "/root/esp/esp-idf-v5.5.3/components/partition_table/Kconfig.projbuild"

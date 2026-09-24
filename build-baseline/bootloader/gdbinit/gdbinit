@@ -1,0 +1,2 @@
+source /workspace/build-baseline/bootloader/gdbinit/symbols
+source /workspace/build-baseline/bootloader/gdbinit/connect

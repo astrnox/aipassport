@@ -1,0 +1,43 @@
+{
+	"sources" : 
+	[
+		{
+			"file" : "/workspace/build-baseline/CMakeFiles/bootloader"
+		},
+		{
+			"file" : "/workspace/build-baseline/CMakeFiles/bootloader.rule"
+		},
+		{
+			"file" : "/workspace/build-baseline/CMakeFiles/bootloader-complete.rule"
+		},
+		{
+			"file" : "/workspace/build-baseline/bootloader-prefix/src/bootloader-stamp/bootloader-build.rule"
+		},
+		{
+			"file" : "/workspace/build-baseline/bootloader-prefix/src/bootloader-stamp/bootloader-configure.rule"
+		},
+		{
+			"file" : "/workspace/build-baseline/bootloader-prefix/src/bootloader-stamp/bootloader-download.rule"
+		},
+		{
+			"file" : "/workspace/build-baseline/bootloader-prefix/src/bootloader-stamp/bootloader-install.rule"
+		},
+		{
+			"file" : "/workspace/build-baseline/bootloader-prefix/src/bootloader-stamp/bootloader-mkdir.rule"
+		},
+		{
+			"file" : "/workspace/build-baseline/bootloader-prefix/src/bootloader-stamp/bootloader-patch.rule"
+		},
+		{
+			"file" : "/workspace/build-baseline/bootloader-prefix/src/bootloader-stamp/bootloader-update.rule"
+		}
+	],
+	"target" : 
+	{
+		"labels" : 
+		[
+			"bootloader"
+		],
+		"name" : "bootloader"
+	}
+}
