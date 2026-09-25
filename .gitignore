@@ -1,4 +1,5 @@
 build/
+build-baseline/
 sdkconfig
 sdkconfig.old
 managed_components/
