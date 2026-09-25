@@ -339,6 +339,9 @@ lv_obj_t *ui_card_create(lv_obj_t *parent, int x, int y, int w, int h, uint32_t 
     if (accent != 0) {
         lv_obj_t *bar = lv_obj_create(card);
         lv_obj_remove_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
+        // LVGL 9 的 flex/grid 布局会覆盖 lv_obj_set_pos 设置的坐标；accent bar
+        // 是纯装饰条，必须钉在 (0,0)，所以用 FLOATING 把它排除在布局之外。
+        lv_obj_add_flag(bar, LV_OBJ_FLAG_FLOATING);
         lv_obj_set_pos(bar, 0, 0);
         lv_obj_set_size(bar, 3, h);
         lv_obj_set_style_bg_color(bar, lv_color_hex(accent), 0);
@@ -413,6 +416,9 @@ ui_row_t ui_row_create(lv_obj_t *parent, const char *title, const char *value)
 
     row.indicator = lv_obj_create(obj);
     lv_obj_remove_flag(row.indicator, LV_OBJ_FLAG_SCROLLABLE);
+    // 选中指示条是装饰元素，钉在行左侧；若行将来被设为 flex 容器，
+    // 需要 FLOATING 才能不被布局重新排列。
+    lv_obj_add_flag(row.indicator, LV_OBJ_FLAG_FLOATING);
     lv_obj_set_pos(row.indicator, 0, 4);
     lv_obj_set_size(row.indicator, 3, UI_ROW_H - 8);
     lv_obj_set_style_bg_color(row.indicator, lv_color_hex(ui_c_accent()), 0);
