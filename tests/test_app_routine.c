@@ -11,38 +11,139 @@ static void test_templates(void)
     app_routine_t r;
 
     app_routine_init(&r);
-    assert(r.days[0].count == 0);
-    assert(r.days[6].count == 0);
+    assert(r.days[0][0].count == 0);
+    assert(r.days[0][6].count == 0);
 
-    // 走读模板：工作日填满、周末留空、且有序不重叠。
+    // 走读模板：工作日填满、周末留空、且有序不重叠。单周与双周两套都填同一模板。
     app_routine_load_template(&r, false);
-    assert(r.days[0].count == 0);
-    assert(r.days[6].count == 0);
-    for (int d = 1; d <= 5; d++) {
-        assert(r.days[d].count == 14);
-        assert(app_routine_validate(&r.days[d]));
+    for (int slot = 0; slot < APP_ROUTINE_WEEKS; slot++) {
+        assert(r.days[slot][0].count == 0);
+        assert(r.days[slot][6].count == 0);
+        for (int d = 1; d <= 5; d++) {
+            assert(r.days[slot][d].count == 14);
+            assert(app_routine_validate(&r.days[slot][d]));
+        }
     }
-    assert(r.days[1].nodes[0].type == APP_NODE_ARRIVE);
-    assert(r.days[1].nodes[1].start_min == 480);
-    assert(r.days[1].nodes[1].end_min == 525);
-    assert(r.days[1].nodes[1].type == APP_NODE_CLASS);
-    assert(strcmp(r.days[1].nodes[1].name, "第一节") == 0);
-    assert(r.days[1].nodes[13].type == APP_NODE_LEAVE);
+    assert(r.days[0][1].nodes[0].type == APP_NODE_ARRIVE);
+    assert(r.days[0][1].nodes[1].start_min == 480);
+    assert(r.days[0][1].nodes[1].end_min == 525);
+    assert(r.days[0][1].nodes[1].type == APP_NODE_CLASS);
+    assert(strcmp(r.days[0][1].nodes[1].name, "第一节") == 0);
+    assert(r.days[0][1].nodes[13].type == APP_NODE_LEAVE);
 
     // 住校模板：在工作日基础上多两节晚自习。
     app_routine_load_template(&r, true);
-    assert(r.days[0].count == 0);
-    assert(r.days[6].count == 0);
-    for (int d = 1; d <= 5; d++) {
-        assert(r.days[d].count == 16);
-        assert(app_routine_validate(&r.days[d]));
+    for (int slot = 0; slot < APP_ROUTINE_WEEKS; slot++) {
+        assert(r.days[slot][0].count == 0);
+        assert(r.days[slot][6].count == 0);
+        for (int d = 1; d <= 5; d++) {
+            assert(r.days[slot][d].count == 16);
+            assert(app_routine_validate(&r.days[slot][d]));
+        }
     }
     bool has_study = false;
-    for (int i = 0; i < r.days[3].count; i++) {
-        if (r.days[3].nodes[i].type == APP_NODE_STUDY) has_study = true;
+    for (int i = 0; i < r.days[0][3].count; i++) {
+        if (r.days[0][3].nodes[i].type == APP_NODE_STUDY) has_study = true;
     }
     assert(has_study);
-    assert(r.days[3].nodes[r.days[3].count - 1].type == APP_NODE_LEAVE);
+    assert(r.days[0][3].nodes[r.days[0][3].count - 1].type == APP_NODE_LEAVE);
+}
+
+static void test_week_slot(void)
+{
+    // ISO 第 1 周为单周，第 2 周为双周，之后奇偶交替。
+    assert(app_routine_week_slot(1) == 0);
+    assert(app_routine_week_slot(2) == 1);
+    assert(app_routine_week_slot(3) == 0);
+    assert(app_routine_week_slot(52) == 1);
+    assert(app_routine_week_slot(53) == 0);
+    // 时间未校准（<=0）时回落单周表，保证仍有作息可展示。
+    assert(app_routine_week_slot(0) == 0);
+    assert(app_routine_week_slot(-1) == 0);
+}
+
+static void test_day_access(void)
+{
+    app_routine_t r;
+    app_routine_load_template(&r, false);
+
+    // 越界返回 NULL，合法下标取到对应套别与星期。
+    assert(app_routine_day_get(&r, -1, 0) == NULL);
+    assert(app_routine_day_get(&r, 7, 0) == NULL);
+    assert(app_routine_day_get(&r, 0, -1) == NULL);
+    assert(app_routine_day_get(&r, 0, APP_ROUTINE_WEEKS) == NULL);
+    assert(app_routine_day_get(NULL, 1, 0) == NULL);
+    assert(app_routine_day_get(&r, 1, 0) == &r.days[0][1]);
+    assert(app_routine_day_get(&r, 1, 1) == &r.days[1][1]);
+
+    // mut 与 get 指向同一块数据，写入对两套表相互独立。
+    app_routine_day_t *d0 = app_routine_day_mut(&r, 3, 0);
+    app_routine_day_t *d1 = app_routine_day_mut(&r, 3, 1);
+    assert(d0 && d1 && d0 != d1);
+    memset(d0, 0, sizeof(*d0));
+    assert(app_routine_day_get(&r, 3, 0)->count == 0);
+    assert(app_routine_day_get(&r, 3, 1)->count == 14);   // 走读模板 14 节
+    assert(app_routine_day_mut(&r, 9, 0) == NULL);
+}
+
+static void test_parse_table(void)
+{
+    app_routine_t r;
+    app_routine_init(&r);
+
+    // 无指令行时写入单周表的全部七天。
+    const char *plain = "08:00-08:45 第一节\n09:00-09:40 第二节\n";
+    bool has_alt = true;
+    assert(app_routine_parse_table(&r, plain, &has_alt) == 2);
+    assert(!has_alt);
+    for (int wd = 0; wd < APP_ROUTINE_DAYS; wd++) {
+        assert(r.days[0][wd].count == 2);
+        assert(r.days[0][wd].nodes[0].start_min == 480);
+    }
+    assert(r.days[1][1].count == 0);   // 双周表未被写入
+
+    // @双周 / @单周 切换套别，@周X 收窄到某一天。
+    app_routine_init(&r);
+    const char *multi =
+        "# 单周表\n"
+        "@单周\n"
+        "@周一\n"
+        "07:50-08:00 到校\n"
+        "08:00-08:45 第一节\n"
+        "@双周\n"
+        "09:00-09:40 双周第一节\n";
+    has_alt = false;
+    assert(app_routine_parse_table(&r, multi, &has_alt) == 3);
+    assert(has_alt);
+    assert(r.days[0][1].count == 2);          // 单周只写了周一
+    assert(r.days[0][2].count == 0);
+    assert(r.days[0][1].nodes[0].type == APP_NODE_ARRIVE);
+    for (int wd = 0; wd < APP_ROUTINE_DAYS; wd++) {
+        assert(r.days[1][wd].count == 1);     // 双周写满七天
+        assert(r.days[1][wd].nodes[0].start_min == 540);
+    }
+
+    // 重叠行被拒绝且不计入条数；"星期X" 写法与 "周X" 等价。
+    app_routine_init(&r);
+    const char *dup =
+        "@单周\n"
+        "@星期一\n"
+        "08:00-08:45 第一节\n"
+        "08:30-09:00 重叠\n"
+        "星期三\n"
+        "10:00-10:45 第三节\n";
+    has_alt = false;
+    assert(app_routine_parse_table(&r, dup, &has_alt) == 2);
+    assert(!has_alt);
+    assert(r.days[0][1].count == 1);
+    assert(r.days[0][3].count == 1);
+    assert(r.days[0][2].count == 0);
+
+    // 空文本与非法行都不产生数据。
+    assert(app_routine_parse_table(&r, "", NULL) == 0);
+    assert(app_routine_parse_table(&r, "# 只有注释\n这不是数据\n", NULL) == 0);
+    assert(app_routine_parse_table(NULL, "08:00-09:00 x\n", NULL) == 0);
+    assert(app_routine_parse_table(&r, NULL, NULL) == 0);
 }
 
 static void test_add_remove(void)
@@ -245,6 +346,9 @@ static void test_parse_text(void)
 int main(void)
 {
     test_templates();
+    test_week_slot();
+    test_day_access();
+    test_parse_table();
     test_add_remove();
     test_status();
     test_parse_line();

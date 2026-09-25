@@ -136,6 +136,25 @@ int app_time_day_of_year(int year, int month, int day)
     return doy;
 }
 
+int app_time_iso_week(int year, int month, int day)
+{
+    if (!date_valid(year, month, day)) return 0;
+
+    // ISO 8601：周一为一周之始。把目标日按"周四"归一：同一周内周四的年份即为
+    // 该周的 ISO 年；年内第几个周四即为周序号。这样 12 月末与 1 月初的跨年周
+    // 自动落到正确的年份与序号，不需要单独处理 53 周与年初的边角情况。
+    int wd = app_time_weekday(year, month, day);   // 0=周日
+    int iso_wd = (wd == 0) ? 7 : wd;               // 1=周一 .. 7=周日
+    long days = days_from_civil(year, month, day) + (4 - iso_wd);
+
+    int ty, tm, td;
+    civil_from_days(days, &ty, &tm, &td);
+    if (ty < 1970 || ty > 2099) return 0;
+
+    int doy = app_time_day_of_year(ty, tm, td);
+    return (doy - 1) / 7 + 1;
+}
+
 bool app_time_valid(const app_datetime_t *dt)
 {
     if (!dt) return false;

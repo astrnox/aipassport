@@ -91,21 +91,21 @@ static void render_routine(void)
 
     app_datetime_t now = app_state_now();
     int wd = app_time_weekday(now.year, now.month, now.day);
-    app_routine_t *r = app_state_routine();
-    if (!r || wd < 0 || wd >= APP_ROUTINE_DAYS) {
+    const app_routine_day_t *day = app_state_routine_day(wd);
+    if (!day) {
         lv_label_set_text(s.routine_title, "暂无作息表");
         lv_label_set_text(s.routine_sub, "进入作息模块可套用模板");
         return;
     }
 
     app_routine_status_t st;
-    app_routine_status(&r->days[wd], now.hour * 60 + now.minute, now.second, &st);
+    app_routine_status(day, now.hour * 60 + now.minute, now.second, &st);
 
     char cd[16];
     if (st.pos == APP_ROUTINE_IN_NODE) {
-        const app_routine_node_t *cur = &r->days[wd].nodes[st.current_index];
+        const app_routine_node_t *cur = &day->nodes[st.current_index];
         if (st.next_index >= 0) {
-            const app_routine_node_t *nx = &r->days[wd].nodes[st.next_index];
+            const app_routine_node_t *nx = &day->nodes[st.next_index];
             char title[40];
             snprintf(title, sizeof(title), "距离%s", nx->name);
             lv_label_set_text(s.routine_title, title);
@@ -121,7 +121,7 @@ static void render_routine(void)
         snprintf(sub, sizeof(sub), "%s %s - %s", cur->name, t1, t2);
         lv_label_set_text(s.routine_sub, sub);
     } else if (st.pos == APP_ROUTINE_BETWEEN && st.next_index >= 0) {
-        const app_routine_node_t *nx = &r->days[wd].nodes[st.next_index];
+        const app_routine_node_t *nx = &day->nodes[st.next_index];
         char title[40];
         snprintf(title, sizeof(title), "距离%s", nx->name);
         lv_label_set_text(s.routine_title, title);

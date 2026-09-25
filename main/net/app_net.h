@@ -70,6 +70,15 @@ const char       *app_net_esports_error(void);
 // 主动结束拉取并释放 Wi-Fi（退出赛事中心时调用）。
 void              app_net_esports_stop(void);
 
+// 异步拉取单场对局详情（阵容 / 经济 / 选手）写入 app_state_esports()->detail。
+// 需要 match_id（赛程里的比赛 id）。运行中重复调用会被忽略；若赛程拉取正在跑，
+// 会等它结束后再开始，避免同时占用 Wi-Fi 与内存。结果可能只有阵容——接口对
+// 已结束多时的比赛不再返回采样帧。
+void              app_net_esport_detail_fetch(const char *match_id);
+app_fetch_state_t app_net_esport_detail_state(void);
+// 上次失败原因（简短中文），成功或未开始返回 NULL。
+const char       *app_net_esport_detail_error(void);
+
 // 赛区（league）列表：从 getLeagues 拉取后缓存在内存中，供积分榜切换。
 void        app_net_leagues_fetch(void);
 int         app_net_league_count(void);

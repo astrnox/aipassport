@@ -161,6 +161,23 @@ int main(void)
     app_lunar_yi_ji(2026, 9, 24, one, sizeof(one), ji, sizeof(ji));
     assert(one[0] == '\0');
 
+    // ---- ISO 8601 周序号 ----
+    // 2026-01-01 是周四，因此它所在的那一周（2025-12-29 起）是第 1 周。
+    assert(app_time_iso_week(2026, 1, 1) == 1);
+    assert(app_time_iso_week(2026, 1, 4) == 1);    // 周日仍属第 1 周
+    assert(app_time_iso_week(2026, 1, 5) == 2);    // 周一开始第 2 周
+    assert(app_time_iso_week(2025, 12, 29) == 1);  // 跨年周归入 2026 年第 1 周
+    assert(app_time_iso_week(2027, 1, 1) == 53);   // 2026 年最后一周
+    assert(app_time_iso_week(2026, 12, 31) == 53);
+    assert(app_time_iso_week(2026, 9, 21) == 39);
+    assert(app_time_iso_week(2026, 9, 27) == 39);  // 同一周的周日
+    assert(app_time_iso_week(2026, 9, 28) == 40);
+    assert(app_time_iso_week(2000, 1, 1) == 52);   // 周六，属 1999 年第 52 周
+    assert(app_time_iso_week(1970, 1, 1) == 1);
+    // 非法日期返回 0。
+    assert(app_time_iso_week(2026, 2, 30) == 0);
+    assert(app_time_iso_week(2026, 13, 1) == 0);
+
     // ---- 时间进度：全部 5 尺度 × 3 精度 ----
     app_datetime_t now = {2026, 9, 24, 13, 45, 30};
     for (int s = 0; s < (int)APP_SCALE_COUNT; s++) {

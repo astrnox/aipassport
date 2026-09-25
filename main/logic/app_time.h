@@ -47,6 +47,9 @@ bool app_time_is_leap_year(int year);
 int  app_time_days_in_month(int year, int month);
 int  app_time_weekday(int year, int month, int day);        // 0=周日 .. 6=周六
 int  app_time_day_of_year(int year, int month, int day);    // 1 起
+// ISO 8601 周序号（1..53）：周一为一周之始，含 1 月 4 日的那一周为第 1 周。
+// 单双周作息用它判断本周是单周还是双周。日期非法时返回 0。
+int  app_time_iso_week(int year, int month, int day);
 bool app_time_valid(const app_datetime_t *dt);
 bool app_time_add_days(int year, int month, int day, int delta, int *oy, int *om, int *od);
 bool app_time_add_months(int year, int month, int delta, int *oy, int *om);

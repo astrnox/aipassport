@@ -6,7 +6,8 @@
 //    后台刷新，弱网下不会长时间空屏；拉取结果返回后由 tick() 原地重绘。
 //  - 离线降级：顶部横幅标注数据新鲜度（离线/正在刷新/失败原因），失败提供"长按↑重试"。
 //  - 优先级排序：赛程列表调用 app_esport_sort() 排序后渲染，进行中最高、已结束最弱。
-//  - 二级下钻：单场详情为本页内部视图，不新增文件、不请求详情接口，只回退展示缓存比分。
+//  - 二级下钻：单场详情为本页内部视图，进入时单独请求一次对局详情（app_net_esport_detail_fetch），
+//    拿到阵容/经济/选手后原地重绘；请求失败或接口无数据时回退到缓存比分，并说明原因。
 //
 // 按键约定（底部提示条如实写明）：
 //   根列表  短按 UP/DOWN 移动或切换赛区，短按 OK 主操作，长按 OK 返回主页，
@@ -38,6 +39,19 @@ enum {
     TAB_STANDINGS,
     TAB_TEAMS,
     TAB_COUNT,
+};
+
+// 详情子页下标（阵容/经济/选手）。
+enum {
+    DETAIL_LINEUP = 0,
+    DETAIL_GOLD,
+    DETAIL_PLAYERS,
+    DETAIL_TAB_COUNT,
+};
+
+// 位置中文名，索引与 app_esport_role_t 对齐。
+static const char *const ROLE_NAMES[APP_ROLE_UNKNOWN + 1] = {
+    "上单", "打野", "中单", "下路", "辅助", "—",
 };
 
 // 底部提示条文案。受 240px 宽度限制，尽量压缩空格但保留每个按键含义。
@@ -78,6 +92,8 @@ typedef struct {
     int       sig_leagues;                       // 上次见到的赛区列表条数
     int       sig_state;                         // 上次见到的拉取状态
     bool      sig_valid;                         // 上次见到的缓存有效性
+    int       detail_sig_state;                  // 上次见到的详情拉取状态
+    int       detail_sig_fetched;                // 上次见到的详情更新时刻
 } esports_ui_t;
 
 static esports_ui_t s;
@@ -380,22 +396,193 @@ static void render_teams(void)
     apply_selection();
 }
 
-// 单场详情二级视图：标题 + 三个子页；本期不请求详情接口，只回退展示缓存比分。
+// 取当前进入比赛的详情；尚未加载或属于其它比赛时返回 NULL。
+static const app_esport_detail_t *current_detail(void)
+{
+    const app_esport_cache_t *c = app_state_esports();
+    if (!c->detail.valid) return NULL;
+    if (strcmp(c->detail.match_id, s.detail.id) != 0) return NULL;
+    return &c->detail;
+}
+
+// 金币转 "45.2k"；不足 1000 时直接给整数，避免出现 "0.5k" 这种不好读的写法。
+static void fmt_gold(int gold, char *buf, size_t cap)
+{
+    if (gold < 1000) snprintf(buf, cap, "%d", gold);
+    else snprintf(buf, cap, "%d.%dk", gold / 1000, (gold % 1000) / 100);
+}
+
+// 阵容页：两队各 5 人，标题为"位置 英雄"，右侧为选手名。
+static void render_detail_lineup(const app_esport_detail_t *d)
+{
+    const char *const names[2] = { s.detail.team_a, s.detail.team_b };
+    const app_esport_player_t *sides[2] = { d->team_a, d->team_b };
+
+    for (int t = 0; t < 2; t++) {
+        lv_obj_t *hl = ui_label_create(s.page.content, names[t], ui_font_body,
+                                       t == 0 ? ui_c_live() : ui_c_soon());
+        lv_obj_set_style_pad_left(hl, 4, 0);
+        for (int i = 0; i < APP_ESPORT_TEAM_PLAYERS; i++) {
+            const char *role = ROLE_NAMES[sides[t][i].role];
+            const char *champ = sides[t][i].champion[0] ? sides[t][i].champion : "—";
+            const char *player = sides[t][i].player[0] ? sides[t][i].player : "—";
+            char title[40];
+            snprintf(title, sizeof(title), "%s %s", role, champ);
+            ui_row_create(s.page.content, title, player);
+        }
+    }
+
+    // 接口不提供禁用名单：明确说明，避免用户以为漏显示。
+    lv_obj_t *note = ui_label_create(s.page.content, "禁用名单接口未提供",
+                                     ui_font_hint, ui_c_dim());
+    lv_obj_set_width(note, LV_PCT(100));
+    lv_obj_set_style_text_align(note, LV_TEXT_ALIGN_CENTER, 0);
+}
+
+// 经济曲线：两队经济差随时间的走势，中线为均势。采样点不足 2 个时不绘制。
+static void render_gold_curve(const app_esport_detail_t *d)
+{
+    int n = d->gold_points;
+    if (n < 2) return;
+    if (n > APP_ESPORT_GOLD_POINTS) n = APP_ESPORT_GOLD_POINTS;
+
+    // 点数组必须存活到控件销毁，用静态存储；每次重绘都会重建控件并重填。
+    static lv_point_precise_t pts[APP_ESPORT_GOLD_POINTS];
+
+    const int w = UI_W - 2 * UI_MARGIN_X - 24;
+    const int h = 56;
+    int max_abs = 1;
+    for (int i = 0; i < n; i++) {
+        int diff = d->gold_a[i] - d->gold_b[i];
+        if (diff < 0) diff = -diff;
+        if (diff > max_abs) max_abs = diff;
+    }
+    for (int i = 0; i < n; i++) {
+        int diff = d->gold_a[i] - d->gold_b[i];
+        pts[i].x = (w * i) / (n - 1);
+        pts[i].y = h / 2 - (diff * (h / 2 - 2)) / max_abs;   // 折线在上=team_a 领先
+    }
+
+    lv_obj_t *box = lv_obj_create(s.page.content);
+    lv_obj_remove_flag(box, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(box, w, h);
+    lv_obj_set_style_bg_opa(box, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(box, 0, 0);
+    lv_obj_set_style_pad_all(box, 0, 0);
+
+    lv_obj_t *line = lv_line_create(box);
+    lv_line_set_points(line, pts, n);
+    lv_obj_set_style_line_width(line, 2, 0);
+    lv_obj_set_style_line_color(line, lv_color_hex(ui_c_accent()), 0);
+    lv_obj_set_style_line_rounded(line, true, 0);
+}
+
+// 经济页：两队总经济对比条 + 经济差曲线 + 采样说明。
+static void render_detail_gold(const app_esport_detail_t *d)
+{
+    int ga = 0, gb = 0;
+    for (int i = 0; i < APP_ESPORT_TEAM_PLAYERS; i++) {
+        ga += d->team_a[i].gold;
+        gb += d->team_b[i].gold;
+    }
+
+    if (ga <= 0 && gb <= 0) {
+        ui_empty_create(s.page.content, "暂无经济数据",
+                        "接口只对进行中的对局返回实时经济");
+        return;
+    }
+
+    const char *const names[2] = { s.detail.team_a, s.detail.team_b };
+    const int totals[2] = { ga, gb };
+    const uint32_t colors[2] = { ui_c_live(), ui_c_soon() };
+    const int total = ga + gb;
+
+    for (int t = 0; t < 2; t++) {
+        char gold[16];
+        char buf[40];
+        fmt_gold(totals[t], gold, sizeof(gold));
+        snprintf(buf, sizeof(buf), "%s  %s", names[t], gold);
+        lv_obj_t *l = ui_label_create(s.page.content, buf, ui_font_body, colors[t]);
+        lv_obj_set_style_pad_left(l, 4, 0);
+
+        lv_obj_t *bar = ui_progress_create(s.page.content, UI_W - 2 * UI_MARGIN_X, 8,
+                                           colors[t]);
+        if (total > 0) ui_progress_set(bar, totals[t] * 1000 / total);
+    }
+
+    // 中文全角括号加固定文案约 41 字节,再留出队名(15 字节)与结尾,48 字节放不下。
+    char note[64];
+    const char *text = "采样点不足，暂不显示经济走势";
+    if (d->gold_points >= 2) {
+        snprintf(note, sizeof(note), "经济差走势（上方为 %s 领先）", s.detail.team_a);
+        text = note;
+    }
+    lv_obj_t *nl = ui_label_create(s.page.content, text, ui_font_hint, ui_c_dim());
+    lv_obj_set_width(nl, LV_PCT(100));
+    lv_obj_set_style_text_align(nl, LV_TEXT_ALIGN_CENTER, 0);
+
+    render_gold_curve(d);
+}
+
+// 选手页：每人一行"选手名"与"K/D/A 金币"。
+static void render_detail_players(const app_esport_detail_t *d)
+{
+    bool have = false;
+    for (int i = 0; i < APP_ESPORT_TEAM_PLAYERS; i++) {
+        const app_esport_player_t *p = &d->team_a[i];
+        const app_esport_player_t *q = &d->team_b[i];
+        if (p->gold || p->kills || p->deaths || p->assists ||
+            q->gold || q->kills || q->deaths || q->assists) {
+            have = true;
+            break;
+        }
+    }
+    if (!have) {
+        ui_empty_create(s.page.content, "暂无选手数据",
+                        "接口只对进行中的对局返回实时数据");
+        return;
+    }
+
+    const char *const names[2] = { s.detail.team_a, s.detail.team_b };
+    const app_esport_player_t *sides[2] = { d->team_a, d->team_b };
+    for (int t = 0; t < 2; t++) {
+        lv_obj_t *hl = ui_label_create(s.page.content, names[t], ui_font_body,
+                                       t == 0 ? ui_c_live() : ui_c_soon());
+        lv_obj_set_style_pad_left(hl, 4, 0);
+        for (int i = 0; i < APP_ESPORT_TEAM_PLAYERS; i++) {
+            const app_esport_player_t *p = &sides[t][i];
+            char title[32];
+            char value[24];
+            char gold[16];
+            snprintf(title, sizeof(title), "%s %s",
+                     ROLE_NAMES[p->role], p->player[0] ? p->player : "—");
+            fmt_gold(p->gold, gold, sizeof(gold));
+            snprintf(value, sizeof(value), "%d/%d/%d %s",
+                     p->kills, p->deaths, p->assists, gold);
+            ui_row_create(s.page.content, title, value);
+        }
+    }
+}
+
+// 单场详情二级视图：比分卡常显，三个子页按需展示阵容/经济/选手。
 static void render_detail(void)
 {
     const app_esport_match_t *m = &s.detail;
+    const app_esport_detail_t *d = current_detail();
 
     char title[40];
     char right[24];
     snprintf(title, sizeof(title), "%s vs %s", m->team_a, m->team_b);
-    snprintf(right, sizeof(right), "第%d局", m->score_a + m->score_b + 1);
+    int game_no = (d && d->game_number > 0) ? d->game_number
+                                           : m->score_a + m->score_b + 1;
+    snprintf(right, sizeof(right), "第%d局", game_no);
     ui_header_create(s.page.content, title, right, NULL, NULL);
 
-    static const char *const SUB_NAMES[TAB_COUNT] = { "阵容", "经济", "选手" };
-    s.tabs = ui_tabs_create(s.page.content, SUB_NAMES, TAB_COUNT);
+    static const char *const SUB_NAMES[DETAIL_TAB_COUNT] = { "阵容", "经济", "选手" };
+    s.tabs = ui_tabs_create(s.page.content, SUB_NAMES, DETAIL_TAB_COUNT);
     ui_tabs_select(s.tabs, s.detail_tab);
 
-    // 基础比分卡：展示级数字仅含 ASCII，符合字体约束。
+    // 基础比分卡：展示级数字仅含 ASCII，符合字体约束。详情拿不到时它就是全部信息。
     lv_obj_t *card = ui_card_create(s.page.content, 0, 0, UI_W - 2 * UI_MARGIN_X, 66,
                                     match_state_color(m, (int)app_state_now_unix()));
     char score[32];
@@ -405,20 +592,39 @@ static void render_detail(void)
     lv_obj_t *nl = ui_label_create(card, title, ui_font_hint, ui_c_dim());
     lv_obj_align(nl, LV_ALIGN_BOTTOM_MID, 0, -6);
 
-    if (s.detail_tab == 0) {
-        // 阵容页：用两队名做占位，明确标注数据暂不可用。
-        char a[24];
-        char b[24];
-        snprintf(a, sizeof(a), "%s 阵容", m->team_a);
-        snprintf(b, sizeof(b), "%s 阵容", m->team_b);
-        ui_row_create(s.page.content, a, "暂不可用");
-        ui_row_create(s.page.content, b, "暂不可用");
+    if (!d) {
+        // 未拿到详情：按拉取状态说明原因，而不是空白或假数据。
+        char msg[80];
+        const char *note = "对局详情尚未加载";
+        uint32_t col = ui_c_dim();
+        app_fetch_state_t st = app_net_esport_detail_state();
+        if (st == APP_FETCH_RUNNING) {
+            note = "正在加载对局详情…";
+            col = ui_c_accent();
+        } else if (st == APP_FETCH_FAILED) {
+            const char *e = app_net_esport_detail_error();
+            snprintf(msg, sizeof(msg), "详情加载失败：%s", e ? e : "网络错误");
+            note = msg;
+            col = ui_c_warn();
+        }
+
+        lv_obj_t *note_lbl = ui_label_create(s.page.content, note, ui_font_hint, col);
+        lv_obj_set_width(note_lbl, LV_PCT(100));
+        lv_obj_set_style_text_align(note_lbl, LV_TEXT_ALIGN_CENTER, 0);
+
+        lv_obj_t *tip = ui_label_create(s.page.content, "退出后重新进入可重试",
+                                        ui_font_hint, ui_c_dim());
+        lv_obj_set_width(tip, LV_PCT(100));
+        lv_obj_set_style_text_align(tip, LV_TEXT_ALIGN_CENTER, 0);
+        return;
     }
 
-    lv_obj_t *note = ui_label_create(s.page.content, "详情暂不可用，仅显示比分",
-                                     ui_font_hint, ui_c_warn());
-    lv_obj_set_width(note, LV_PCT(100));
-    lv_obj_set_style_text_align(note, LV_TEXT_ALIGN_CENTER, 0);
+    switch (s.detail_tab) {
+    case DETAIL_GOLD:    render_detail_gold(d);    break;
+    case DETAIL_PLAYERS: render_detail_players(d); break;
+    case DETAIL_LINEUP:
+    default:             render_detail_lineup(d);  break;
+    }
 }
 
 // 整体重绘当前视图（根列表或单场详情）。
@@ -519,9 +725,13 @@ static void activate(void)
         if (!c->valid || s.row_count <= 0) return;
         if (s.selected < 0 || s.selected >= c->match_count) return;
         s.detail = c->matches[s.selected];
-        s.detail_tab = 0;
+        s.detail_tab = DETAIL_LINEUP;
         s.in_detail = true;
+        // 进入即请求详情：先请求再渲染，界面立刻显示"正在加载"而不是空状态。
+        app_net_esport_detail_fetch(s.detail.id);
         render();
+        s.detail_sig_state = (int)app_net_esport_detail_state();
+        s.detail_sig_fetched = c->detail.fetched_utc;
     } else if (s.tab == TAB_TEAMS) {
         toggle_follow();
     }
@@ -587,10 +797,10 @@ void page_esports_key(bsp_btn_t btn, bsp_btn_ev_t ev)
             s.in_detail = false;
             render();
         } else if (ev == BSP_BTN_LONG && btn == BSP_BTN_UP) {
-            s.detail_tab = (s.detail_tab + TAB_COUNT - 1) % TAB_COUNT;
+            s.detail_tab = (s.detail_tab + DETAIL_TAB_COUNT - 1) % DETAIL_TAB_COUNT;
             render();
         } else if (ev == BSP_BTN_LONG && btn == BSP_BTN_DOWN) {
-            s.detail_tab = (s.detail_tab + 1) % TAB_COUNT;
+            s.detail_tab = (s.detail_tab + 1) % DETAIL_TAB_COUNT;
             render();
         }
         return;
@@ -621,8 +831,17 @@ void page_esports_tick(void)
     app_esport_cache_t *c = app_state_esports();
     app_fetch_state_t st = app_net_esports_state();
 
-    // 详情视图为静态回退内容，不随秒级节拍重绘。
-    if (s.in_detail) return;
+    // 详情视图：只在详情状态或数据更新时重绘，避免每秒重建整页。
+    if (s.in_detail) {
+        int dstate = (int)app_net_esport_detail_state();
+        int dfetched = c->detail.fetched_utc;
+        if (dstate != s.detail_sig_state || dfetched != s.detail_sig_fetched) {
+            s.detail_sig_state = dstate;
+            s.detail_sig_fetched = dfetched;
+            render();
+        }
+        return;
+    }
 
     // 每秒刷新"更新于"与刷新状态文案。
     if (s.tab == TAB_SCHEDULE) banner_update();

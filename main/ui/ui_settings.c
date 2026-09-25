@@ -550,10 +550,11 @@ static void data_panel_refresh(void)
     snprintf(buf, sizeof(buf), "%d / %d", app_state_badges()->count, APP_BADGE_MAX);
     ui_row_set_value(s.data_rows[CLR_BADGE], buf);
 
-    app_routine_t *r = app_state_routine();
     bool routine_used = false;
     for (int d = 0; d < APP_ROUTINE_DAYS; d++) {
-        if (r->days[d].count > 0) routine_used = true;
+        for (int slot = 0; slot < APP_ROUTINE_WEEKS; slot++) {
+            if (app_state_routine_day_slot(d, slot)->count > 0) routine_used = true;
+        }
     }
     ui_row_set_value(s.data_rows[CLR_ROUTINE], routine_used ? "已设置" : "空");
 

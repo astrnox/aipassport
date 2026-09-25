@@ -10,6 +10,7 @@
 
 #define APP_ROUTINE_MAX_NODES 24
 #define APP_ROUTINE_DAYS      7
+#define APP_ROUTINE_WEEKS     2   // 0=单周（ISO 奇数周） 1=双周（ISO 偶数周）
 
 typedef enum {
     APP_NODE_ARRIVE = 0,   // 到校
@@ -34,7 +35,9 @@ typedef struct {
 } app_routine_day_t;
 
 typedef struct {
-    app_routine_day_t days[APP_ROUTINE_DAYS];  // 0=周日 .. 6=周六
+    // 外表是套别：0=单周表，1=双周表；内层 0=周日 .. 6=周六。
+    // 未启用单双周时只使用单周表（下标 0）。
+    app_routine_day_t days[APP_ROUTINE_WEEKS][APP_ROUTINE_DAYS];
 } app_routine_t;
 
 typedef enum {
@@ -60,5 +63,23 @@ bool app_routine_remove_node(app_routine_day_t *day, int index);
 void app_routine_status(const app_routine_day_t *day, int minutes_of_day, int seconds_of_minute,
                         app_routine_status_t *out);
 bool app_routine_parse_line(const char *line, app_routine_node_t *out);  // "08:00-08:45 第一节"
-int  app_routine_parse_text(app_routine_day_t *day, const char *text);   // 多行，返回成功条数
+int  app_routine_parse_text(app_routine_day_t *day, const char *text);   // 单日多行，返回成功条数
+
+// 依据 ISO 周序号判断套别：奇数周为单周表（0），偶数周为双周表（1）。
+// iso_week 非法（<=0，例如时间未校准）时按单周表处理，保证仍有可展示的作息。
+int app_routine_week_slot(int iso_week);
+
+// 取指定星期、指定套别的作息表。参数越界时返回 NULL。
+const app_routine_day_t *app_routine_day_get(const app_routine_t *r, int weekday, int slot);
+app_routine_day_t       *app_routine_day_mut(app_routine_t *r, int weekday, int slot);
+
+// 解析整表导入文本并写入 r，返回成功导入的数据行数（写入全部七天的一行按 1 行计）。
+// 指令行（行首可有空白）：
+//   @单周 / @双周   选择写入哪一套表，同时把目标日重置为"全部七天"
+//   @周一 .. @周日  把目标日收窄为某一天；未出现星期指令时写入该套表的全部七天
+// 也接受不带 @ 的整行星期名（"周一"）。以 # 开头的行为注释，空行忽略。
+// 与已有节点重叠的行按 app_routine_add_node 的规则拒绝，不计入条数。
+// out_has_alt 非空时写回文本是否写入过双周表（用于提示用户已配置单双周）。
+int app_routine_parse_table(app_routine_t *r, const char *text, bool *out_has_alt);
+
 const char *app_node_type_name(app_node_type_t type);

@@ -20,6 +20,7 @@
 
 #include "ui_theme.h"
 #include "ui_app.h"
+#include "ui_timeedit.h"
 
 #include "app_state.h"
 #include "logic/app_routine.h"
@@ -32,21 +33,27 @@
 #include <string.h>
 
 #define RT_CW        (UI_W - 2 * UI_MARGIN_X)   // 224
-#define RT_TAB_COUNT 3
+#define RT_TAB_COUNT 4
 #define RT_CD_H      78
-#define RT_OPT_COUNT 5
+#define RT_OPT_COUNT 6
 
 enum {
     RT_OPT_TEMPLATE_DAY = 0,
     RT_OPT_TEMPLATE_BOARD,
+    RT_OPT_ODD_EVEN,
     RT_OPT_CLEAR_TODAY,
     RT_OPT_CLEAR_ALL,
     RT_OPT_IMPORT_HELP,
 };
 
-static const char *const RT_TAB_NAMES[RT_TAB_COUNT] = { "今日", "一周", "设置" };
+static const char *const RT_TAB_NAMES[RT_TAB_COUNT] = { "今日", "一周", "编辑", "设置" };
 static const char *const RT_OPT_NAMES[RT_OPT_COUNT] = {
-    "套用走读模板", "套用住校模板", "清空今日作息", "清空全部作息", "从手机导入"
+    "套用走读模板", "套用住校模板", "单双周作息", "清空今日作息", "清空全部作息", "从手机导入"
+};
+
+// 节点类型显示名，顺序与 app_node_type_t 一致，同时用作编辑器的"类型"选项。
+static const char *const RT_TYPE_NAMES[7] = {
+    "到校", "上课", "课间", "午休", "晚自习", "放学", "自定义"
 };
 
 // 一周视图按"周一..周日"排列，映射到数据模型（0=周日）。
@@ -76,10 +83,23 @@ static struct {
     ui_row_t  week[7];
     int       week_sel;
 
+    // 编辑（第 0 行切换目标日，第 1 行新增节点，其余为当日节点）
+    ui_row_t  edit_rows[APP_ROUTINE_MAX_NODES + 2];
+    int       edit_count;
+    int       edit_sel;
+    int       edit_weekday;   // 编辑目标日，数据星期 0=周日..6=周六，默认今日
+
     // 设置
     ui_row_t  opts[RT_OPT_COUNT];
     int       opt_sel;
 } s;
+
+// 节点编辑器当前目标：-1 表示新增，否则是今日节点下标。编辑器回调读取它。
+static int s_edit_index = -1;
+static int s_edit_values[5];
+
+// 数据变更后重建今日/编辑页并刷新一周页。定义在编辑视图之后，这里前置声明。
+static void after_data_change(void);
 
 // ---------------------------------------------------------------------------
 // 今日视图
@@ -95,7 +115,14 @@ static int today_weekday(void)
 
 static const app_routine_day_t *today_day(void)
 {
-    return &app_state_routine()->days[today_weekday()];
+    return app_state_routine_day(today_weekday());
+}
+
+// 单双周启用时给"今日"标题补上当前是单周还是双周。
+static const char *slot_suffix(void)
+{
+    if (!app_state_settings()->use_odd_week) return "";
+    return app_state_routine_slot() == 1 ? " 双周" : " 单周";
 }
 
 // 当前节点下标；处于空档则返回下一个节点；今日已结束返回最后一个节点。
@@ -231,6 +258,7 @@ static void build_today(void)
         app_datetime_t now = app_state_now();
         char d[24];
         app_fmt_date_short(d, sizeof(d), now.month, now.day, s.built_weekday);
+        snprintf(d + strlen(d), sizeof(d) - strlen(d), "%s", slot_suffix());
         lv_label_set_text(s.today_hdr_right, d);
     }
 
@@ -270,9 +298,9 @@ static void build_today(void)
 static void week_refresh(void)
 {
     for (int i = 0; i < 7; i++) {
-        const app_routine_day_t *d = &app_state_routine()->days[RT_WEEK_ORDER[i]];
+        const app_routine_day_t *d = app_state_routine_day(RT_WEEK_ORDER[i]);
         char val[32];
-        if (d->count <= 0) {
+        if (!d || d->count <= 0) {
             snprintf(val, sizeof(val), "无安排");
         } else {
             char t1[8], t2[8];
@@ -283,7 +311,7 @@ static void week_refresh(void)
         ui_row_set_value(s.week[i], val);
         if (s.week[i].value) {
             lv_obj_set_style_text_color(s.week[i].value,
-                lv_color_hex(d->count <= 0 ? ui_c_dim() : ui_c_text()), 0);
+                lv_color_hex((!d || d->count <= 0) ? ui_c_dim() : ui_c_text()), 0);
         }
     }
 }
@@ -304,7 +332,9 @@ static void build_week(void)
     lv_obj_t *v = s.views[1];
     lv_obj_clean(v);
 
-    ui_header_create(v, "一周作息", NULL, NULL, NULL);
+    char title[24];
+    snprintf(title, sizeof(title), "一周作息%s", slot_suffix());
+    ui_header_create(v, title, NULL, NULL, NULL);
     lv_obj_t *list = ui_list_create(v);
     for (int i = 0; i < 7; i++) {
         s.week[i] = ui_row_create(list, RT_WEEK_NAMES[i], "");
@@ -331,9 +361,19 @@ static void opt_select(int index)
     ui_scroll_into_view(s.opts[index].obj);
 }
 
+static void opt_refresh(void)
+{
+    bool odd_even = app_state_settings()->use_odd_week;
+    ui_row_set_value(s.opts[RT_OPT_ODD_EVEN], odd_even ? "已开启" : "未启用");
+    if (s.opts[RT_OPT_ODD_EVEN].value) {
+        lv_obj_set_style_text_color(s.opts[RT_OPT_ODD_EVEN].value,
+            lv_color_hex(odd_even ? ui_c_accent() : ui_c_dim()), 0);
+    }
+}
+
 static void build_opts(void)
 {
-    lv_obj_t *v = s.views[2];
+    lv_obj_t *v = s.views[3];
     lv_obj_clean(v);
 
     ui_header_create(v, "作息配置", NULL, NULL, NULL);
@@ -341,18 +381,196 @@ static void build_opts(void)
     for (int i = 0; i < RT_OPT_COUNT; i++) {
         s.opts[i] = ui_row_create(list, RT_OPT_NAMES[i], "");
     }
+    ui_row_set_value(s.opts[RT_OPT_IMPORT_HELP], "热点配置页");
     if (s.opts[RT_OPT_IMPORT_HELP].value) {
         lv_obj_set_style_text_color(s.opts[RT_OPT_IMPORT_HELP].value,
             lv_color_hex(ui_c_accent()), 0);
     }
+    opt_refresh();
     opt_select(s.opt_sel);
     ui_page_set_hint("↑↓ 选择  OK 执行  长按↓ 换页");
+}
+
+// ---------------------------------------------------------------------------
+// 编辑视图：按星期增删改节点（第 0 行切换目标日，第 1 行新增）
+// ---------------------------------------------------------------------------
+
+// 编辑目标日：数据模型 0=周日..6=周六，默认今日，可用第 0 行切换。
+static app_routine_day_t *edit_day(void)
+{
+    return app_state_routine_day(s.edit_weekday);
+}
+
+// 数据星期 -> "周一..周日" 的显示下标（与 RT_WEEK_ORDER 互为反函数）。
+static int edit_day_index(void)
+{
+    return s.edit_weekday == 0 ? 6 : s.edit_weekday - 1;
+}
+
+static void edit_select(int index)
+{
+    if (s.edit_count <= 0) return;
+    if (index < 0) index = 0;
+    if (index >= s.edit_count) index = s.edit_count - 1;
+    s.edit_sel = index;
+    for (int i = 0; i < s.edit_count; i++) {
+        ui_row_set_selected(s.edit_rows[i], i == index);
+    }
+    ui_scroll_into_view(s.edit_rows[index].obj);
+}
+
+static void build_edit(void)
+{
+    lv_obj_t *v = s.views[2];
+    lv_obj_clean(v);
+
+    s.edit_count = 0;
+
+    const char *day_name = RT_WEEK_NAMES[edit_day_index()];
+    char title[32];
+    snprintf(title, sizeof(title), "编辑 %s%s", day_name, slot_suffix());
+    ui_header_create(v, title, NULL, NULL, NULL);
+
+    lv_obj_t *list = ui_list_create(v);
+    s.edit_rows[0] = ui_row_create(list, "编辑范围", day_name);
+    s.edit_rows[1] = ui_row_create(list, "新增节点", "OK 添加");
+    for (int i = 0; i < 2; i++) {
+        if (s.edit_rows[i].value) {
+            lv_obj_set_style_text_color(s.edit_rows[i].value, lv_color_hex(ui_c_accent()), 0);
+        }
+    }
+    s.edit_count = 2;
+
+    const app_routine_day_t *day = edit_day();
+    int node_count = day ? day->count : 0;
+    for (int i = 0; i < node_count && s.edit_count < APP_ROUTINE_MAX_NODES + 2; i++) {
+        const app_routine_node_t *n = &day->nodes[i];
+        char t1[8], t2[8];
+        app_fmt_hhmm(t1, sizeof(t1), n->start_min);
+        app_fmt_hhmm(t2, sizeof(t2), n->end_min);
+        char label[48];
+        snprintf(label, sizeof(label), "%s %s-%s", t1, n->name, t2);
+        s.edit_rows[s.edit_count] = ui_row_create(list, label, app_node_type_name(n->type));
+        s.edit_count++;
+    }
+
+    edit_select(s.edit_sel);
+    ui_page_set_hint("↑↓ 选择  OK 换天/编辑  长按↑ 删除  长按↓ 换页");
+}
+
+// 第 0 行：按界面顺序"周一..周日"轮换编辑目标日。数据星期用 RT_WEEK_ORDER 反查，
+// 避免把显示下标直接当成数据下标。切换后重建视图，焦点回到第一行。
+static void edit_day_cycle(void)
+{
+    int next = (edit_day_index() + 1) % 7;
+    s.edit_weekday = RT_WEEK_ORDER[next];
+    s.edit_sel = 0;
+    build_edit();
+
+    char msg[32];
+    snprintf(msg, sizeof(msg), "编辑目标：%s%s", RT_WEEK_NAMES[next], slot_suffix());
+    ui_hint_flash(msg, 1600);
+}
+
+static void node_edit_done(bool saved, void *user)
+{
+    (void)user;
+    if (!saved) return;
+
+    int start = s_edit_values[0] * 60 + s_edit_values[1];
+    int end   = s_edit_values[2] * 60 + s_edit_values[3];
+    int type  = s_edit_values[4];
+    if (type < 0 || type >= 7) type = APP_NODE_CUSTOM;
+    if (end > 1440 || end <= start) {
+        ui_hint_flash("结束时间要晚于开始时间，未保存", 2200);
+        return;
+    }
+
+    app_routine_node_t node;
+    memset(&node, 0, sizeof(node));
+    node.start_min = start;
+    node.end_min = end;
+    node.type = (app_node_type_t)type;
+    app_utf8_copy_prefix(app_node_type_name(node.type), 8, node.name, sizeof(node.name));
+
+    app_routine_day_t *day = edit_day();
+    if (!day) return;
+
+    if (s_edit_index < 0) {
+        if (app_routine_add_node(day, &node) < 0) {
+            ui_hint_flash("与该时段已有节点重叠，未新增", 2200);
+            return;
+        }
+    } else {
+        if (s_edit_index >= day->count) return;
+        // 修改 = 先移除原节点再按新时间插回，列表始终有序。
+        app_routine_node_t keep = day->nodes[s_edit_index];
+        app_routine_remove_node(day, s_edit_index);
+        if (app_routine_add_node(day, &node) < 0) {
+            app_routine_add_node(day, &keep);   // 放回原节点，不让改动悄悄丢失
+            ui_hint_flash("与该时段已有节点重叠，未保存", 2200);
+            return;
+        }
+    }
+
+    app_state_save_routine();
+    after_data_change();
+    ui_hint_flash(s_edit_index < 0 ? "已新增节点" : "已保存节点", 1400);
+}
+
+static void edit_open(int index)
+{
+    app_routine_day_t *day = edit_day();
+    s_edit_index = index;
+
+    if (index < 0 || !day || index >= day->count) {
+        // 新增：默认接在今天最后一个节点之后，没有节点时从 08:00 开始。
+        int start = 480;
+        if (day && day->count > 0) start = day->nodes[day->count - 1].end_min;
+        if (start >= 23 * 60 + 30) start = 480;
+        s_edit_index = -1;
+        s_edit_values[0] = start / 60;
+        s_edit_values[1] = start % 60;
+        s_edit_values[2] = start / 60 + 1;
+        s_edit_values[3] = start % 60;
+        s_edit_values[4] = APP_NODE_CLASS;
+    } else {
+        const app_routine_node_t *n = &day->nodes[index];
+        s_edit_values[0] = n->start_min / 60;
+        s_edit_values[1] = n->start_min % 60;
+        s_edit_values[2] = n->end_min / 60;
+        s_edit_values[3] = n->end_min % 60;
+        s_edit_values[4] = (int)n->type;
+    }
+
+    static const ui_timeedit_field_t fields[5] = {
+        { "开始时", 0, 23, 1, NULL },
+        { "开始分", 0, 59, 5, NULL },
+        { "结束时", 0, 24, 1, NULL },
+        { "结束分", 0, 59, 5, NULL },
+        { "类型",   0, 6,  1, RT_TYPE_NAMES },
+    };
+    ui_timeedit_open(s.page.scr, index < 0 ? "新增作息节点" : "编辑作息节点",
+                     fields, s_edit_values, 5, node_edit_done, NULL);
+}
+
+static void node_delete_confirm(bool confirmed, void *user)
+{
+    (void)user;
+    if (!confirmed) return;
+    app_routine_day_t *day = edit_day();
+    int index = s.edit_sel - 2;    // 前两行是"编辑范围"与"新增节点"
+    if (!day || index < 0 || !app_routine_remove_node(day, index)) return;
+    app_state_save_routine();
+    after_data_change();
+    ui_hint_flash("已删除节点", 1200);
 }
 
 static void after_data_change(void)
 {
     build_today();
     week_refresh();
+    build_edit();
 }
 
 static void apply_template(bool boarding)
@@ -368,7 +586,8 @@ static void clear_today_confirm(bool confirmed, void *user)
 {
     (void)user;
     if (!confirmed) return;
-    app_routine_day_t *day = &app_state_routine()->days[today_weekday()];
+    app_routine_day_t *day = app_state_routine_day(today_weekday());
+    if (!day) return;
     memset(day, 0, sizeof(*day));
     app_state_save_routine();
     s.focus = -1;
@@ -396,6 +615,17 @@ static void opt_run(int index)
     case RT_OPT_TEMPLATE_BOARD:
         apply_template(true);
         break;
+    case RT_OPT_ODD_EVEN: {
+        app_settings_t *st = app_state_settings();
+        st->use_odd_week = !st->use_odd_week;
+        app_state_save_settings();
+        opt_refresh();
+        s.focus = -1;
+        after_data_change();
+        ui_hint_flash(st->use_odd_week ? "已开启单双周，按周切换两套作息"
+                                       : "已关闭单双周，只用单周作息", 2000);
+        break;
+    }
     case RT_OPT_CLEAR_TODAY:
         ui_dialog_open(s.page.scr, "清空今日作息",
                        "今天全部作息节点将被移除，无法恢复。",
@@ -431,6 +661,7 @@ static void show_tab(int index)
     switch (index) {
     case 0: build_today(); break;
     case 1: build_week();  break;
+    case 2: build_edit();  break;
     default: build_opts(); break;
     }
 }
@@ -443,6 +674,7 @@ void page_routine_enter(void)
 {
     memset(&s, 0, sizeof(s));
     s.focus = -1;
+    s.edit_weekday = today_weekday();   // 编辑页默认从今天开始换天
     s.page = ui_page_create(NULL);
     s.tabs = ui_tabs_create(s.page.content, RT_TAB_NAMES, RT_TAB_COUNT);
 
@@ -471,6 +703,11 @@ void page_routine_exit(void)
 
 void page_routine_key(bsp_btn_t btn, bsp_btn_ev_t ev)
 {
+    // 时间编辑浮层盖在本页之上，打开期间按键全部交给它，否则长按 OK 会直接返回主页。
+    if (ui_timeedit_active()) {
+        ui_timeedit_handle(btn, ev);
+        return;
+    }
     if (ev == BSP_BTN_LONG && btn == BSP_BTN_OK) {
         ui_app_go_home();
         return;
@@ -520,10 +757,9 @@ void page_routine_key(bsp_btn_t btn, bsp_btn_ev_t ev)
         if (btn == BSP_BTN_UP) week_select(s.week_sel - 1);
         else if (btn == BSP_BTN_DOWN) week_select(s.week_sel + 1);
         else if (btn == BSP_BTN_OK) {
-            const app_routine_day_t *d =
-                &app_state_routine()->days[RT_WEEK_ORDER[s.week_sel]];
+            const app_routine_day_t *d = app_state_routine_day(RT_WEEK_ORDER[s.week_sel]);
             char msg[48];
-            if (d->count <= 0) {
+            if (!d || d->count <= 0) {
                 snprintf(msg, sizeof(msg), "%s 无安排", RT_WEEK_NAMES[s.week_sel]);
             } else {
                 char t1[8], t2[8];
@@ -536,7 +772,28 @@ void page_routine_key(bsp_btn_t btn, bsp_btn_ev_t ev)
         }
         return;
     }
-    default: {
+    case 2: {
+        if (ev == BSP_BTN_LONG && btn == BSP_BTN_UP) {
+            const app_routine_day_t *day = edit_day();
+            int index = s.edit_sel - 2;    // 前两行是"编辑范围"与"新增节点"
+            if (!day || index < 0 || index >= day->count) {
+                ui_hint_flash("先选中一个节点再删除", 1600);
+                return;
+            }
+            char body[96];
+            snprintf(body, sizeof(body), "删除\u201c%s\u201d？该节点将被移除，无法恢复。",
+                     day->nodes[index].name);
+            ui_dialog_open(s.page.scr, "删除作息节点", body, "删除", node_delete_confirm, NULL);
+            return;
+        }
+        if (ev != BSP_BTN_CLICK) return;
+        if (btn == BSP_BTN_UP) edit_select(s.edit_sel - 1);
+        else if (btn == BSP_BTN_DOWN) edit_select(s.edit_sel + 1);
+        else if (btn == BSP_BTN_OK && s.edit_sel == 0) edit_day_cycle();
+        else if (btn == BSP_BTN_OK) edit_open(s.edit_sel - 2);
+        return;
+    }
+    case 3: {
         if (ev == BSP_BTN_LONG && btn == BSP_BTN_UP) {
             opt_run(s.opt_sel);
             return;
@@ -547,6 +804,8 @@ void page_routine_key(bsp_btn_t btn, bsp_btn_ev_t ev)
         else if (btn == BSP_BTN_OK) opt_run(s.opt_sel);
         return;
     }
+    default:
+        return;
     }
 }
 
@@ -554,10 +813,13 @@ void page_routine_tick(void)
 {
     if (!s.page.scr) return;
 
-    // 跨天时今日标签页内容整体失效，重建一次。
-    if (s.tab == 0 && today_weekday() != s.built_weekday) {
-        build_today();
-        return;
+    // 跨天、或数据被别处改动（例如手机配置页导入作息）时，今日标签页整体失效，重建一次。
+    if (s.tab == 0) {
+        const app_routine_day_t *day = today_day();
+        if (today_weekday() != s.built_weekday || (day ? day->count : 0) != s.node_count) {
+            build_today();
+            return;
+        }
     }
 
     if (s.tab == 0 && s.today_list && s.node_count > 0) {

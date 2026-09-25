@@ -394,6 +394,23 @@ app_reminder_list_t *app_state_reminders(void) { return &s.reminders; }
 app_pomodoro_t     *app_state_pomodoro(void)   { return &s.pomodoro; }
 app_esport_cache_t *app_state_esports(void)    { return &s.esports; }
 
+int app_state_routine_slot(void)
+{
+    if (!s.settings.use_odd_week) return 0;
+    app_datetime_t now = app_state_now();
+    return app_routine_week_slot(app_time_iso_week(now.year, now.month, now.day));
+}
+
+app_routine_day_t *app_state_routine_day_slot(int weekday, int slot)
+{
+    return app_routine_day_mut(&s.routine, weekday, slot);
+}
+
+app_routine_day_t *app_state_routine_day(int weekday)
+{
+    return app_routine_day_mut(&s.routine, weekday, app_state_routine_slot());
+}
+
 int app_state_totp_count(void)
 {
     return s.totp.count;

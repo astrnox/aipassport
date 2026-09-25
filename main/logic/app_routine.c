@@ -2,6 +2,7 @@
 #include "app_routine.h"
 #include "app_text.h"
 
+#include <stdio.h>
 #include <string.h>
 
 // 模板表项：起始分钟、结束分钟、类型、显示名。
@@ -56,11 +57,11 @@ void app_routine_init(app_routine_t *r)
     memset(r, 0, sizeof(*r));
 }
 
-static void fill_weekdays(app_routine_t *r, const routine_template_entry_t *entries, int count)
+static void fill_weekdays(app_routine_day_t *days, const routine_template_entry_t *entries, int count)
 {
     // 1..5 为周一至周五；0（周日）与 6（周六）保持空表。
     for (int day = 1; day <= 5; day++) {
-        app_routine_day_t *d = &r->days[day];
+        app_routine_day_t *d = &days[day];
         d->count = count;
         for (int i = 0; i < count; i++) {
             app_routine_node_t *node = &d->nodes[i];
@@ -77,13 +78,38 @@ void app_routine_load_template(app_routine_t *r, bool boarding)
 {
     if (!r) return;
     memset(r, 0, sizeof(*r));
-    if (boarding) {
-        fill_weekdays(r, BOARDING_TEMPLATE,
-                      (int)(sizeof(BOARDING_TEMPLATE) / sizeof(BOARDING_TEMPLATE[0])));
-    } else {
-        fill_weekdays(r, DAY_SCHOOL_TEMPLATE,
-                      (int)(sizeof(DAY_SCHOOL_TEMPLATE) / sizeof(DAY_SCHOOL_TEMPLATE[0])));
+
+    // 单周与双周都填同一套模板：用户启用单双周后立刻有可用的作息，
+    // 再按需要只改其中一套即可，不会出现"双周是空的"。
+    for (int slot = 0; slot < APP_ROUTINE_WEEKS; slot++) {
+        if (boarding) {
+            fill_weekdays(r->days[slot], BOARDING_TEMPLATE,
+                          (int)(sizeof(BOARDING_TEMPLATE) / sizeof(BOARDING_TEMPLATE[0])));
+        } else {
+            fill_weekdays(r->days[slot], DAY_SCHOOL_TEMPLATE,
+                          (int)(sizeof(DAY_SCHOOL_TEMPLATE) / sizeof(DAY_SCHOOL_TEMPLATE[0])));
+        }
     }
+}
+
+int app_routine_week_slot(int iso_week)
+{
+    // ISO 第 1 周为单周（下标 0），第 2 周为双周（下标 1），依次交替。
+    if (iso_week <= 0) return 0;
+    return (iso_week - 1) % APP_ROUTINE_WEEKS;
+}
+
+const app_routine_day_t *app_routine_day_get(const app_routine_t *r, int weekday, int slot)
+{
+    if (!r) return NULL;
+    if (weekday < 0 || weekday >= APP_ROUTINE_DAYS) return NULL;
+    if (slot < 0 || slot >= APP_ROUTINE_WEEKS) return NULL;
+    return &r->days[slot][weekday];
+}
+
+app_routine_day_t *app_routine_day_mut(app_routine_t *r, int weekday, int slot)
+{
+    return (app_routine_day_t *)app_routine_day_get(r, weekday, slot);
 }
 
 void app_routine_sort(app_routine_day_t *day)
@@ -329,5 +355,82 @@ int app_routine_parse_text(app_routine_day_t *day, const char *text)
         if (!nl) break;
         cursor = nl + 1;
     }
+    return success;
+}
+
+// 把整行识别成星期指令，返回 0..6（0=周日）；不是星期指令返回 -1。
+// 接受 "周一".."周日" 与 "星期一".."星期日"/"星期天"。
+static int parse_weekday_line(const char *line)
+{
+    char buf[16];
+    app_utf8_copy_prefix(line, 4, buf, sizeof(buf));
+
+    for (int wd = 0; wd < APP_ROUTINE_DAYS; wd++) {
+        const char *name = app_weekday_name(wd);   // "周一".."周日"
+        if (strcmp(buf, name) == 0) return wd;
+        // 同一字符换成 "星期" 前缀。
+        char alt[16];
+        snprintf(alt, sizeof(alt), "星期%s", name + 3);
+        if (strcmp(buf, alt) == 0) return wd;
+    }
+    return -1;
+}
+
+int app_routine_parse_table(app_routine_t *r, const char *text, bool *out_has_alt)
+{
+    if (out_has_alt) *out_has_alt = false;
+    if (!r || !text) return 0;
+
+    int  slot = 0;       // 当前套别：0 单周 / 1 双周
+    int  target = -1;    // 当前目标日：-1 表示该套别的全部七天
+    int  success = 0;    // 成功导入的数据行数
+    bool has_alt = false;
+
+    const char *cursor = text;
+    while (*cursor) {
+        const char *nl = strchr(cursor, '\n');
+        size_t len = nl ? (size_t)(nl - cursor) : strlen(cursor);
+        char line[192];
+        if (len >= sizeof(line)) len = sizeof(line) - 1;
+        memcpy(line, cursor, len);
+        line[len] = '\0';
+
+        char *trimmed = app_text_trim(line);
+        if (*trimmed != '\0' && *trimmed != '#') {
+            const char *p = (*trimmed == '@') ? trimmed + 1 : trimmed;
+
+            if (strcmp(p, "单周") == 0) {
+                slot = 0;
+                target = -1;
+            } else if (strcmp(p, "双周") == 0) {
+                slot = 1;
+                target = -1;
+                has_alt = true;
+            } else {
+                int wd = parse_weekday_line(p);
+                if (wd >= 0) {
+                    target = wd;
+                } else {
+                    app_routine_node_t node;
+                    if (app_routine_parse_line(p, &node)) {
+                        if (target < 0) {
+                            bool any = false;
+                            for (int d = 0; d < APP_ROUTINE_DAYS; d++) {
+                                if (app_routine_add_node(&r->days[slot][d], &node) >= 0) any = true;
+                            }
+                            if (any) success++;
+                        } else if (app_routine_add_node(&r->days[slot][target], &node) >= 0) {
+                            success++;
+                        }
+                    }
+                }
+            }
+        }
+
+        if (!nl) break;
+        cursor = nl + 1;
+    }
+
+    if (out_has_alt) *out_has_alt = has_alt;
     return success;
 }

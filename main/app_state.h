@@ -101,6 +101,14 @@ app_reminder_list_t *app_state_reminders(void);
 app_pomodoro_t     *app_state_pomodoro(void);
 app_esport_cache_t *app_state_esports(void);
 
+// ---- 作息取表 ----
+// 当前应使用的套别：0 单周 / 1 双周。未启用单双周时恒为 0。
+int app_state_routine_slot(void);
+// 指定星期在指定套别下的作息表；可直接修改后调用 app_state_save_routine 落盘。
+app_routine_day_t *app_state_routine_day_slot(int weekday, int slot);
+// 指定星期在当前套别下的作息表。界面日常读写都用它，单双周切换对界面透明。
+app_routine_day_t *app_state_routine_day(int weekday);
+
 // 动态口令账户表：返回实际条数，accounts 指针由调用方持有。
 int  app_state_totp_count(void);
 app_totp_account_t *app_state_totp_at(int index);

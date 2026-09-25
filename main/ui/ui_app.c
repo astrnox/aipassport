@@ -308,9 +308,9 @@ static void check_routine_node(void)
 {
     app_datetime_t now = app_state_now();
     int wd = app_time_weekday(now.year, now.month, now.day);
-    const app_routine_day_t *day = &app_state_routine()->days[wd];
+    const app_routine_day_t *day = app_state_routine_day(wd);
 
-    if (day->count <= 0) {
+    if (!day || day->count <= 0) {
         s_routine_node = -1;
         s_routine_seen = false;
         return;

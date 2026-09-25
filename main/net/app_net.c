@@ -47,6 +47,8 @@ static const char *TAG = "app_net";
 #define NET_PASS_KEY "pass"
 
 #define LOLESPORTS_BASE "https://esports-api.lolesports.com/persisted/gw/"
+// 对局实时数据 feed（阵容、经济、选手），与 persisted/gw 不同域。
+#define LOLESPORTS_FEED "https://feed.lolesports.com/livestats/v1/window/"
 // lolesports 官网公开使用的 API key。
 #define LOLESPORTS_KEY "0TvQnueqKa5mxJntVWt0w4LpLfEkrV1Ta8rQBb9Z"
 
@@ -80,6 +82,11 @@ static bool s_worker_running;              // esports worker 是否在跑
 static volatile bool s_esports_in_center;  // 用户是否停留在赛事中心
 static app_fetch_state_t s_fetch_state = APP_FETCH_IDLE;
 static char s_fetch_error[64];
+
+// 单场对局详情拉取（与赛程拉取串行，共用 s_worker_running 门闩）
+static bool s_detail_running;
+static app_fetch_state_t s_detail_state = APP_FETCH_IDLE;
+static char s_detail_error[64];
 
 // 异步校时
 static bool s_time_running;
@@ -567,7 +574,7 @@ done:
         copy_trunc(s_time_error, sizeof(s_time_error), err[0] ? err : "校时失败");
     }
     bool in_center = s_esports_in_center;
-    bool esports_busy = s_worker_running;
+    bool esports_busy = s_worker_running || s_detail_running;
     s_time_running = false;
     net_unlock();
 
@@ -783,10 +790,12 @@ done:
         copy_trunc(s_fetch_error, sizeof(s_fetch_error), err[0] ? err : "拉取失败");
     }
     bool in_center = s_esports_in_center;
+    bool detail_busy = s_detail_running;
     s_worker_running = false;
     net_unlock();
 
-    if (!in_center) app_net_wifi_stop();   // 用户已离开赛事中心，释放射频
+    // 详情拉取可能正在等同一次 Wi-Fi 窗口，别把它脚下的射频关掉。
+    if (!in_center && !detail_busy) app_net_wifi_stop();
     vTaskDelete(NULL);
 }
 
@@ -840,11 +849,294 @@ void app_net_esports_stop(void)
 {
     net_lock();
     s_esports_in_center = false;
-    bool running = s_worker_running;
+    bool running = s_worker_running || s_detail_running;
     net_unlock();
 
     // 没有在跑的 worker 时直接释放；有则让 worker 结束时自行释放。
     if (!running) app_net_wifi_stop();
+}
+
+// ---------------------------------------------------------------------------
+// 单场对局详情（getEventDetails 选局 + window feed 取数据）
+// ---------------------------------------------------------------------------
+
+// 把 window 的 participantMetadata 按顺序填成选手数组：participantId 1..5 即
+// 上单/打野/中单/下路/辅助。
+static void detail_fill_lineup(const cJSON *meta_team, app_esport_player_t *out)
+{
+    const cJSON *list = json_obj(meta_team, "participantMetadata");
+    if (!cJSON_IsArray(list)) return;
+
+    const cJSON *p = NULL;
+    int i = 0;
+    cJSON_ArrayForEach(p, list) {
+        if (i >= APP_ESPORT_TEAM_PLAYERS) break;
+        app_esport_player_t *pl = &out[i++];
+        copy_trunc(pl->champion, sizeof(pl->champion), json_str(p, "championId"));
+        copy_trunc(pl->player, sizeof(pl->player), json_str(p, "summonerName"));
+        pl->role = app_esport_role_from_text(json_str(p, "role"));
+    }
+}
+
+// 用一帧里的 participants 覆盖选手金币与 KDA；participantId 直接对应数组下标。
+static void detail_apply_frame_team(const cJSON *team, app_esport_player_t *out)
+{
+    const cJSON *list = json_obj(team, "participants");
+    if (!cJSON_IsArray(list)) return;
+
+    const cJSON *p = NULL;
+    cJSON_ArrayForEach(p, list) {
+        int pid = json_int(p, "participantId", 0);
+        if (pid < 1 || pid > APP_ESPORT_TEAM_PLAYERS) continue;
+        app_esport_player_t *pl = &out[pid - 1];
+        pl->gold    = json_int(p, "totalGold", pl->gold);
+        pl->kills   = json_int(p, "kills", pl->kills);
+        pl->deaths  = json_int(p, "deaths", pl->deaths);
+        pl->assists = json_int(p, "assists", pl->assists);
+    }
+}
+
+// 追加一个经济采样点；超出上限时丢弃最早的点，保留最近的走势。
+static void detail_push_gold(app_esport_detail_t *d, int ga, int gb)
+{
+    if (d->gold_points >= APP_ESPORT_GOLD_POINTS) {
+        for (int i = 1; i < APP_ESPORT_GOLD_POINTS; i++) {
+            d->gold_a[i - 1] = d->gold_a[i];
+            d->gold_b[i - 1] = d->gold_b[i];
+        }
+        d->gold_points = APP_ESPORT_GOLD_POINTS - 1;
+    }
+    d->gold_a[d->gold_points] = ga;
+    d->gold_b[d->gold_points] = gb;
+    d->gold_points++;
+}
+
+// 解析 window 响应：metadata 提供阵容，frames 提供经济采样与选手快照。
+// a_is_blue 表示 team_a 本局在蓝色方，用于把接口的蓝/红归一成 team_a/team_b。
+static void detail_parse_window(const cJSON *root, app_esport_detail_t *d, bool a_is_blue)
+{
+    const cJSON *meta = json_obj(root, "gameMetadata");
+    detail_fill_lineup(json_obj(meta, "blueTeamMetadata"), a_is_blue ? d->team_a : d->team_b);
+    detail_fill_lineup(json_obj(meta, "redTeamMetadata"),  a_is_blue ? d->team_b : d->team_a);
+
+    const cJSON *frames = json_obj(root, "frames");
+    if (!cJSON_IsArray(frames)) return;
+
+    // 已结束多时的比赛只会返回开局占位帧（经济全 0），这些帧必须跳过，
+    // 否则界面会把 0 当成真实数据画一条平线。
+    const cJSON *f = NULL;
+    const cJSON *best = NULL;
+    int best_total = 0;
+    cJSON_ArrayForEach(f, frames) {
+        int bg = json_int(json_obj(f, "blueTeam"), "totalGold", 0);
+        int rg = json_int(json_obj(f, "redTeam"), "totalGold", 0);
+        if (bg <= 0 && rg <= 0) continue;
+        detail_push_gold(d, a_is_blue ? bg : rg, a_is_blue ? rg : bg);
+        if (bg + rg >= best_total) {
+            best_total = bg + rg;
+            best = f;
+        }
+    }
+    if (!best) return;
+
+    // 取经济最领先的一帧作为选手数据快照。
+    const cJSON *blue = json_obj(best, "blueTeam");
+    const cJSON *red  = json_obj(best, "redTeam");
+    detail_apply_frame_team(a_is_blue ? blue : red, d->team_a);
+    detail_apply_frame_team(a_is_blue ? red : blue, d->team_b);
+}
+
+static void esports_detail_worker(void *arg)
+{
+    char *id = (char *)arg;   // 由 fetch 分配，worker 负责释放
+    app_fetch_state_t final = APP_FETCH_FAILED;
+    char err[64] = { 0 };
+    app_esport_detail_t *det =
+        (app_esport_detail_t *)calloc(1, sizeof(app_esport_detail_t));
+
+    if (!det) {
+        copy_trunc(err, sizeof(err), "内存不足");
+        free(id);
+        goto done;
+    }
+    copy_trunc(det->match_id, sizeof(det->match_id), id);
+    free(id);
+    id = NULL;
+
+    // 与赛程拉取串行：等它结束再联网，避免同时占用 Wi-Fi 与 64 KB 响应缓冲。
+    for (int i = 0; i < 120 && s_worker_running; i++) vTaskDelay(pdMS_TO_TICKS(100));
+
+    if (!ensure_online()) {
+        copy_trunc(err, sizeof(err), "未联网");
+        goto done;
+    }
+
+    // ---- getEventDetails：选一局并确定双方阵营 ----
+    {
+        char url[176];
+        snprintf(url, sizeof(url), LOLESPORTS_BASE "getEventDetails?hl=zh-CN&id=%s",
+                 det->match_id);
+
+        char *body = NULL;
+        if (http_get_json(url, &body, NULL) != ESP_OK) {
+            copy_trunc(err, sizeof(err), "详情请求失败");
+            goto done;
+        }
+        cJSON *root = cJSON_Parse(body);
+        free(body);
+        if (!root) {
+            copy_trunc(err, sizeof(err), "详情解析失败");
+            goto done;
+        }
+
+        const cJSON *match = json_obj(json_obj(json_obj(root, "data"), "event"), "match");
+        const cJSON *teams = json_obj(match, "teams");
+        const cJSON *games = json_obj(match, "games");
+
+        // 选局：进行中优先，其次最后一局已结束，都没有时用第一局未开始。
+        const cJSON *pick = NULL;
+        const cJSON *g = NULL;
+        cJSON_ArrayForEach(g, games) {
+            app_match_state_t st = app_esport_state_from_text(json_str(g, "state"));
+            if (st == APP_MATCH_LIVE) {
+                pick = g;
+                break;
+            }
+            if (st == APP_MATCH_FINISHED) pick = g;
+            else if (st == APP_MATCH_UPCOMING && !pick) pick = g;
+        }
+
+        if (!cJSON_IsObject(pick)) {
+            cJSON_Delete(root);
+            copy_trunc(err, sizeof(err), "该场次暂无对局信息");
+            goto done;
+        }
+        det->game_number = json_int(pick, "number", 0);
+        copy_trunc(det->game_state, sizeof(det->game_state), json_str(pick, "state"));
+
+        // window 只按蓝/红给数据；按 match.teams[0]（即 team_a）在本局的阵营归一。
+        bool a_is_blue = true;
+        const cJSON *a_team = cJSON_IsArray(teams) ? cJSON_GetArrayItem(teams, 0) : NULL;
+        const char *a_id = json_str(a_team, "id");
+        if (a_id) {
+            const cJSON *gt = json_obj(pick, "teams");
+            for (int i = 0; i < cJSON_GetArraySize(gt); i++) {
+                const cJSON *entry = cJSON_GetArrayItem(gt, i);
+                const char *gid = json_str(entry, "id");
+                const char *side = json_str(entry, "side");
+                if (gid && side && strcmp(gid, a_id) == 0) {
+                    a_is_blue = (strcmp(side, "blue") == 0);
+                    break;
+                }
+            }
+        }
+
+        const char *game_id = json_str(pick, "id");
+        if (!game_id || game_id[0] == '\0') {
+            cJSON_Delete(root);
+            copy_trunc(err, sizeof(err), "该对局无实时数据");
+            goto done;
+        }
+
+        // ---- window feed：阵容 + 经济 + 选手 ----
+        snprintf(url, sizeof(url), LOLESPORTS_FEED "%s", game_id);
+        body = NULL;
+        if (http_get_json(url, &body, NULL) == ESP_OK) {
+            cJSON *wroot = cJSON_Parse(body);
+            free(body);
+            if (wroot) {
+                detail_parse_window(wroot, det, a_is_blue);
+                cJSON_Delete(wroot);
+            }
+        }
+        cJSON_Delete(root);
+    }
+
+    if (!(det->team_a[0].champion[0] || det->team_a[0].player[0] ||
+          det->team_b[0].champion[0] || det->team_b[0].player[0])) {
+        copy_trunc(err, sizeof(err), "暂无阵容数据");
+        goto done;
+    }
+
+    det->valid = true;
+    det->fetched_utc = (int)app_state_now_unix();
+
+    net_lock();
+    app_state_esports()->detail = *det;
+    app_state_save_esports();
+    net_unlock();
+
+    final = APP_FETCH_OK;
+
+done:
+    free(det);
+    net_lock();
+    s_detail_state = final;
+    if (final == APP_FETCH_OK) {
+        s_detail_error[0] = '\0';
+    } else {
+        copy_trunc(s_detail_error, sizeof(s_detail_error), err[0] ? err : "拉取失败");
+    }
+    bool in_center = s_esports_in_center;
+    s_detail_running = false;
+    net_unlock();
+
+    if (!in_center) app_net_wifi_stop();   // 用户已离开赛事中心，释放射频
+    vTaskDelete(NULL);
+}
+
+void app_net_esport_detail_fetch(const char *match_id)
+{
+    if (!s_inited || !match_id || match_id[0] == '\0') return;
+
+    net_lock();
+    if (s_detail_running) {
+        net_unlock();
+        return;   // 运行中重复调用忽略
+    }
+    char *id = (char *)malloc(strlen(match_id) + 1);
+    if (!id) {
+        net_unlock();
+        return;
+    }
+    strcpy(id, match_id);
+
+    s_detail_running = true;
+    s_detail_state = APP_FETCH_RUNNING;
+    s_detail_error[0] = '\0';
+    s_esports_in_center = true;
+    net_unlock();
+
+    if (xTaskCreate(esports_detail_worker, "net_esdetail", 8192, id, 4, NULL) != pdPASS) {
+        free(id);
+        net_lock();
+        s_detail_running = false;
+        s_detail_state = APP_FETCH_FAILED;
+        copy_trunc(s_detail_error, sizeof(s_detail_error), "任务创建失败");
+        net_unlock();
+        ESP_LOGE(TAG, "详情拉取任务创建失败");
+    }
+}
+
+app_fetch_state_t app_net_esport_detail_state(void)
+{
+    net_lock();
+    app_fetch_state_t st = s_detail_state;
+    net_unlock();
+    return st;
+}
+
+const char *app_net_esport_detail_error(void)
+{
+    static char buf[64];
+    net_lock();
+    if (s_detail_state == APP_FETCH_FAILED && s_detail_error[0]) {
+        copy_trunc(buf, sizeof(buf), s_detail_error);
+    } else {
+        buf[0] = '\0';
+    }
+    net_unlock();
+    return buf[0] ? buf : NULL;
 }
 
 // ---------------------------------------------------------------------------
@@ -1125,7 +1417,8 @@ static const char PROV_PAGE[] =
     ".hint{color:#666;font-size:13px;margin:0 0 16px;}\n"
     "form{background:#fff;border-radius:12px;padding:16px;margin-bottom:14px;box-shadow:0 1px 3px rgba(0,0,0,.08);}\n"
     "label{display:block;font-size:13px;color:#444;margin:8px 0 4px;}\n"
-    "input{width:100%;box-sizing:border-box;padding:10px;border:1px solid #ccc;border-radius:8px;font-size:15px;}\n"
+    "input,textarea{width:100%;box-sizing:border-box;padding:10px;border:1px solid #ccc;border-radius:8px;font-size:15px;}\n"
+    "textarea{font-size:14px;font-family:ui-monospace,Menlo,Consolas,monospace;line-height:1.5;}\n"
     "button{margin-top:12px;width:100%;padding:12px;border:0;border-radius:8px;background:#2f6f4f;color:#fff;font-size:15px;}\n"
     "</style></head><body>\n"
     "<h1>FoloToy AI Passport</h1>\n"
@@ -1144,6 +1437,12 @@ static const char PROV_PAGE[] =
     "<label>动态口令链接（otpauth://... ，可选）</label>\n"
     "<input name=\"uri\" maxlength=\"180\" placeholder=\"otpauth://totp/...\">\n"
     "<button type=\"submit\">添加口令</button>\n"
+    "</form>\n"
+    "<form method=\"post\" action=\"/routine\">\n"
+    "<label>作息表（每行一节：08:00-08:45 第一节，可带 # 注释）</label>\n"
+    "<textarea name=\"text\" rows=\"8\" maxlength=\"5000\" "
+    "placeholder=\"08:00-08:45 第一节&#10;08:45-08:55 课间&#10;# 用 @单周 / @双周 分别写两套作息&#10;# @周一 起只改某一天，@周三 再换一天\"></textarea>\n"
+    "<button type=\"submit\">导入作息表</button>\n"
     "</form>\n"
     "<script>document.getElementById('t').value=Math.floor(Date.now()/1000);</script>\n"
     "</body></html>\n";
@@ -1275,6 +1574,75 @@ static esp_err_t prov_post_totp(httpd_req_t *req)
     return prov_reply(req, "口令已添加");
 }
 
+// 作息导入：手机配置页把整段作息文本 POST 到 /routine。文本可能上千字节（一周七天），
+// 因此按 content_len 在堆上收，而不是像其它表单那样用固定栈缓冲。
+#define PROV_ROUTINE_MAX 8192
+
+static esp_err_t prov_post_routine(httpd_req_t *req)
+{
+    int total = req->content_len;
+    if (total <= 0 || total > PROV_ROUTINE_MAX) {
+        httpd_resp_set_status(req, "413 Payload Too Large");
+        return prov_reply(req, "内容为空或过长（上限约 8 KB）");
+    }
+
+    char *body = (char *)malloc((size_t)total + 1);
+    if (!body) {
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        return prov_reply(req, "设备内存不足，请重试");
+    }
+
+    int got = 0;
+    while (got < total) {
+        int r = httpd_req_recv(req, body + got, (size_t)(total - got));
+        if (r == HTTPD_SOCK_ERR_TIMEOUT) continue;
+        if (r <= 0) {
+            free(body);
+            httpd_resp_set_status(req, "400 Bad Request");
+            return prov_reply(req, "读取内容失败，请重试");
+        }
+        got += r;
+    }
+    body[got] = '\0';
+
+    char *text = strstr(body, "text=");
+    if (!text) {
+        free(body);
+        httpd_resp_set_status(req, "400 Bad Request");
+        return prov_reply(req, "请填写作息文本");
+    }
+    text += 5;
+    // 表单里只有 text 一个字段，正常情况下其后没有 '&'；仍截断一次以防误传。
+    char *amp = strchr(text, '&');
+    if (amp) *amp = '\0';
+    url_decode(text);
+
+    app_routine_t *routine = app_state_routine();
+    bool has_alt = false;
+    int lines = app_routine_parse_table(routine, text, &has_alt);
+    free(body);
+
+    if (lines <= 0) {
+        return prov_reply(req,
+                          "没有识别到有效作息行：请检查每行是否为 \u201cHH:MM-HH:MM 名称\u201d，"
+                          "并确认新时段没有和已有节点重叠");
+    }
+
+    app_state_save_routine();
+
+    char msg[128];
+    if (has_alt) {
+        // 文本写了双周表，顺手开启单双周，否则用户会觉得"双周部分没生效"。
+        app_state_settings()->use_odd_week = true;
+        app_state_save_settings();
+        snprintf(msg, sizeof(msg), "已导入 %d 行，并已开启单双周作息", lines);
+    } else {
+        snprintf(msg, sizeof(msg), "已导入 %d 行", lines);
+    }
+    prov_set_note(msg);
+    return prov_reply(req, msg);
+}
+
 static void fill_ap_config(wifi_config_t *ap)
 {
     memset(ap, 0, sizeof(*ap));
@@ -1310,7 +1678,7 @@ esp_err_t app_net_prov_start(void)
     if (err != ESP_OK) return err;
 
     httpd_config_t hc = HTTPD_DEFAULT_CONFIG();
-    hc.max_uri_handlers = 6;
+    hc.max_uri_handlers = 7;
     hc.lru_purge_enable = true;
     hc.stack_size = 6144;
     err = httpd_start(&s_httpd, &hc);
@@ -1324,10 +1692,12 @@ esp_err_t app_net_prov_start(void)
     httpd_uri_t u_wifi = { .uri = "/wifi", .method = HTTP_POST, .handler = prov_post_wifi, .user_ctx = NULL };
     httpd_uri_t u_time = { .uri = "/time", .method = HTTP_POST, .handler = prov_post_time, .user_ctx = NULL };
     httpd_uri_t u_totp = { .uri = "/totp", .method = HTTP_POST, .handler = prov_post_totp, .user_ctx = NULL };
+    httpd_uri_t u_routine = { .uri = "/routine", .method = HTTP_POST, .handler = prov_post_routine, .user_ctx = NULL };
     httpd_register_uri_handler(s_httpd, &u_root);
     httpd_register_uri_handler(s_httpd, &u_wifi);
     httpd_register_uri_handler(s_httpd, &u_time);
     httpd_register_uri_handler(s_httpd, &u_totp);
+    httpd_register_uri_handler(s_httpd, &u_routine);
 
     net_lock();
     s_prov_active = true;

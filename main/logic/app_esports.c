@@ -155,3 +155,14 @@ app_match_state_t app_esport_state_from_text(const char *text)
     if (text_ieq(text, "unstarted")) return APP_MATCH_UPCOMING;
     return APP_MATCH_UNKNOWN;
 }
+
+app_esport_role_t app_esport_role_from_text(const char *text)
+{
+    if (!text) return APP_ROLE_UNKNOWN;
+    if (text_ieq(text, "top")) return APP_ROLE_TOP;
+    if (text_ieq(text, "jungle")) return APP_ROLE_JUNGLE;
+    if (text_ieq(text, "mid")) return APP_ROLE_MID;
+    if (text_ieq(text, "bottom")) return APP_ROLE_BOTTOM;
+    if (text_ieq(text, "support")) return APP_ROLE_SUPPORT;
+    return APP_ROLE_UNKNOWN;
+}
