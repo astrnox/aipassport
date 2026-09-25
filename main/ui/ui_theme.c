@@ -597,10 +597,14 @@ void ui_progress_set(lv_obj_t *bar, int permille)
     lv_bar_set_value(bar, permille, LV_ANIM_OFF);
 }
 
+// 列表行挂在 ui_list_create() 建出的容器里，而那个容器本身不可滚动、随内容撑高，
+// 真正的滚动容器是更外层的 page.content。lv_obj_scroll_to_view() 只看直接父级，
+// 父级不可滚动就直接返回，于是"选中项换了、画面却停在原处"。这里必须用会逐级向上
+// 找滚动父级的版本。
 void ui_scroll_into_view(lv_obj_t *obj)
 {
     if (!obj) return;
-    lv_obj_scroll_to_view(obj, LV_ANIM_OFF);
+    lv_obj_scroll_to_view_recursive(obj, LV_ANIM_OFF);
 }
 
 // ---------------------------------------------------------------------------

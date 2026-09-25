@@ -97,12 +97,17 @@ esptool.py --chip esp32c3 -b 460800 --before default_reset --after hard_reset \
 | Firmware build and merged-image verification | PASS |
 | Repository checks and host-side logic tests | PASS |
 | On-device tests | NOT RUN — needs a connected board and approval to flash |
-| Unverified | On-device rendering and CJK glyph coverage, BLE provisioning end to end, live esports data and its offline fallback, odd/even routine switching after time sync, power behaviour |
+| Unverified | On-device rendering and CJK glyph coverage, list auto-scroll following the selection, key event timing (one action per press, long press at 500 ms, rapid presses), BLE provisioning end to end, live esports data and its offline fallback, odd/even routine switching after time sync, power behaviour |
 
 `dist/` is a delivery snapshot: rerunning the firmware gate refreshes `build/`
 only, so refresh `dist/` and its checksum deliberately. Light sleep and deep
 sleep are not part of this delivery; automatic screen-off and the power-saving
 option are implemented.
+
+Input handling is part of the [BSP button contract](components/bsp/include/bsp_button.h):
+one action per press, `BSP_BTN_CLICK` on release, `BSP_BTN_LONG` at
+`BSP_BTN_LONG_PRESS_MS`. There is no double-click gesture, because its decision
+window delays every single click and merges rapid presses into dropped actions.
 
 ## Project structure
 

@@ -12,7 +12,8 @@
 // 按键约定（底部提示条如实写明）：
 //   根列表  短按 UP/DOWN 移动或切换赛区，短按 OK 主操作，长按 OK 返回主页，
 //           长按 DOWN 切到下一标签页，长按 UP 在赛程页刷新、在其它页切到上一标签页。
-//   单场详情 长按 UP/DOWN 在「阵容/经济/选手」间切页，长按 OK 返回赛程列表。
+//   单场详情 短按 UP/DOWN 上下滚动内容，长按 UP/DOWN 在「阵容/经济/选手」间切页，
+//           长按 OK 返回赛程列表。
 //
 // 说明：ui_pages.h 使用了 bool 但未自带 <stdbool.h>，本文件作为独立编译单元需先引入。
 #include <stdbool.h>
@@ -58,7 +59,7 @@ static const char *const ROLE_NAMES[APP_ROLE_UNKNOWN + 1] = {
 static const char *const HINT_SCHEDULE  = "↑↓选 OK详情 长按↑刷新 长按OK返回";
 static const char *const HINT_STANDINGS = "↑↓切赛区 长按↑↓切页 长按OK返回";
 static const char *const HINT_TEAMS     = "↑↓选 OK关注 长按↑↓切页 长按OK返回";
-static const char *const HINT_DETAIL    = "长按↑↓切页 长按OK返回";
+static const char *const HINT_DETAIL    = "↑↓滚动 长按↑↓切页 长按OK返回";
 
 // 战队列表行：积分榜缓存与赛程去重两种来源统一成同一结构，便于选择与关注。
 typedef struct {
@@ -717,6 +718,17 @@ static void toggle_follow(void)
     ui_hint_flash(on ? "已关注" : "已取消关注", 1200);
 }
 
+// 详情页没有选中行，而内容常常超过一屏（选手页每队 5 行、两队共 10 行），本机又没有
+// 触摸：短按 UP/DOWN 按行滚动，否则下半页永远看不到。长按仍用于切子页。
+// LVGL 的滚动增量与直觉相反，dy 为负才是把内容往上推、露出更下面的部分。
+#define DETAIL_SCROLL_STEP (UI_ROW_H + 2)
+
+static void detail_scroll(int dir)
+{
+    if (!s.page.content) return;
+    lv_obj_scroll_by_bounded(s.page.content, 0, -dir * DETAIL_SCROLL_STEP, LV_ANIM_OFF);
+}
+
 // 短按 OK 的主操作：赛程进入详情、战队切换关注、积分榜无主操作。
 static void activate(void)
 {
@@ -792,7 +804,7 @@ void page_esports_key(bsp_btn_t btn, bsp_btn_ev_t ev)
     if (!s.page.scr) return;
 
     if (s.in_detail) {
-        // 详情视图：长按 UP/DOWN 切子页，长按 OK 返回赛程列表。
+        // 详情视图：短按 UP/DOWN 滚动内容，长按 UP/DOWN 切子页，长按 OK 返回赛程列表。
         if (ev == BSP_BTN_LONG && btn == BSP_BTN_OK) {
             s.in_detail = false;
             render();
@@ -802,6 +814,9 @@ void page_esports_key(bsp_btn_t btn, bsp_btn_ev_t ev)
         } else if (ev == BSP_BTN_LONG && btn == BSP_BTN_DOWN) {
             s.detail_tab = (s.detail_tab + 1) % DETAIL_TAB_COUNT;
             render();
+        } else if (ev == BSP_BTN_CLICK) {
+            if (btn == BSP_BTN_UP)        detail_scroll(-1);
+            else if (btn == BSP_BTN_DOWN) detail_scroll(1);
         }
         return;
     }
