@@ -2,7 +2,8 @@
 //
 // 主页是开机第一眼的内容，遵循"信息先于菜单"：名片卡、时间、下一作息节点倒计时、
 // 赛事卡排在模块列表之前，用户不点进任何一层就能获得主要价值。信息卡片不参与焦点
-// 移动，OK 只作用于模块列表。
+// 移动，OK 只作用于模块列表；名片卡本身只作展示，想看完整工牌请走"身份与工具"模块
+// 入口，本页不额外给它绑按键。
 //
 // 个人名片卡把选中工牌的身份直接搬到首页：左侧是头像，有动图时用 lv_animimg 播放
 // 手机端上传的 RGB565 帧序列，右侧是昵称与一行补充信息。动图帧不复制进 RAM，而是
@@ -36,9 +37,10 @@
 #define HOME_CW        (UI_W - 2 * UI_MARGIN_X)   // 224
 #define HOME_QUICK_N   4
 
-// 个人名片卡几何：头像框是正方形，文字区占右侧剩余宽度。
+// 个人名片卡几何：头像框是正方形，文字区占右侧剩余宽度。高度压到 64：正好容纳 56
+// 头像与两行文字（16px 行高 31 + 12px 行高 23），把纵向空间尽量留给下面的模块列表。
 #define HOME_AVATAR    56
-#define HOME_CARD_H    72
+#define HOME_CARD_H    64
 #define HOME_TEXT_W    136
 
 enum { QUIET_MUTE = 0, QUIET_THEME, QUIET_BRIGHT, QUIET_POMO };
@@ -410,9 +412,12 @@ static void quick_update_values(void)
         lv_label_set_text(s.quick_values[QUIET_BRIGHT], buf);
     }
     if (s.quick_values[QUIET_POMO]) {
+        // 空闲显示"开始"，其余阶段借逻辑层的统一名称，短休息与长休息因此可以区分，
+        // 新增的长休息状态也不会漏判成"未开始"。
         app_pomodoro_t *p = app_state_pomodoro();
-        const char *txt = (p->state == APP_POMO_FOCUS || p->state == APP_POMO_BREAK ||
-                           p->state == APP_POMO_PAUSED) ? "进行中" : "开始";
+        const char *txt = (p->state == APP_POMO_IDLE)
+                              ? "开始"
+                              : app_pomodoro_state_name(p->state);
         lv_label_set_text(s.quick_values[QUIET_POMO], txt);
     }
 }
@@ -538,6 +543,9 @@ void page_home_enter(void)
     memset(&s, 0, sizeof(s));
     s.page = ui_page_create("↑↓ 选择  OK 进入  长按↑ 面板  长按OK 熄屏");
 
+    // 个人名片卡排在最前：开机第一眼先看到自己的身份，是"信息先于菜单"的首要一条。
+    build_badge_card();
+
     // 时间卡。
     lv_obj_t *card = ui_card_create(s.page.content, 0, 0, HOME_CW, 64, ui_c_accent());
     s.time_lbl = ui_label_create(card, "--:--", ui_font_display, ui_c_text());
@@ -586,6 +594,10 @@ void page_home_exit(void)
         app_state_save_settings();
     }
 
+    // 先释放名片动图：animimg 持有的帧指针指向 assets 映射区，必须在删除屏幕之前
+    // 删掉 animimg 再解映射，否则动画的下一帧会读到已经失效的地址，映射本身也会泄
+    // 漏，导致后续页面无法再映射任何槽位。
+    avatar_anim_release();
     if (s.quick) {
         lv_obj_delete(s.quick);
         s.quick = NULL;

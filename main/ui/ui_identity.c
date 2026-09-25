@@ -1,8 +1,17 @@
-// main/ui/ui_identity.c —— 身份与工具模块页：电子工牌 / 动态口令 / 硬件自检。
+// main/ui/ui_identity.c —— 身份与工具模块页：电子工牌 / 动态口令 / 硬件自检 / 密码本。
 //
-// 页面结构遵循应用统一约定：顶部 ui_tabs_create() 三个标签页，短按 UP/DOWN 在当前
-// 标签内移动，长按 UP 执行该标签的主操作（全屏码 / 恢复码 / 全部检查），长按 DOWN
-// 切换标签页，长按 OK 返回主页。所有颜色与字号都取自 ui_theme，本文件不自定义样式。
+// 页面结构遵循应用统一约定：顶部 ui_tabs_create() 四个标签页（工牌 / 口令 / 自检 /
+// 密码本），短按 UP/DOWN 在当前标签内移动，长按 UP 执行该标签的主操作（全屏码 /
+// 恢复码 / 全部检查 / 打开密码本），长按 DOWN 切换标签页，长按 OK 返回主页。所有
+// 颜色与字号都取自 ui_theme，本文件不自定义样式。
+//
+// 密码本是 ui_vault.c 实现的全屏子页面：身份页只负责入口与按键转发，进入后由密码本
+// 独占屏幕与按键。密码本退出时会删掉自己的 LVGL 屏幕，因此身份页在检测到它退出后必须
+// 重建（page_identity_exit + page_identity_enter），否则留在屏幕上的是被删除的屏。
+//
+// 工牌动图：手机端上传的 RGB565 帧序列存在 assets 分区，这里用 app_assets_map() 零
+// 拷贝映射，再交给 LVGL 9 的 lv_animimg 播放。帧指针指向映射区，映射必须与 animimg
+// 同生命周期：只有先删掉 animimg，才允许解映射。
 //
 // 二维码：app_qr_encode() 得到模块矩阵后，用一个静态的 I1（1 比特/像素）画布逐模块
 // 画黑白方块。选 I1 而不是 RGB565，是因为 220x220 的 RGB565 要占 96 KB 静态 RAM，
@@ -17,7 +26,9 @@
 #include "ui_theme.h"
 #include "ui_app.h"
 
+#include "app_assets.h"
 #include "app_state.h"
+#include "logic/app_anim.h"
 #include "logic/app_badge.h"
 #include "logic/app_qr.h"
 #include "logic/app_text.h"
@@ -34,8 +45,11 @@
 // ---------------------------------------------------------------------------
 
 #define IDV_CW        (UI_W - 2 * UI_MARGIN_X)   // 内容区可用宽度 224
-#define IDV_TAB_COUNT 3
+#define IDV_TAB_COUNT 4
 #define IDV_CHECK_COUNT 5
+
+// 标签页顺序：工牌 / 口令 / 自检 / 密码本。密码本追加在最后，既有三个标签顺序不变。
+enum { IDV_TAB_BADGE = 0, IDV_TAB_TOTP, IDV_TAB_CHECK, IDV_TAB_VAULT };
 
 // 自检项下标。
 enum { IDV_ROW_DISPLAY = 0, IDV_ROW_KEY, IDV_ROW_AUDIO, IDV_ROW_BATTERY, IDV_ROW_STORAGE };
@@ -46,6 +60,13 @@ typedef enum {
     IDV_CHECK_FAIL,
 } idv_check_state_t;
 
+// 覆盖层种类：全屏二维码可在一张工牌的多个码之间切换，恢复码只读展示。
+typedef enum {
+    IDV_OV_NONE = 0,
+    IDV_OV_QR,
+    IDV_OV_RECOVERY,
+} idv_overlay_t;
+
 // 缩略图与全屏二维码的静态 I1 缓冲。I1 调色板占 8 字节，另留对齐余量。
 #define IDV_QR_THUMB_DIM 96
 #define IDV_QR_FULL_DIM  224
@@ -53,7 +74,7 @@ static uint32_t s_qr_thumb_buf[(IDV_QR_THUMB_DIM * ((IDV_QR_THUMB_DIM + 7) / 8) 
 static uint32_t s_qr_full_buf[(IDV_QR_FULL_DIM * ((IDV_QR_FULL_DIM + 7) / 8) + 24) / 4];
 static uint8_t  s_qr_modules[APP_QR_MAX_SIZE * APP_QR_MAX_SIZE];
 
-static const char *const IDV_TAB_NAMES[IDV_TAB_COUNT] = { "工牌", "口令", "自检" };
+static const char *const IDV_TAB_NAMES[IDV_TAB_COUNT] = { "工牌", "口令", "自检", "密码本" };
 static const char *const IDV_CHECK_NAMES[IDV_CHECK_COUNT] = {
     "显示", "按键", "音频", "电池", "存储"
 };
@@ -66,6 +87,16 @@ static struct {
 
     // 工牌
     lv_obj_t *badge_hdr_right;
+    int badge_qr_sel;              // 工牌标签页里当前选中的二维码下标
+
+    // 工牌动图。anim_dsc/anim_src 必须与 animimg 同生命周期：LVGL 只保存数组指针而
+    // 不复制，帧指针又指向映射区，任何一个先失效都会让下一帧访问非法地址。
+    lv_obj_t *badge_anim;
+    lv_image_dsc_t badge_anim_dsc[APP_ANIM_MAX_FRAMES];
+    const void *badge_anim_src[APP_ANIM_MAX_FRAMES];
+    app_anim_header_t badge_anim_header;
+    esp_partition_mmap_handle_t badge_anim_handle;
+    bool badge_anim_mapped;
 
     // 口令
     lv_obj_t *totp_hdr_right;
@@ -84,6 +115,8 @@ static struct {
 
     // 覆盖层（全屏二维码 / 恢复码），同一时刻最多一个。
     lv_obj_t *overlay;
+    idv_overlay_t overlay_kind;
+    int qr_overlay_index;          // 全屏二维码当前展示的码下标
 } s;
 
 // ---------------------------------------------------------------------------
@@ -105,6 +138,86 @@ static void idv_first_char(const char *text, char *out, size_t cap)
     if (n > cap - 1) n = cap - 1;
     for (size_t i = 0; i < n && text[i]; i++) out[i] = text[i];
     out[n] = '\0';
+}
+
+// ---------------------------------------------------------------------------
+// 工牌动图：assets 分区零拷贝映射 + lv_animimg 播放
+// ---------------------------------------------------------------------------
+
+// 释放动图：先删 animimg，再解映射。顺序不能反——对象存活期间 lv_animimg 持有的帧
+// 指针还指向映射区，提前解映射会让动画的下一帧读到非法地址。
+static void idv_anim_release(void)
+{
+    if (s.badge_anim) {
+        lv_obj_delete(s.badge_anim);
+        s.badge_anim = NULL;
+    }
+    if (s.badge_anim_mapped) {
+        app_assets_unmap(s.badge_anim_handle);
+        s.badge_anim_mapped = false;
+    }
+}
+
+// 为工牌动图建立帧描述符并把帧序列挂到 box 上。返回 true 表示已创建 animimg；
+// 槽位为空、分区不可用或映射失败时返回 false，由调用方退回首字占位。
+static bool idv_anim_mount(lv_obj_t *box, const app_badge_t *b)
+{
+    if (!b || b->anim_slot < 0 || !app_assets_ready()) return false;
+    if (!app_assets_slot_present(b->anim_slot)) return false;
+    if (app_assets_slot_header(b->anim_slot, &s.badge_anim_header) != ESP_OK) return false;
+
+    const uint8_t *frames = NULL;
+    esp_partition_mmap_handle_t handle = 0;
+    if (app_assets_map(b->anim_slot, &s.badge_anim_header, &frames, &handle) != ESP_OK) {
+        return false;
+    }
+    s.badge_anim_mapped = true;
+    s.badge_anim_handle = handle;
+
+    int count = s.badge_anim_header.frame_count;
+    if (count < 1) { idv_anim_release(); return false; }
+    if (count > APP_ANIM_MAX_FRAMES) count = APP_ANIM_MAX_FRAMES;
+
+    uint32_t frame_bytes = app_anim_frame_bytes(s.badge_anim_header.width,
+                                                s.badge_anim_header.height);
+    if (frame_bytes == 0) { idv_anim_release(); return false; }
+
+    for (int i = 0; i < count; i++) {
+        const uint8_t *px = app_assets_frame(&s.badge_anim_header, i);
+        if (!px) { idv_anim_release(); return false; }
+
+        // 手机端按 RGB565 小端写入，这里只需把几何与数据长度如实填进描述符；
+        // magic 决定 lv_image_src_get_type() 把它认成变量图源而不是文件路径。
+        s.badge_anim_dsc[i].header.magic = LV_IMAGE_HEADER_MAGIC;
+        s.badge_anim_dsc[i].header.cf = LV_COLOR_FORMAT_RGB565;
+        s.badge_anim_dsc[i].header.flags = 0;
+        s.badge_anim_dsc[i].header.w = s.badge_anim_header.width;
+        s.badge_anim_dsc[i].header.h = s.badge_anim_header.height;
+        s.badge_anim_dsc[i].header.stride = (uint16_t)(s.badge_anim_header.width * 2);
+        s.badge_anim_dsc[i].data_size = frame_bytes;
+        s.badge_anim_dsc[i].data = px;
+        s.badge_anim_dsc[i].reserved = NULL;
+        s.badge_anim_dsc[i].reserved_2 = NULL;
+        s.badge_anim_src[i] = &s.badge_anim_dsc[i];
+    }
+
+    lv_obj_t *img = lv_animimg_create(box);
+    lv_obj_remove_flag(img, LV_OBJ_FLAG_SCROLLABLE);
+    // 对象保持帧的原始尺寸、居中放进头像框，再用缩放压到框内：缩放围绕图像中心进行，
+    // 压小后的可见区域正好落在头像框中央，不需要额外裁剪。
+    lv_obj_set_size(img, s.badge_anim_header.width, s.badge_anim_header.height);
+    lv_obj_center(img);
+
+    int longest = s.badge_anim_header.width > s.badge_anim_header.height
+                    ? s.badge_anim_header.width : s.badge_anim_header.height;
+    lv_animimg_set_src(img, s.badge_anim_src, (size_t)count);
+    lv_image_set_scale(img, (uint32_t)(256 * 56 / longest));
+    lv_animimg_set_duration(img, app_anim_frame_ms_get(&s.badge_anim_header) * (uint32_t)count);
+    lv_animimg_set_repeat_count(img, LV_ANIM_REPEAT_INFINITE);
+    lv_animimg_start(img);
+
+    s.badge_anim = img;
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -346,7 +459,10 @@ static void totp_show(void)
 
 static void build_badge(void)
 {
-    lv_obj_t *v = s.views[0];
+    lv_obj_t *v = s.views[IDV_TAB_BADGE];
+    // 先释放上一轮动图再清视图：lv_obj_clean 会顺带删掉 animimg，若先清空，s.badge_anim
+    // 就成了悬空指针，解映射也就无从谈起。
+    idv_anim_release();
     lv_obj_clean(v);
     s.badge_hdr_right = NULL;
 
@@ -360,6 +476,7 @@ static void build_badge(void)
 
     int sel = app_state_badge_selected();
     if (sel < 0) sel = 0;
+    if (sel >= list->count) sel = list->count - 1;
     app_badge_t *b = &list->items[sel];
 
     ui_header_create(v, "电子工牌", NULL, NULL, &s.badge_hdr_right);
@@ -389,11 +506,14 @@ static void build_badge(void)
     lv_obj_set_style_border_width(avatar, 0, 0);
     lv_obj_set_style_pad_all(avatar, 0, 0);
 
-    char ch[8];
-    idv_first_char(b->nickname, ch, sizeof(ch));
-    lv_obj_t *ava_lbl = ui_label_create(avatar, ch[0] ? ch : "?",
-                                        ui_font_title, ui_c_bg());
-    lv_obj_center(ava_lbl);
+    // 有绑定动图槽位就播动图，否则退回首字占位——绝不出现空头像框。
+    if (!idv_anim_mount(avatar, b)) {
+        char ch[8];
+        idv_first_char(b->nickname, ch, sizeof(ch));
+        lv_obj_t *ava_lbl = ui_label_create(avatar, ch[0] ? ch : "?",
+                                            ui_font_title, ui_c_bg());
+        lv_obj_center(ava_lbl);
+    }
 
     lv_obj_t *nick = ui_label_create(card, b->nickname[0] ? b->nickname : "未命名",
                                      ui_font_body, ui_c_text());
@@ -409,14 +529,17 @@ static void build_badge(void)
         ty += 23;
     }
 
-    // 二维码卡：占用剩余高度，缩略图随之缩放。
+    // 二维码卡：左侧是当前选中码的缩略图，右侧紧凑列出全部标签，选中项用主题色标出。
     int qr_h = 214 - card_h;
     if (qr_h > 100) qr_h = 100;
     if (qr_h < 72) qr_h = 72;
     int box = qr_h - 10;
 
     lv_obj_t *qcard = ui_card_create(v, 0, 0, IDV_CW, qr_h, 0);
-    if (b->qr_text[0]) {
+    int qn = app_badge_qr_count(b);
+    if (s.badge_qr_sel >= qn) s.badge_qr_sel = 0;
+
+    if (qn > 0) {
         lv_obj_t *white = lv_obj_create(qcard);
         lv_obj_remove_flag(white, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_set_pos(white, 6, 5);
@@ -427,13 +550,20 @@ static void build_badge(void)
         lv_obj_set_style_border_width(white, 0, 0);
         lv_obj_set_style_pad_all(white, 0, 0);
 
-        lv_obj_t *cv = qr_make(white, b->qr_text, box - 6,
+        lv_obj_t *cv = qr_make(white, app_badge_qr_text(b, s.badge_qr_sel), box - 6,
                                s_qr_thumb_buf, sizeof(s_qr_thumb_buf));
         if (cv) lv_obj_center(cv);
 
-        lv_obj_t *note = ui_label_create(qcard, "长按 ↑ 全屏\n供他人扫描",
-                                         ui_font_hint, ui_c_dim());
-        lv_obj_set_pos(note, 12 + box, 8);
+        int lx = 12 + box;
+        for (int i = 0; i < qn; i++) {
+            char scratch[APP_BADGE_QR_LABEL_LEN];
+            const char *label = app_badge_qr_label(b, i, scratch, sizeof(scratch));
+            if (!label) continue;
+            lv_obj_t *lbl = ui_label_create(qcard, label, ui_font_hint,
+                i == s.badge_qr_sel ? ui_c_accent() : ui_c_dim());
+            lv_obj_set_width(lbl, IDV_CW - lx - 6);
+            lv_obj_set_pos(lbl, lx, 8 + i * 23);
+        }
     } else {
         lv_obj_t *empty = ui_label_create(qcard, "此卡未设置二维码\n可在手机配置页添加",
                                           ui_font_hint, ui_c_dim());
@@ -442,12 +572,13 @@ static void build_badge(void)
         lv_obj_align(empty, LV_ALIGN_CENTER, 0, 0);
     }
 
-    ui_page_set_hint("↑↓ 切换工牌  长按↑ 全屏  长按↓ 换页");
+    if (qn > 1) ui_page_set_hint("↑↓ 换牌  OK 选码  长按↑ 全屏  长按↓ 换页");
+    else        ui_page_set_hint("↑↓ 切换工牌  长按↑ 全屏  长按↓ 换页");
 }
 
 static void build_totp(void)
 {
-    lv_obj_t *v = s.views[1];
+    lv_obj_t *v = s.views[IDV_TAB_TOTP];
     lv_obj_clean(v);
     s.totp_hdr_right = NULL;
     s.totp_acct = NULL;
@@ -511,7 +642,7 @@ static void build_totp(void)
 
 static void build_check(void)
 {
-    lv_obj_t *v = s.views[2];
+    lv_obj_t *v = s.views[IDV_TAB_CHECK];
     lv_obj_clean(v);
 
     ui_header_create(v, "硬件自检", NULL, NULL, NULL);
@@ -523,6 +654,40 @@ static void build_check(void)
     }
     check_select(s.check_sel);
     ui_page_set_hint("↑↓ 选择  OK 单项  长按↑ 全部  长按↓ 换页");
+}
+
+// 密码本入口：只给状态摘要与一句操作提示，真正的条目页在 ui_vault.c 里全屏打开。
+static void build_vault(void)
+{
+    lv_obj_t *v = s.views[IDV_TAB_VAULT];
+    lv_obj_clean(v);
+
+    app_vault_t *vt = app_state_vault();
+
+    ui_header_create(v, "密码本", NULL, NULL, NULL);
+
+    lv_obj_t *list = ui_list_create(v);
+    ui_row_create(list, "保存模式", app_vault_mode_name(vt->mode));
+
+    char count_text[16];
+    snprintf(count_text, sizeof(count_text), "%d 条", vt->count);
+    ui_row_create(list, "条目数", count_text);
+
+    bool enc_locked = app_vault_is_encrypted(vt) && app_vault_is_locked(vt);
+    ui_row_t state = ui_row_create(list, "解锁状态",
+        enc_locked ? "已上锁" : (app_vault_is_encrypted(vt) ? "已解锁" : "无需解锁"));
+    if (state.value) {
+        lv_obj_set_style_text_color(state.value,
+            lv_color_hex(enc_locked ? ui_c_warn() : ui_c_ok()), 0);
+    }
+
+    lv_obj_t *tip = ui_label_create(v,
+        "按 OK 进入密码本，可查看条目、开关加密与解锁。",
+        ui_font_hint, ui_c_dim());
+    lv_obj_set_width(tip, IDV_CW);
+    lv_label_set_long_mode(tip, LV_LABEL_LONG_WRAP);
+
+    ui_page_set_hint("OK 打开密码本  长按↓ 换页");
 }
 
 static void show_tab(int index)
@@ -538,9 +703,10 @@ static void show_tab(int index)
     ui_tabs_select(s.tabs, index);
 
     switch (index) {
-    case 0: build_badge(); break;
-    case 1: build_totp();  break;
-    default: build_check(); break;
+    case IDV_TAB_BADGE: build_badge(); break;
+    case IDV_TAB_TOTP:  build_totp();  break;
+    case IDV_TAB_VAULT: build_vault(); break;
+    default:            build_check(); break;
     }
 }
 
@@ -554,6 +720,7 @@ static void close_overlay(void)
         lv_obj_delete(s.overlay);
         s.overlay = NULL;
     }
+    s.overlay_kind = IDV_OV_NONE;
 }
 
 // 新建一个不透明全屏覆盖层，返回其对象（同时记入 s.overlay）。
@@ -582,11 +749,25 @@ static lv_obj_t *overlay_hint(lv_obj_t *ov, const char *text)
     return lbl;
 }
 
-static void open_qr_overlay(const app_badge_t *b)
+// 全屏展示工牌的第 qr_index 个二维码。标题取该码的标签；同一张工牌有多个码时，
+// 提示条告诉用户用 ↑↓ 在码之间切换。
+static void open_qr_overlay(const app_badge_t *b, int qr_index)
 {
-    lv_obj_t *ov = overlay_begin();
+    int n = app_badge_qr_count(b);
+    if (n <= 0) return;
+    if (qr_index < 0 || qr_index >= n) qr_index = 0;
 
-    lv_obj_t *title = ui_label_create(ov, b->nickname[0] ? b->nickname : "电子工牌",
+    const char *text = app_badge_qr_text(b, qr_index);
+    if (!text) return;
+
+    char scratch[APP_BADGE_QR_LABEL_LEN];
+    const char *label = app_badge_qr_label(b, qr_index, scratch, sizeof(scratch));
+
+    lv_obj_t *ov = overlay_begin();
+    s.overlay_kind = IDV_OV_QR;
+    s.qr_overlay_index = qr_index;
+
+    lv_obj_t *title = ui_label_create(ov, label ? label : "二维码",
                                       ui_font_body, ui_c_text());
     lv_obj_set_width(title, UI_W);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
@@ -602,10 +783,11 @@ static void open_qr_overlay(const app_badge_t *b)
     lv_obj_set_style_border_width(white, 0, 0);
     lv_obj_set_style_pad_all(white, 0, 0);
 
-    lv_obj_t *cv = qr_make(white, b->qr_text, 200, s_qr_full_buf, sizeof(s_qr_full_buf));
+    lv_obj_t *cv = qr_make(white, text, 200, s_qr_full_buf, sizeof(s_qr_full_buf));
     if (cv) lv_obj_center(cv);
 
-    overlay_hint(ov, "短按 OK 或长按 OK 退出");
+    overlay_hint(ov, n > 1 ? "↑↓ 切换二维码  短按 OK 或长按 OK 退出"
+                           : "短按 OK 或长按 OK 退出");
 }
 
 static void open_recovery_overlay(void)
@@ -626,6 +808,7 @@ static void open_recovery_overlay(void)
     group4(b32, grouped, sizeof(grouped));
 
     lv_obj_t *ov = overlay_begin();
+    s.overlay_kind = IDV_OV_RECOVERY;
 
     lv_obj_t *title = ui_label_create(ov, "恢复码", ui_font_title, ui_c_text());
     lv_obj_set_width(title, UI_W);
@@ -688,11 +871,13 @@ static void badge_key(bsp_btn_t btn, bsp_btn_ev_t ev)
         if (!list || list->count <= 0) return;
         int sel = app_state_badge_selected();
         if (sel < 0) return;
-        if (!list->items[sel].qr_text[0]) {
+        int qn = app_badge_qr_count(&list->items[sel]);
+        if (qn <= 0) {
             ui_hint_flash("此卡未设置二维码", 1500);
             return;
         }
-        open_qr_overlay(&list->items[sel]);
+        if (s.badge_qr_sel >= qn) s.badge_qr_sel = 0;
+        open_qr_overlay(&list->items[sel], s.badge_qr_sel);
         return;
     }
     if (ev != BSP_BTN_CLICK) return;
@@ -703,7 +888,18 @@ static void badge_key(bsp_btn_t btn, bsp_btn_ev_t ev)
     }
     if (btn == BSP_BTN_UP) {
         app_badge_cycle(list, -1);
-    } else if (btn == BSP_BTN_DOWN || btn == BSP_BTN_OK) {
+    } else if (btn == BSP_BTN_DOWN) {
+        app_badge_cycle(list, 1);
+    } else if (btn == BSP_BTN_OK) {
+        // 一张工牌带多个码时，OK 在码之间切换；只有单码或无码才沿用原来的"下一张工牌"，
+        // 这样既补齐了多码选择，又不改变老用户的按键手感。
+        int sel = app_state_badge_selected();
+        int qn = (sel >= 0 && sel < list->count) ? app_badge_qr_count(&list->items[sel]) : 0;
+        if (qn > 1) {
+            s.badge_qr_sel = (s.badge_qr_sel + 1) % qn;
+            build_badge();
+            return;
+        }
         app_badge_cycle(list, 1);
     } else {
         return;
@@ -766,6 +962,15 @@ static void check_key(bsp_btn_t btn, bsp_btn_ev_t ev)
     }
 }
 
+static void vault_key(bsp_btn_t btn, bsp_btn_ev_t ev)
+{
+    // 密码本是全屏子页面：本页只负责把用户送进去。
+    if ((ev == BSP_BTN_CLICK && btn == BSP_BTN_OK) ||
+        (ev == BSP_BTN_LONG && btn == BSP_BTN_UP)) {
+        page_vault_enter();
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 页面接口
 // ---------------------------------------------------------------------------
@@ -792,11 +997,14 @@ void page_identity_enter(void)
 
     s.totp_index = 0;
     s.check_sel = 0;
-    show_tab(0);
+    show_tab(IDV_TAB_BADGE);
 }
 
 void page_identity_exit(void)
 {
+    // 密码本可能已经删掉了身份页的屏幕，这里必须防御：所有已存指针都被 memset 清掉，
+    // 先释放动图与覆盖层，再删（可能仍存在的）本页屏幕。
+    idv_anim_release();
     close_overlay();
     if (s.page.scr) {
         lv_obj_delete(s.page.scr);
@@ -807,9 +1015,35 @@ void page_identity_exit(void)
 
 void page_identity_key(bsp_btn_t btn, bsp_btn_ev_t ev)
 {
-    // 覆盖层打开时独占按键：仅 OK 关闭，其余忽略。
+    // 密码本在屏时身份页不处理任何按键，只做转发；它自己决定何时退出。
+    if (page_vault_active()) {
+        page_vault_key(btn, ev);
+        // 密码本退出时会删掉整个 LVGL 屏幕，身份页必须重建，否则留在屏幕上的是被删的屏。
+        if (!page_vault_active()) {
+            int tab = s.tab;
+            page_identity_exit();
+            page_identity_enter();
+            if (tab != IDV_TAB_BADGE) show_tab(tab);
+        }
+        return;
+    }
+
+    // 覆盖层打开时独占按键：全屏二维码可用 ↑↓ 在同一张工牌的多个码之间切换，OK 关闭。
     if (s.overlay) {
-        if (btn == BSP_BTN_OK && (ev == BSP_BTN_CLICK || ev == BSP_BTN_LONG)) {
+        if (s.overlay_kind == IDV_OV_QR && ev == BSP_BTN_CLICK &&
+            (btn == BSP_BTN_UP || btn == BSP_BTN_DOWN)) {
+            app_badge_list_t *list = app_state_badges();
+            int sel = app_state_badge_selected();
+            if (list && sel >= 0 && sel < list->count) {
+                app_badge_t *b = &list->items[sel];
+                int n = app_badge_qr_count(b);
+                if (n > 1) {
+                    s.qr_overlay_index = (s.qr_overlay_index +
+                        (btn == BSP_BTN_UP ? n - 1 : 1)) % n;
+                    open_qr_overlay(b, s.qr_overlay_index);
+                }
+            }
+        } else if (btn == BSP_BTN_OK && (ev == BSP_BTN_CLICK || ev == BSP_BTN_LONG)) {
             close_overlay();
         }
         return;
@@ -825,16 +1059,22 @@ void page_identity_key(bsp_btn_t btn, bsp_btn_ev_t ev)
     }
 
     switch (s.tab) {
-    case 0: badge_key(btn, ev); break;
-    case 1: totp_key(btn, ev);  break;
-    default: check_key(btn, ev); break;
+    case IDV_TAB_BADGE: badge_key(btn, ev); break;
+    case IDV_TAB_TOTP:  totp_key(btn, ev);  break;
+    case IDV_TAB_VAULT: vault_key(btn, ev); break;
+    default:            check_key(btn, ev); break;
     }
 }
 
 void page_identity_tick(void)
 {
+    // 密码本在屏时由它自己的节拍负责刷新，身份页不碰任何控件。
+    if (page_vault_active()) {
+        page_vault_tick();
+        return;
+    }
     if (!s.page.scr || s.overlay) return;
-    if (s.tab == 1 && app_state_totp_count() > 0) {
+    if (s.tab == IDV_TAB_TOTP && app_state_totp_count() > 0) {
         totp_show();
     }
 }

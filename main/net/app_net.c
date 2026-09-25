@@ -10,10 +10,15 @@
 //     存储（esp_wifi_set_storage(WIFI_STORAGE_RAM)）。
 #include "app_net.h"
 
+#include "app_assets.h"
 #include "app_state.h"
+#include "logic/app_anim.h"
+#include "logic/app_badge.h"
 #include "logic/app_esports.h"
+#include "logic/app_pomodoro.h"
 #include "logic/app_time.h"
 #include "logic/app_totp.h"
+#include "logic/app_vault.h"
 
 #include "cJSON.h"
 #include "esp_crt_bundle.h"
@@ -1410,42 +1415,224 @@ static const char PROV_PAGE[] =
     "<!DOCTYPE html>\n"
     "<html lang=\"zh-CN\"><head><meta charset=\"utf-8\">\n"
     "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n"
-    "<title>FoloToy AI Passport 配网</title>\n"
+    "<title>FoloToy AI Passport 配置</title>\n"
     "<style>\n"
     "body{font-family:-apple-system,system-ui,sans-serif;margin:0;padding:20px;background:#f5f5f0;color:#222;}\n"
     "h1{font-size:20px;margin:0 0 4px;}\n"
+    "h2{font-size:16px;margin:0 0 10px;}\n"
     ".hint{color:#666;font-size:13px;margin:0 0 16px;}\n"
+    ".st{color:#666;font-size:13px;margin:6px 0 0;line-height:1.6;}\n"
     "form{background:#fff;border-radius:12px;padding:16px;margin-bottom:14px;box-shadow:0 1px 3px rgba(0,0,0,.08);}\n"
     "label{display:block;font-size:13px;color:#444;margin:8px 0 4px;}\n"
-    "input,textarea{width:100%;box-sizing:border-box;padding:10px;border:1px solid #ccc;border-radius:8px;font-size:15px;}\n"
+    "input,textarea,select{width:100%;box-sizing:border-box;padding:10px;border:1px solid #ccc;border-radius:8px;font-size:15px;}\n"
     "textarea{font-size:14px;font-family:ui-monospace,Menlo,Consolas,monospace;line-height:1.5;}\n"
     "button{margin-top:12px;width:100%;padding:12px;border:0;border-radius:8px;background:#2f6f4f;color:#fff;font-size:15px;}\n"
+    ".row{display:flex;gap:8px;}\n"
+    ".row>div{flex:1;}\n"
+    ".item{display:flex;justify-content:space-between;align-items:center;gap:8px;border-bottom:1px solid #eee;padding:8px 0;font-size:14px;}\n"
+    ".item form{background:none;padding:0;margin:0;box-shadow:none;width:auto;}\n"
+    ".item button{width:auto;margin:0;padding:6px 10px;background:#b0403c;font-size:13px;}\n"
     "</style></head><body>\n"
     "<h1>FoloToy AI Passport</h1>\n"
-    "<p class=\"hint\">连上本热点后填写家里的 Wi-Fi，设备即可校时并同步赛事。配网全程不需要互联网。</p>\n"
+    "<p class=\"hint\">除了「联网校时」和「LOL 赛事」，这里填的内容都保存在设备上：重启后仍在，断网也能用。</p>\n"
+
     "<form method=\"post\" action=\"/wifi\">\n"
+    "<h2>Wi-Fi 配网</h2>\n"
     "<label>Wi-Fi 名称 (SSID)</label><input name=\"ssid\" maxlength=\"32\" required>\n"
     "<label>Wi-Fi 密码</label><input name=\"pass\" type=\"password\" maxlength=\"64\">\n"
     "<button type=\"submit\">保存并连接</button>\n"
     "</form>\n"
+
     "<form method=\"post\" action=\"/time\" id=\"tf\">\n"
+    "<h2>时间校准</h2>\n"
+    "<label>需要联网；不校时设备也能走时，只是会慢慢偏。</label>\n"
     "<input type=\"hidden\" name=\"t\" id=\"t\">\n"
-    "<label>时间校准</label>\n"
     "<button type=\"submit\">用手机时间校准设备</button>\n"
     "</form>\n"
+
+    "<form method=\"post\" action=\"/vault\">\n"
+    "<h2>密码本</h2>\n"
+    "<label>名称</label><input name=\"label\" maxlength=\"8\" placeholder=\"校园网\">\n"
+    "<label>账号</label><input name=\"account\" maxlength=\"40\">\n"
+    "<label>密码</label><input name=\"password\" maxlength=\"48\">\n"
+    "<button type=\"submit\">保存一条</button>\n"
+    "<p class=\"st\">口令只在设备小屏上查看，网页不回显。若设备上开启了加密，需先在设备上用手势解锁再保存。</p>\n"
+    "</form>\n"
+    "<div id=\"vaultList\" class=\"st\"></div>\n"
+
+    "<form method=\"post\" action=\"/totp_secret\">\n"
+    "<h2>动态口令</h2>\n"
+    "<label>备注名</label><input name=\"label\" maxlength=\"8\" placeholder=\"校园邮箱\">\n"
+    "<label>密钥 (Base32)</label><input name=\"secret\" maxlength=\"80\" placeholder=\"JBSWY3DPEHPK3PXP\">\n"
+    "<button type=\"submit\">添加口令</button>\n"
+    "<p class=\"st\">只填密钥即可，算法/位数/周期按常见的 SHA1 / 6 位 / 30 秒处理。</p>\n"
+    "</form>\n"
     "<form method=\"post\" action=\"/totp\">\n"
-    "<label>动态口令链接（otpauth://... ，可选）</label>\n"
+    "<label>或粘贴 otpauth:// 链接</label>\n"
     "<input name=\"uri\" maxlength=\"180\" placeholder=\"otpauth://totp/...\">\n"
     "<button type=\"submit\">添加口令</button>\n"
     "</form>\n"
+    "<div id=\"totpList\" class=\"st\"></div>\n"
+
     "<form method=\"post\" action=\"/routine\">\n"
-    "<label>作息表（每行一节：08:00-08:45 第一节，可带 # 注释）</label>\n"
+    "<h2>作息表</h2>\n"
+    "<label>每行一节：08:00-08:45 第一节，可带 # 注释</label>\n"
     "<textarea name=\"text\" rows=\"8\" maxlength=\"5000\" "
     "placeholder=\"08:00-08:45 第一节&#10;08:45-08:55 课间&#10;# 用 @单周 / @双周 分别写两套作息&#10;# @周一 起只改某一天，@周三 再换一天\"></textarea>\n"
     "<button type=\"submit\">导入作息表</button>\n"
     "</form>\n"
-    "<script>document.getElementById('t').value=Math.floor(Date.now()/1000);</script>\n"
+
+    "<form method=\"post\" action=\"/pomo\" id=\"pf\">\n"
+    "<h2>番茄钟</h2>\n"
+    "<div class=\"row\"><div><label>专注（分钟）</label><input name=\"focus\" id=\"pf_focus\" inputmode=\"numeric\"></div>\n"
+    "<div><label>短休息</label><input name=\"brk\" id=\"pf_brk\" inputmode=\"numeric\"></div></div>\n"
+    "<div class=\"row\"><div><label>长休息</label><input name=\"long\" id=\"pf_long\" inputmode=\"numeric\"></div>\n"
+    "<div><label>几段后长休</label><input name=\"cycles\" id=\"pf_cycles\" inputmode=\"numeric\"></div></div>\n"
+    "<label><input type=\"checkbox\" name=\"auto\" id=\"pf_auto\" value=\"1\" style=\"width:auto\"> 阶段结束后自动接续</label>\n"
+    "<p class=\"st\" id=\"pf_stats\"></p>\n"
+    "<button type=\"submit\">保存番茄钟设置</button>\n"
+    "<p class=\"st\">计时进行中无法修改时长与循环次数，请先在设备上停止计时。</p>\n"
+    "</form>\n"
+
+    "<form method=\"post\" action=\"/badge\">\n"
+    "<h2>名片与二维码</h2>\n"
+    "<label>第几张名片（1 起，最多 5 张）</label><input name=\"idx\" value=\"1\" inputmode=\"numeric\">\n"
+    "<label>昵称（最多 8 个汉字）</label><input name=\"nickname\" maxlength=\"8\">\n"
+    "<label>简介第 1 行</label><input name=\"l1\" maxlength=\"12\">\n"
+    "<label>简介第 2 行</label><input name=\"l2\" maxlength=\"12\">\n"
+    "<label>简介第 3 行</label><input name=\"l3\" maxlength=\"12\">\n"
+    "<label>简介第 4 行</label><input name=\"l4\" maxlength=\"12\">\n"
+    "<label>二维码 1：标签 / 内容</label>\n"
+    "<div class=\"row\"><div><input name=\"q1l\" maxlength=\"4\" placeholder=\"身份码\"></div>"
+    "<div><input name=\"q1t\" maxlength=\"120\"></div></div>\n"
+    "<label>二维码 2：标签 / 内容</label>\n"
+    "<div class=\"row\"><div><input name=\"q2l\" maxlength=\"4\"></div>"
+    "<div><input name=\"q2t\" maxlength=\"120\"></div></div>\n"
+    "<label>二维码 3：标签 / 内容</label>\n"
+    "<div class=\"row\"><div><input name=\"q3l\" maxlength=\"4\"></div>"
+    "<div><input name=\"q3t\" maxlength=\"120\"></div></div>\n"
+    "<label>头像动图槽位（-1 表示不用动图）</label><input name=\"slot\" value=\"-1\" inputmode=\"numeric\">\n"
+    "<button type=\"submit\">保存名片</button>\n"
+    "<p class=\"st\">二维码内容留空即删除该位；单条内容最多 120 字节（约 40 个汉字或 120 个字母）。</p>\n"
+    "</form>\n"
+
+    "<form id=\"af\">\n"
+    "<h2>头像动图</h2>\n"
+    "<label>槽位</label><select id=\"aslot\">"
+    "<option value=\"0\">0</option><option value=\"1\">1</option><option value=\"2\">2</option>"
+    "<option value=\"3\">3</option><option value=\"4\">4</option><option value=\"5\">5</option>"
+    "</select>\n"
+    "<label>选择图片或 GIF</label><input type=\"file\" id=\"afile\" accept=\"image/*\">\n"
+    "<button type=\"button\" onclick=\"uploadAnim()\">上传到该槽位</button>\n"
+    "<p class=\"st\" id=\"ast\">由手机解码并缩放后上传，设备只存帧，所以上传不需要联网。"
+    "上限 96x96、24 帧；透明背景会变成黑色；上传成功会覆盖该槽位原内容。</p>\n"
+    "</form>\n"
+    "<div id=\"animList\" class=\"st\"></div>\n"
+
+    "<script>\n"
+    "document.getElementById('t').value=Math.floor(Date.now()/1000);\n"
+    "var ESC={'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',\"'\":'&#39;'};\n"
+    "function esc(s){return String(s==null?'':s).replace(/[&<>\"']/g,function(c){return ESC[c];});}\n"
+    "function delItem(text,idx,action){\n"
+    "  return '<div class=\"item\"><span>'+esc(text)+'</span><form method=\"post\" action=\"'+action+'\">'+\n"
+    "    '<input type=\"hidden\" name=\"i\" value=\"'+idx+'\"><button type=\"submit\">删除</button></form></div>';\n"
+    "}\n"
+    "function loadInfo(){\n"
+    "  fetch('/info').then(function(r){return r.json();}).then(function(d){\n"
+    "    var vl='',es=d.vault.entries||[];\n"
+    "    for(var i=0;i<es.length;i++){vl+=delItem((es[i].label||'(无名)')+' · '+es[i].account,es[i].i,'/vault_del');}\n"
+    "    document.getElementById('vaultList').innerHTML=\n"
+    "      '密码本：'+esc(d.vault.mode)+'，'+d.vault.count+' 条，'+\n"
+    "      (d.vault.encrypted?(d.vault.locked?'已上锁（在设备上解锁后才能新增）':'已解锁'):'无需解锁')+\n"
+    "      (vl?'<div>'+vl+'</div>':'<div>暂无条目</div>');\n"
+    "    var tl='',ts=d.totp.items||[];\n"
+    "    for(var j=0;j<ts.length;j++){tl+=delItem(ts[j].label||'(无备注)',ts[j].i,'/totp_del');}\n"
+    "    document.getElementById('totpList').innerHTML=\n"
+    "      '动态口令：'+d.totp.count+' / '+d.totp.max+(tl?'<div>'+tl+'</div>':'<div>暂无账户</div>');\n"
+    "    var p=d.pomodoro;\n"
+    "    document.getElementById('pf_focus').value=p.focus;\n"
+    "    document.getElementById('pf_brk').value=p.brk;\n"
+    "    document.getElementById('pf_long').value=p['long'];\n"
+    "    document.getElementById('pf_cycles').value=p.cycles;\n"
+    "    document.getElementById('pf_auto').checked=!!p.auto;\n"
+    "    document.getElementById('pf_stats').innerHTML='当前：'+esc(p.state)+'<br>今日 '+p.today_min+' 分钟 / '+p.today_sessions+' 段<br>累计 '+p.total_sessions+' 段 · '+p.total_min+' 分钟';\n"
+    "    var al='',as=d.anim.items||[];\n"
+    "    for(var k=0;k<as.length;k++){\n"
+    "      var s=as[k];\n"
+    "      al+='<div class=\"item\"><span>槽位 '+s.slot+(s.used?('：'+esc(s.name||'未命名')+' '+s.w+'x'+s.h+' · '+s.frames+' 帧'):'：空')+'</span></div>';\n"
+    "    }\n"
+    "    document.getElementById('animList').innerHTML='动图槽位：'+d.anim.used+' / '+d.anim.slots+(al?'<div>'+al+'</div>':'');\n"
+    "  }).catch(function(){document.getElementById('ast').textContent='读取设备数据失败，请刷新页面重试';});\n"
+    "}\n"
+    "function frame565(src,W,H){\n"
+    "  var c=document.createElement('canvas');c.width=W;c.height=H;\n"
+    "  var x=c.getContext('2d',{willReadFrequently:true});\n"
+    "  x.drawImage(src,0,0,W,H);\n"
+    "  var d=x.getImageData(0,0,W,H).data,out=new Uint8Array(W*H*2);\n"
+    "  for(var p=0,i=0;p<d.length;p+=4,i+=2){\n"
+    "    var v=((d[p]>>3)<<11)|((d[p+1]>>2)<<5)|(d[p+2]>>3);\n"
+    "    out[i]=v&255;out[i+1]=(v>>8)&255;\n"
+    "  }\n"
+    "  return out;\n"
+    "}\n"
+    "function decodeFrames(file,maxSide,maxFrames){\n"
+    "  return new Promise(function(resolve,reject){\n"
+    "    var type=file.type||'';\n"
+    "    if(!type){var nm=(file.name||'').toLowerCase();\n"
+    "      type=nm.slice(-4)==='.gif'?'image/gif':nm.slice(-4)==='.png'?'image/png':nm.slice(-5)==='.webp'?'image/webp':'image/jpeg';}\n"
+    "    if(!window.ImageDecoder||(type!=='image/gif'&&type!=='image/webp')){reject(new Error('此浏览器不能解码动图，请用 Chrome/Edge/Safari 新版，或改用单张图片'));return;}\n"
+    "    file.arrayBuffer().then(function(buf){\n"
+    "      var dec=new ImageDecoder({data:buf,type:type});\n"
+    "      dec.tracks.ready.then(function(){\n"
+    "        var track=dec.tracks.selectedTrack;\n"
+    "        var total=Math.min(track.frameCount||1,maxFrames),out={w:0,h:0,frames:[],ms:100},sum=0,cnt=0,seq=Promise.resolve();\n"
+    "        for(var i=0;i<total;i++){(function(idx){\n"
+    "          seq=seq.then(function(){\n"
+    "            return dec.decode({frameIndex:idx}).then(function(r){\n"
+    "              var img=r.image;\n"
+    "              if(!out.w){var sc=Math.min(1,maxSide/Math.max(img.displayWidth,img.displayHeight));\n"
+    "                out.w=Math.max(1,Math.round(img.displayWidth*sc));out.h=Math.max(1,Math.round(img.displayHeight*sc));}\n"
+    "              if(img.duration){sum+=img.duration;cnt++;}\n"
+    "              out.frames.push(frame565(img,out.w,out.h));\n"
+    "              img.close();\n"
+    "            });\n"
+    "          });\n"
+    "        })(i);}\n"
+    "        seq.then(function(){\n"
+    "          if(!out.frames.length){reject(new Error('没有解出任何帧'));return;}\n"
+    "          if(cnt){out.ms=Math.min(1000,Math.max(40,Math.round(sum/cnt/1000)));}\n"
+    "          resolve(out);\n"
+    "        }).catch(reject);\n"
+    "      }).catch(reject);\n"
+    "    }).catch(reject);\n"
+    "  });\n"
+    "}\n"
+    "function uploadAnim(){\n"
+    "  var st=document.getElementById('ast'),f=document.getElementById('afile').files[0];\n"
+    "  var slot=document.getElementById('aslot').value;\n"
+    "  if(!f){st.textContent='请先选择图片或 GIF';return;}\n"
+    "  st.textContent='正在解码…';\n"
+    "  decodeFrames(f,96,24).then(function(res){\n"
+    "    var W=res.w,H=res.h,n=res.frames.length,all=new Uint8Array(W*H*2*n);\n"
+    "    for(var i=0;i<n;i++){all.set(res.frames[i],i*W*H*2);}\n"
+    "    var name=(f.name||'anim').replace(/\\.[^.]+$/,'').slice(0,16);\n"
+    "    var url='/anim?slot='+slot+'&w='+W+'&h='+H+'&frames='+n+'&ms='+res.ms+'&name='+encodeURIComponent(name);\n"
+    "    var xhr=new XMLHttpRequest();\n"
+    "    xhr.open('POST',url);\n"
+    "    xhr.setRequestHeader('Content-Type','application/octet-stream');\n"
+    "    xhr.upload.onprogress=function(e){if(e.total){st.textContent='上传中 '+Math.round(e.loaded/e.total*100)+'%（'+W+'x'+H+'，'+n+' 帧）';}};\n"
+    "    xhr.onload=function(){\n"
+    "      if(xhr.status>=200&&xhr.status<300){document.open();document.write(xhr.responseText);document.close();}\n"
+    "      else{st.textContent='设备拒绝：'+(xhr.responseText?'请查看返回页面':'状态 '+xhr.status);}\n"
+    "    };\n"
+    "    xhr.onerror=function(){st.textContent='上传中断，请重试';};\n"
+    "    xhr.send(all.buffer);\n"
+    "  }).catch(function(e){st.textContent='解码失败：'+(e&&e.message?e.message:'未知原因');});\n"
+    "}\n"
+    "window.addEventListener('load',loadInfo);\n"
+    "</script>\n"
     "</body></html>\n";
+
 
 static void prov_set_note(const char *msg)
 {
@@ -1643,6 +1830,486 @@ static esp_err_t prov_post_routine(httpd_req_t *req)
     return prov_reply(req, msg);
 }
 
+// ---------------------------------------------------------------------------
+// 配置页数据接口（名片 / 密码本 / 口令 / 番茄钟 / 动图）
+// ---------------------------------------------------------------------------
+// 设备只有三个按键，没有键盘：二维码内容、口令密钥、密码这类长文本在设备上几乎无法
+// 输入，只能由手机页面写入。这里只做校验与落盘，一律调用 app_state 的存档函数，与
+// 设备端界面共用同一份持久化数据——写完就离线可用，不依赖手机再次在场。
+
+// 追加字符串并保证以 NUL 结尾；缓冲不足时截断，绝不越界。
+static void buf_append(char *buf, size_t cap, size_t *used, const char *text)
+{
+    size_t n = strlen(text);
+    if (*used + n >= cap) n = (cap - 1 > *used) ? cap - 1 - *used : 0;
+    memcpy(buf + *used, text, n);
+    *used += n;
+    buf[*used] = '\0';
+}
+
+// 以 JSON 字符串字面量形式追加（自带引号），转义 " 与 \ 以及控制字符：标签来自用户
+// 输入，不转义会让手机端整段解析失败。
+static void json_append_str(char *buf, size_t cap, size_t *used, const char *text)
+{
+    buf_append(buf, cap, used, "\"");
+    for (const char *p = text ? text : ""; *p && *used + 8 < cap; p++) {
+        unsigned char c = (unsigned char)*p;
+        char esc[8];
+        if (c == '"' || c == '\\') {
+            esc[0] = '\\';
+            esc[1] = (char)c;
+            esc[2] = '\0';
+        } else if (c < 0x20) {
+            snprintf(esc, sizeof(esc), "\\u%04x", c);
+        } else {
+            esc[0] = (char)c;
+            esc[1] = '\0';
+        }
+        buf_append(buf, cap, used, esc);
+    }
+    buf_append(buf, cap, used, "\"");
+}
+
+// 表单字段的接收缓冲要按"编码后"长度给：httpd_query_key_value 是在百分号解码之前判断
+// 是否超长的，一个 UTF-8 汉字编码后会变成 3 组 %XX（原文的 3 倍），若直接用模型字段的
+// 大小当缓冲，中文输入会被误判成超长而整段丢弃。
+#define FORM_RAW_CAP(bytes) ((bytes) * 3 + 8)
+
+// 取表单字段并做 URL 解码；字段缺失或超出缓冲返回 false（此时内容已被 httpd 标记
+// 截断，直接当失败处理，避免把半截文本当成用户输入存下去）。
+static bool form_field(const char *body, const char *key, char *out, size_t cap)
+{
+    if (!out || cap == 0) return false;
+    out[0] = '\0';
+    if (httpd_query_key_value(body, key, out, cap) != ESP_OK) return false;
+    url_decode(out);
+    return true;
+}
+
+// 取查询串整数，缺失或非法时用默认值。
+static int query_int(const char *query, const char *key, int fallback)
+{
+    char v[16];
+    if (!query || httpd_query_key_value(query, key, v, sizeof(v)) != ESP_OK) return fallback;
+    return atoi(v);
+}
+
+// 表单整体读入栈缓冲；超出上限返回 false，由调用方回 413。
+static bool read_form_checked(httpd_req_t *req, char *buf, size_t cap)
+{
+    if (req->content_len <= 0) return false;
+    if ((size_t)req->content_len >= cap) return false;
+    return read_form_body(req, buf, cap) > 0;
+}
+
+static esp_err_t prov_post_vault(httpd_req_t *req)
+{
+    char body[480];
+    if (!read_form_checked(req, body, sizeof(body))) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        return prov_reply(req, "内容为空或过长");
+    }
+
+    char label[APP_VAULT_LABEL_LEN];
+    char account[APP_VAULT_ACCOUNT_LEN];
+    char password[APP_VAULT_PASSWORD_LEN];
+    form_field(body, "label", label, sizeof(label));
+    bool has_account = form_field(body, "account", account, sizeof(account));
+    bool has_password = form_field(body, "password", password, sizeof(password));
+    if (!has_account && !has_password) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        return prov_reply(req, "请至少填写账号或密码");
+    }
+
+    app_vault_t *v = app_state_vault();
+    int index = -1;
+    app_vault_status_t st = app_vault_add(v, label, account, password, &index);
+    if (st == APP_VAULT_ERR_LOCKED) {
+        return prov_reply(req, "密码本已加密且当前未解锁：请先在设备上用手势解锁，再回来保存");
+    }
+    if (st != APP_VAULT_OK) {
+        return prov_reply(req, app_vault_status_text(st));
+    }
+    app_state_save_vault();
+
+    char msg[96];
+    snprintf(msg, sizeof(msg), "已保存第 %d 条（共 %d 条）", index + 1, v->count);
+    return prov_reply(req, msg);
+}
+
+// 删除条目。序号用 1 起始，与页面列表一致，避免用户在浏览器和屏幕之间换算。
+static esp_err_t prov_post_vault_del(httpd_req_t *req)
+{
+    char body[128];
+    if (!read_form_checked(req, body, sizeof(body))) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        return prov_reply(req, "内容为空或过长");
+    }
+    char num[12];
+    if (!form_field(body, "i", num, sizeof(num))) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        return prov_reply(req, "缺少要删除的序号");
+    }
+
+    app_vault_t *v = app_state_vault();
+    app_vault_status_t st = app_vault_remove(v, atoi(num) - 1);
+    if (st == APP_VAULT_ERR_LOCKED) {
+        return prov_reply(req, "密码本已加密且当前未解锁：请先在设备上解锁");
+    }
+    if (st != APP_VAULT_OK) {
+        return prov_reply(req, app_vault_status_text(st));
+    }
+    app_state_save_vault();
+    return prov_reply(req, "已删除");
+}
+
+// 动态口令：只让用户填备注名与 Base32 密钥，算法/位数/周期用最常见的默认值，避免
+// 在手机上多填三格还填错。
+static esp_err_t prov_post_totp_secret(httpd_req_t *req)
+{
+    char body[256];
+    if (!read_form_checked(req, body, sizeof(body))) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        return prov_reply(req, "内容为空或过长");
+    }
+
+    char label[24];
+    char secret[128];
+    form_field(body, "label", label, sizeof(label));
+    if (!form_field(body, "secret", secret, sizeof(secret)) || secret[0] == '\0') {
+        httpd_resp_set_status(req, "400 Bad Request");
+        return prov_reply(req, "请填写密钥");
+    }
+
+    app_totp_account_t acct;
+    memset(&acct, 0, sizeof(acct));
+    acct.digits = 6;
+    acct.period = 30;
+    acct.algo = APP_TOTP_ALGO_SHA1;
+    if (!app_totp_base32_decode(secret, acct.secret, sizeof(acct.secret), &acct.secret_len) ||
+        acct.secret_len == 0) {
+        return prov_reply(req, "密钥不是合法的 Base32：请确认只包含 A-Z 与 2-7，不要带空格或数字 0/1");
+    }
+    if (label[0]) copy_trunc(acct.label, sizeof(acct.label), label);
+
+    int idx = app_state_totp_add(&acct);
+    if (idx < 0) {
+        return prov_reply(req, "口令账户已满（上限 10 个），请先删除一个");
+    }
+    app_state_save_totp();
+
+    char msg[80];
+    snprintf(msg, sizeof(msg), "已添加第 %d 个口令账户（共 %d 个）", idx + 1, app_state_totp_count());
+    return prov_reply(req, msg);
+}
+
+static esp_err_t prov_post_totp_del(httpd_req_t *req)
+{
+    char body[128];
+    if (!read_form_checked(req, body, sizeof(body))) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        return prov_reply(req, "内容为空或过长");
+    }
+    char num[12];
+    if (!form_field(body, "i", num, sizeof(num))) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        return prov_reply(req, "缺少要删除的序号");
+    }
+    if (!app_state_totp_remove(atoi(num) - 1)) {
+        return prov_reply(req, "序号不存在");
+    }
+    app_state_save_totp();
+    return prov_reply(req, "已删除");
+}
+
+// 名片：昵称 + 4 行文字 + 最多 3 个二维码 + 动图槽位。二维码留空即视为删除该位。
+static esp_err_t prov_post_badge(httpd_req_t *req)
+{
+    // 3 个二维码的内容经表单编码后最长可到 3 x 360 字节，加上其余字段留足余量。
+    char body[3072];
+    if (!read_form_checked(req, body, sizeof(body))) {
+        httpd_resp_set_status(req, "413 Payload Too Large");
+        return prov_reply(req, "内容过长：二维码内容请控制在 120 字节以内");
+    }
+
+    app_badge_list_t *list = app_state_badges();
+    if (list->count <= 0 && app_badge_add(list) < 0) {
+        return prov_reply(req, "名片创建失败");
+    }
+
+    char num[12];
+    int index = form_field(body, "idx", num, sizeof(num)) ? atoi(num) - 1 : 0;
+    if (index < 0 || index >= list->count) index = 0;
+    app_badge_t *b = &list->items[index];
+
+    char nickname[sizeof(b->nickname)];
+    form_field(body, "nickname", nickname, sizeof(nickname));
+
+    char line_buf[APP_BADGE_MAX_LINES][sizeof(b->lines[0])];
+    const char *lines[APP_BADGE_MAX_LINES];
+    int line_count = 0;
+    for (int i = 0; i < APP_BADGE_MAX_LINES; i++) {
+        char key[4];
+        snprintf(key, sizeof(key), "l%d", i + 1);
+        if (form_field(body, key, line_buf[i], sizeof(line_buf[i])) && line_buf[i][0] != '\0') {
+            lines[line_count++] = line_buf[i];
+        }
+    }
+    if (!app_badge_set_text(b, nickname, lines, line_count)) {
+        return prov_reply(req, "昵称或简介不是合法文本");
+    }
+
+    for (int q = 0; q < APP_BADGE_QR_MAX; q++) {
+        char kt[4];
+        char kl[4];
+        char text[APP_BADGE_QR_TEXT_LEN];
+        char label[APP_BADGE_QR_LABEL_LEN];
+        snprintf(kt, sizeof(kt), "q%dt", q + 1);
+        snprintf(kl, sizeof(kl), "q%dl", q + 1);
+        bool has_text = form_field(body, kt, text, sizeof(text));
+        form_field(body, kl, label, sizeof(label));
+
+        if (!has_text || text[0] == '\0') {
+            app_badge_qr_remove(b, q);
+            continue;
+        }
+        char msg[96];
+        if (q < b->qr_count) {
+            if (!app_badge_qr_set(b, q, label, text)) {
+                snprintf(msg, sizeof(msg), "第 %d 个二维码内容不合法或超过 120 字节", q + 1);
+                return prov_reply(req, msg);
+            }
+        } else if (app_badge_qr_add(b, label, text) < 0) {
+            snprintf(msg, sizeof(msg), "第 %d 个二维码内容不合法或超过 120 字节", q + 1);
+            return prov_reply(req, msg);
+        }
+    }
+
+    // 动图槽位：-1 表示不带头像动图。
+    if (form_field(body, "slot", num, sizeof(num))) {
+        app_badge_set_anim(b, atoi(num));
+    }
+
+    app_state_save_badges();
+
+    char msg[96];
+    snprintf(msg, sizeof(msg), "已保存第 %d 张名片：%d 行简介、%d 个二维码、动图槽位 %d",
+             index + 1, line_count, b->qr_count, b->anim_slot);
+    return prov_reply(req, msg);
+}
+
+static esp_err_t prov_post_pomo(httpd_req_t *req)
+{
+    char body[256];
+    if (!read_form_checked(req, body, sizeof(body))) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        return prov_reply(req, "内容为空或过长");
+    }
+
+    app_pomodoro_t *p = app_state_pomodoro();
+    char tmp[12];
+    int focus = p->focus_minutes;
+    int brk = p->break_minutes;
+    int lng = p->long_break_minutes;
+    int cycles = p->cycles_per_long_break;
+    bool auto_next = p->auto_next;
+
+    if (form_field(body, "focus", tmp, sizeof(tmp))) focus = atoi(tmp);
+    if (form_field(body, "brk", tmp, sizeof(tmp))) brk = atoi(tmp);
+    if (form_field(body, "long", tmp, sizeof(tmp))) lng = atoi(tmp);
+    if (form_field(body, "cycles", tmp, sizeof(tmp))) cycles = atoi(tmp);
+    if (form_field(body, "auto", tmp, sizeof(tmp))) auto_next = atoi(tmp) != 0;
+
+    bool durations_ok = app_pomodoro_set_durations(p, focus, brk);
+    bool long_ok = app_pomodoro_set_long_break(p, lng, cycles);
+    app_pomodoro_set_auto_next(p, auto_next);
+    app_state_save_pomodoro();
+
+    if (p->state != APP_POMO_IDLE && !durations_ok && !long_ok) {
+        return prov_reply(req, "番茄钟正在计时：时长与循环次数未修改，请先在设备上停止计时；自动接续已保存");
+    }
+    return prov_reply(req, "番茄钟设置已保存（自动接续已同步）");
+}
+
+// 动图上传：手机端解码并缩放，设备只收 RGB565 帧序列。请求体是纯二进制，参数走
+// 查询串，于是设备端可以边收边写，不必把整段动图放进内存。
+static esp_err_t prov_post_anim(httpd_req_t *req)
+{
+    if (!app_assets_ready()) {
+        return prov_reply(req, "设备的动图资源分区不可用，无法保存动图");
+    }
+
+    char query[256];
+    char val[64];
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        return prov_reply(req, "缺少上传参数");
+    }
+
+    int slot = query_int(query, "slot", -1);
+    int w = query_int(query, "w", 0);
+    int h = query_int(query, "h", 0);
+    int frames = query_int(query, "frames", 0);
+    int ms = query_int(query, "ms", APP_ANIM_FRAME_MS_DEFAULT);
+
+    char name[APP_ANIM_NAME_LEN];
+    name[0] = '\0';
+    if (httpd_query_key_value(query, "name", val, sizeof(val)) == ESP_OK) {
+        url_decode(val);
+        copy_trunc(name, sizeof(name), val);
+    }
+
+    int total = req->content_len;
+    app_anim_status_t vst = app_anim_validate(w, h, frames, (uint32_t)total);
+    if (vst != APP_ANIM_OK) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        char msg[128];
+        snprintf(msg, sizeof(msg), "参数不合法：%s（宽高上限 %d，帧数上限 %d）",
+                 app_anim_status_text(vst), APP_ANIM_MAX_SIDE, APP_ANIM_MAX_FRAMES);
+        return prov_reply(req, msg);
+    }
+
+    app_anim_meta_t meta = {
+        .width = (uint16_t)w,
+        .height = (uint16_t)h,
+        .frame_count = (uint16_t)frames,
+        .frame_ms = app_anim_frame_ms_clamp(ms),
+    };
+    app_assets_writer_t writer;
+    esp_err_t err = app_assets_write_begin(&writer, slot, &meta, name, (uint32_t)total);
+    if (err != ESP_OK) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        return prov_reply(req, "槽位不可写：槽号越界或数据超过槽位容量");
+    }
+
+    uint8_t chunk[2048];
+    int got = 0;
+    while (got < total) {
+        int r = httpd_req_recv(req, (char *)chunk, sizeof(chunk));
+        if (r == HTTPD_SOCK_ERR_TIMEOUT) continue;
+        if (r <= 0 || app_assets_write_chunk(&writer, chunk, (size_t)r) != ESP_OK) {
+            app_assets_write_abort(&writer);
+            httpd_resp_set_status(req, "400 Bad Request");
+            return prov_reply(req, "上传中断，已放弃写入（原动图已被清除）");
+        }
+        got += r;
+    }
+
+    if (app_assets_write_commit(&writer) != ESP_OK) {
+        return prov_reply(req, "写入校验失败，请重新上传");
+    }
+
+    char msg[128];
+    snprintf(msg, sizeof(msg), "动图已保存到槽位 %d：%dx%d，%d 帧，每帧 %u 毫秒",
+             slot, w, h, frames, (unsigned)meta.frame_ms);
+    return prov_reply(req, msg);
+}
+
+// 页面初始化时一次性取回设备端状态：动图槽位、密码本摘要、口令账户、番茄钟参数与
+// 统计。密码本只给"名称 + 账号"、口令只给备注名——网页不是查看口令的地方，这样手机
+// 被别人拿到也看不到敏感内容。
+static esp_err_t prov_get_info(httpd_req_t *req)
+{
+    const size_t cap = 8192;
+    char *buf = (char *)malloc(cap);
+    if (!buf) {
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        return prov_reply(req, "设备内存不足，请重试");
+    }
+    size_t used = 0;
+    buf[0] = '\0';
+    char tmp[192];
+
+    buf_append(buf, cap, &used, "{\"anim\":{\"ready\":");
+    buf_append(buf, cap, &used, app_assets_ready() ? "true" : "false");
+    snprintf(tmp, sizeof(tmp), ",\"slots\":%d,\"used\":%d,\"items\":[",
+             APP_ANIM_SLOT_MAX, app_assets_used_slots());
+    buf_append(buf, cap, &used, tmp);
+
+    for (int i = 0; i < APP_ANIM_SLOT_MAX; i++) {
+        app_anim_header_t h;
+        if (i) buf_append(buf, cap, &used, ",");
+        if (app_assets_slot_header(i, &h) == ESP_OK) {
+            char name[APP_ANIM_NAME_LEN];
+            app_anim_name_copy(&h, name, sizeof(name));
+            snprintf(tmp, sizeof(tmp),
+                     "{\"slot\":%d,\"used\":true,\"w\":%u,\"h\":%u,\"frames\":%u,\"ms\":%u,\"name\":",
+                     i, (unsigned)h.width, (unsigned)h.height,
+                     (unsigned)h.frame_count, (unsigned)app_anim_frame_ms_get(&h));
+            buf_append(buf, cap, &used, tmp);
+            json_append_str(buf, cap, &used, name);
+            buf_append(buf, cap, &used, "}");
+        } else {
+            snprintf(tmp, sizeof(tmp), "{\"slot\":%d,\"used\":false}", i);
+            buf_append(buf, cap, &used, tmp);
+        }
+    }
+    buf_append(buf, cap, &used, "]},");
+
+    app_vault_t *v = app_state_vault();
+    int vault_count = v->count;
+    buf_append(buf, cap, &used, "\"vault\":{\"encrypted\":");
+    buf_append(buf, cap, &used, app_vault_is_encrypted(v) ? "true" : "false");
+    buf_append(buf, cap, &used, ",\"locked\":");
+    buf_append(buf, cap, &used, app_vault_is_locked(v) ? "true" : "false");
+    buf_append(buf, cap, &used, ",\"mode\":");
+    json_append_str(buf, cap, &used, app_vault_mode_name(v->mode));
+    snprintf(tmp, sizeof(tmp), ",\"count\":%d,\"entries\":[", vault_count);
+    buf_append(buf, cap, &used, tmp);
+
+    bool first = true;
+    for (int i = 0; i < vault_count; i++) {
+        const app_vault_entry_t *e = app_vault_at(v, i);
+        if (!e) continue;
+        if (!first) buf_append(buf, cap, &used, ",");
+        first = false;
+        snprintf(tmp, sizeof(tmp), "{\"i\":%d,\"label\":", i + 1);
+        buf_append(buf, cap, &used, tmp);
+        json_append_str(buf, cap, &used, e->label);
+        buf_append(buf, cap, &used, ",\"account\":");
+        json_append_str(buf, cap, &used, e->account);
+        buf_append(buf, cap, &used, "}");
+    }
+    buf_append(buf, cap, &used, "]},");
+
+    int totp_count = app_state_totp_count();
+    snprintf(tmp, sizeof(tmp), "\"totp\":{\"max\":%d,\"count\":%d,\"items\":[",
+             APP_TOTP_MAX_ACCOUNTS, totp_count);
+    buf_append(buf, cap, &used, tmp);
+    first = true;
+    for (int i = 0; i < totp_count; i++) {
+        const app_totp_account_t *a = app_state_totp_at(i);
+        if (!a) continue;
+        if (!first) buf_append(buf, cap, &used, ",");
+        first = false;
+        snprintf(tmp, sizeof(tmp), "{\"i\":%d,\"label\":", i + 1);
+        buf_append(buf, cap, &used, tmp);
+        json_append_str(buf, cap, &used, a->label);
+        buf_append(buf, cap, &used, "}");
+    }
+    buf_append(buf, cap, &used, "]},");
+
+    app_pomodoro_t *p = app_state_pomodoro();
+    snprintf(tmp, sizeof(tmp),
+             "\"pomodoro\":{\"focus\":%d,\"brk\":%d,\"long\":%d,\"cycles\":%d,\"auto\":%s,"
+             "\"today_min\":%d,\"today_sessions\":%d,\"total_sessions\":%d,\"total_min\":%d,\"state\":",
+             p->focus_minutes, p->break_minutes, p->long_break_minutes, p->cycles_per_long_break,
+             p->auto_next ? "true" : "false", p->focus_minutes_today, p->today_sessions,
+             p->total_focus_sessions, p->total_focus_minutes);
+    buf_append(buf, cap, &used, tmp);
+    json_append_str(buf, cap, &used, app_pomodoro_state_name(p->state));
+    buf_append(buf, cap, &used, "},");
+
+    snprintf(tmp, sizeof(tmp), "\"badge\":{\"count\":%d,\"selected\":%d}}",
+             app_state_badges()->count, app_state_badge_selected());
+    buf_append(buf, cap, &used, tmp);
+
+    httpd_resp_set_type(req, "application/json; charset=utf-8");
+    esp_err_t err = httpd_resp_send(req, buf, HTTPD_RESP_USE_STRLEN);
+    free(buf);
+    return err;
+}
+
 static void fill_ap_config(wifi_config_t *ap)
 {
     memset(ap, 0, sizeof(*ap));
@@ -1678,7 +2345,7 @@ esp_err_t app_net_prov_start(void)
     if (err != ESP_OK) return err;
 
     httpd_config_t hc = HTTPD_DEFAULT_CONFIG();
-    hc.max_uri_handlers = 7;
+    hc.max_uri_handlers = 16;
     hc.lru_purge_enable = true;
     hc.stack_size = 6144;
     err = httpd_start(&s_httpd, &hc);
@@ -1693,11 +2360,27 @@ esp_err_t app_net_prov_start(void)
     httpd_uri_t u_time = { .uri = "/time", .method = HTTP_POST, .handler = prov_post_time, .user_ctx = NULL };
     httpd_uri_t u_totp = { .uri = "/totp", .method = HTTP_POST, .handler = prov_post_totp, .user_ctx = NULL };
     httpd_uri_t u_routine = { .uri = "/routine", .method = HTTP_POST, .handler = prov_post_routine, .user_ctx = NULL };
+    httpd_uri_t u_info = { .uri = "/info", .method = HTTP_GET, .handler = prov_get_info, .user_ctx = NULL };
+    httpd_uri_t u_vault = { .uri = "/vault", .method = HTTP_POST, .handler = prov_post_vault, .user_ctx = NULL };
+    httpd_uri_t u_vault_del = { .uri = "/vault_del", .method = HTTP_POST, .handler = prov_post_vault_del, .user_ctx = NULL };
+    httpd_uri_t u_totp_secret = { .uri = "/totp_secret", .method = HTTP_POST, .handler = prov_post_totp_secret, .user_ctx = NULL };
+    httpd_uri_t u_totp_del = { .uri = "/totp_del", .method = HTTP_POST, .handler = prov_post_totp_del, .user_ctx = NULL };
+    httpd_uri_t u_badge = { .uri = "/badge", .method = HTTP_POST, .handler = prov_post_badge, .user_ctx = NULL };
+    httpd_uri_t u_pomo = { .uri = "/pomo", .method = HTTP_POST, .handler = prov_post_pomo, .user_ctx = NULL };
+    httpd_uri_t u_anim = { .uri = "/anim", .method = HTTP_POST, .handler = prov_post_anim, .user_ctx = NULL };
     httpd_register_uri_handler(s_httpd, &u_root);
     httpd_register_uri_handler(s_httpd, &u_wifi);
     httpd_register_uri_handler(s_httpd, &u_time);
     httpd_register_uri_handler(s_httpd, &u_totp);
     httpd_register_uri_handler(s_httpd, &u_routine);
+    httpd_register_uri_handler(s_httpd, &u_info);
+    httpd_register_uri_handler(s_httpd, &u_vault);
+    httpd_register_uri_handler(s_httpd, &u_vault_del);
+    httpd_register_uri_handler(s_httpd, &u_totp_secret);
+    httpd_register_uri_handler(s_httpd, &u_totp_del);
+    httpd_register_uri_handler(s_httpd, &u_badge);
+    httpd_register_uri_handler(s_httpd, &u_pomo);
+    httpd_register_uri_handler(s_httpd, &u_anim);
 
     net_lock();
     s_prov_active = true;
