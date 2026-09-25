@@ -374,7 +374,7 @@ void ui_digit_row_set(ui_digit_row_t *row, const char *text, uint32_t color)
 {
     if (!row) return;
     const char *cursor = text ? text : "";
-    for (int i = 0; i < row.count; i++) {
+    for (int i = 0; i < row->count; i++) {
         char ch[2] = { (cursor && *cursor) ? *cursor : ' ', 0 };
         if (cursor && *cursor) cursor++;
         lv_label_set_text(row->labels[i], ch);

@@ -201,7 +201,9 @@ static void app_tick(lv_timer_t *timer)
     }
 
     if (!s_asleep) {
-        if (s_current < 0) page_home_tick();
+        // 引导浮层盖在当前页之上，且可能在主页或设置页打开，所以单独走它自己的节拍。
+        if (onboarding_active()) onboarding_tick();
+        else if (s_current < 0) page_home_tick();
         else MODULES[s_current].tick();
     }
 

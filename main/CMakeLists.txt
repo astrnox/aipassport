@@ -29,7 +29,7 @@ idf_component_register(
          "ui/ui_timeedit.c"
     INCLUDE_DIRS "."
     REQUIRES bsp bt esp_event esp_hw_support esp_netif esp_timer esp_wifi nvs_flash
-             lvgl esp_http_client esp_http_server mbedtls
+             lvgl esp_http_client esp_http_server json mbedtls
 )
 
 # 中文字形：由 tools/gen_fonts.py 生成，覆盖常用汉字集。生成的是普通 C 源文件，

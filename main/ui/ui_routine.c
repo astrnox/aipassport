@@ -246,7 +246,7 @@ static void build_today(void)
 
     if (!day || day->count <= 0) {
         ui_empty_create(v, "还没有作息表",
-                        "到"设置"里一键套用走读或住校模板，"
+                        "到\u201c设置\u201d里一键套用走读或住校模板，"
                         "也可以在手机配置页粘贴自己的作息文本");
         ui_page_set_hint("长按↓ 到设置套用模板  长按OK 返回");
         return;

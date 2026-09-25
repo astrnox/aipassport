@@ -6,6 +6,8 @@
 
 #include "bsp_button.h"
 
+#include <stdbool.h>
+
 // 1 时间与日历：万年历 / 时间进度 / 秒表·计时器
 void page_time_enter(void);
 void page_time_exit(void);
@@ -58,4 +60,5 @@ bool home_quick_active(void);
 void onboarding_open(void);
 void onboarding_close(void);
 void onboarding_key(bsp_btn_t btn, bsp_btn_ev_t ev);
+void onboarding_tick(void);
 bool onboarding_active(void);

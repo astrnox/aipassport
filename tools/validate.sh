@@ -61,6 +61,19 @@ run_static_checks() {
             -o "${test_dir}/test_demo_${demo}_runtime"
         "${test_dir}/test_demo_${demo}_runtime"
     done
+    # 工具箱的纯逻辑层（不依赖 ESP-IDF/LVGL）：口令、作息、农历、番茄钟、提醒、赛事排序。
+    for logic in badge esports pomodoro qr reminder routine time totp; do
+        extra=""
+        if [[ "${logic}" == "reminder" ]]; then
+            extra="main/logic/app_time.c"
+        fi
+        "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+            "tests/test_app_${logic}.c" "main/logic/app_${logic}.c" \
+            main/logic/app_text.c ${extra} \
+            -o "${test_dir}/test_app_${logic}"
+        "${test_dir}/test_app_${logic}"
+    done
+    PYTHONDONTWRITEBYTECODE=1 python3 tests/test_font_coverage.py
     PYTHONDONTWRITEBYTECODE=1 python3 tests/test_deep_sleep_contract.py
     PYTHONDONTWRITEBYTECODE=1 python3 tests/test_check_repo.py
     PYTHONDONTWRITEBYTECODE=1 python3 tests/test_verify_firmware.py

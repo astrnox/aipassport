@@ -341,10 +341,7 @@ static void prov_start_task(void *arg)
 
 static void prov_refresh(void)
 {
-    if (!s.prov) return;
-
-    lv_obj_t *info = lv_obj_get_child(s.prov, 1);   // 0 是标题
-    if (!info) return;
+    if (!s.prov || !s.prov_note) return;
 
     char text[160];
     if (s_prov_busy) {
@@ -358,12 +355,7 @@ static void prov_refresh(void)
                  app_net_prov_ssid(), app_net_prov_pass(), app_net_prov_url(),
                  note ? note : "手机连上热点后打开网址填写 Wi-Fi、校准时间或导入口令密钥。");
     }
-    lv_label_set_text(info, text);
-
-    if (s.prov_note) {
-        // 与 info 同源，避免重复绘制两份内容。
-        lv_obj_add_flag(s.prov_note, LV_OBJ_FLAG_HIDDEN);
-    }
+    lv_label_set_text(s.prov_note, text);
 }
 
 static void prov_open(void)
@@ -715,6 +707,9 @@ void page_settings_tick(void)
 {
     if (!s.page.scr) return;
 
+    // 引导浮层盖在本页之上，提示条与列表都由引导自己维护。
+    if (onboarding_active()) return;
+
     // 配网启动任务、校时任务都在别的任务里推进，这里只把结果搬到界面上。
     if (s.prov) {
         prov_refresh();
@@ -735,16 +730,24 @@ void page_settings_tick(void)
 typedef struct {
     lv_obj_t *ov;
     lv_obj_t *card;
+    lv_obj_t *note;
     ui_row_t rows[3];
     int row_count;
     int sel;
     int step;
-    bool prov_started;
+    bool prov_started;   // 上一次渲染时热点是否已开启，用于只重画一次
 } onboard_t;
 
 static onboard_t s_ob;
 
 static void onboarding_render(void);
+
+// 每一步的说明。第一步解释为什么需要时间，第二步说明模板可改，第三步说明口令离线可用。
+static const char *const OB_STEP_NOTE[3] = {
+    "时间用于动态口令、作息倒计时与提醒。未校准也能用，但口令可能与服务器不一致。",
+    "作息决定主页的课程倒计时。先选一个最接近的模板，之后可在作息页逐项调整。",
+    "动态口令完全离线生成。只有需要导入已有密钥时才用热点配网。",
+};
 
 static void onboarding_finish(void)
 {
@@ -764,7 +767,10 @@ static void onboarding_finish(void)
         s_ob.card = NULL;
     }
     memset(&s_ob, 0, sizeof(s_ob));
-    ui_page_set_hint(HINT_HOME);
+
+    // 引导可能从设置页打开（重新运行），也可能开机时直接打开；提示条要还给对应的页面。
+    s.hint[0] = '\0';
+    ui_page_set_hint(s.page.scr ? HINT_SETTINGS : HINT_HOME);
     ui_app_refresh_home();
 }
 
@@ -785,8 +791,9 @@ static void onboarding_load_template(bool boarding)
     app_routine_load_template(app_state_routine(), boarding);
     app_state_save_routine();
     app_state_save_settings();
-    ui_hint_flash(boarding ? "已套用住校模板" : "已套用走读模板", 1500);
+    // 先切步再提示：切步会整卡重画并重设提示条，顺序反了这次反馈会被立刻覆盖。
     onboarding_advance();
+    ui_hint_flash(boarding ? "已套用住校模板" : "已套用走读模板", 1500);
 }
 
 static void onboarding_manual_done(bool saved, void *user)
@@ -800,6 +807,7 @@ static void onboarding_manual_done(bool saved, void *user)
         if (app_time_valid(&dt)) {
             app_state_set_time(&dt, "手动");
             onboarding_advance();
+            ui_hint_flash("时间已设置为手动值", 1500);
             return;
         }
         ui_hint_flash("日期无效，未保存", 1800);
@@ -842,23 +850,95 @@ static void onboarding_render(void)
 {
     if (!s_ob.ov) return;
 
+    // 每步都整卡重画：步骤之间控件数不同，复用旧卡反而要逐个改写类型。
     if (s_ob.card) {
         lv_obj_delete(s_ob.card);
         s_ob.card = NULL;
+        s_ob.note = NULL;
     }
+    s_ob.row_count = 0;
 
-    char title[24];
+    char title[48];
     snprintf(title, sizeof(title), "首次设置  %d / 3", s_ob.step + 1);
 
-    lv_obj_t *card = NULL;
-    // 卡片高度按步骤内容给足，避免长说明被裁掉。
-    lv_obj_set_size(s_ob.ov, UI_W, UI_H);
-    lv_obj_t *ov = s_ob.ov;
-    lv_obj_delete(s_ob.ov);   // 复用同一套布局函数：删掉旧底重画，保证高度跟随内容
+    // 卡片只占内容区，状态栏与底部提示条保持可见，用户始终知道现在几点、能按什么。
+    lv_obj_t *card = ui_card_create(s_ob.ov, 12, 8, UI_W - 24,
+                                    UI_H - UI_STATUS_H - UI_HINT_H - 16, ui_c_accent());
+    s_ob.card = card;
+    lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(card, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_START);
+    lv_obj_set_style_pad_all(card, 10, 0);
+    lv_obj_set_style_pad_row(card, 6, 0);
 
-    s_ob.ov = ov;
-    (void)card;
-    (void)title;
+    ui_label_create(card, title, ui_font_title, ui_c_text());
+
+    s_ob.note = ui_label_create(card, OB_STEP_NOTE[s_ob.step], ui_font_hint, ui_c_dim());
+    lv_obj_set_width(s_ob.note, UI_W - 24 - 20);
+    lv_label_set_long_mode(s_ob.note, LV_LABEL_LONG_WRAP);
+
+    if (s_ob.step == 0) {
+        s_ob.rows[0] = overlay_row_create(card, "手动设置时间", "");
+        s_ob.rows[1] = overlay_row_create(card, "跳过，稍后校准", "");
+        s_ob.row_count = 2;
+    } else if (s_ob.step == 1) {
+        s_ob.rows[0] = overlay_row_create(card, "住校模板（含晚自习）", "");
+        s_ob.rows[1] = overlay_row_create(card, "走读模板", "");
+        s_ob.row_count = 2;
+    } else {
+        if (s_prov_busy) {
+            s_ob.rows[0] = overlay_row_create(card, "正在开启热点…", "");
+        } else if (app_net_prov_active()) {
+            s_ob.rows[0] = overlay_row_create(card, "完成后继续", "");
+            // 说明位置改放连接信息：这一步用户要照着输入的只有这几个字符串。
+            lv_label_set_text_fmt(s_ob.note, "热点：%s\n密码：%s\n网址：%s",
+                                  app_net_prov_ssid(), app_net_prov_pass(),
+                                  app_net_prov_url());
+        } else {
+            s_ob.rows[0] = overlay_row_create(card, "开启热点配网导入", "");
+        }
+        s_ob.rows[1] = overlay_row_create(card, "跳过，仅用离线功能", "");
+        s_ob.row_count = 2;
+    }
+
+    onboarding_focus(s_ob.sel);
+    ui_page_set_hint("↑↓ 选择   OK 确定   长按OK 跳过");
+}
+
+// OK：执行当前行。每步的首行是"现在做"，次行是"跳过"，长按 OK 也能跳过。
+static void onboarding_activate(void)
+{
+    if (s_ob.step == 0) {
+        if (s_ob.sel == 0) onboarding_manual_time();
+        else onboarding_advance();
+        return;
+    }
+
+    if (s_ob.step == 1) {
+        onboarding_load_template(s_ob.sel == 0);
+        return;
+    }
+
+    if (s_ob.sel == 1) {
+        onboarding_finish();
+        return;
+    }
+
+    if (app_net_prov_active()) {
+        onboarding_finish();
+    } else if (s_prov_busy) {
+        ui_hint_flash("热点正在开启，请稍候…", 1500);
+    } else {
+        // 先置忙再建任务，避免任务跑完把忙标志清掉后才被这里重新置上。
+        s_prov_busy = true;
+        s_prov_cancel = false;
+        s_prov_err = 0;
+        if (xTaskCreate(prov_start_task, "ob_prov", 4096, NULL, 5, NULL) != pdPASS) {
+            s_prov_busy = false;
+            ui_hint_flash("无法开启热点，请稍后重试", 1800);
+        }
+        onboarding_render();
+    }
 }
 
 void onboarding_open(void)
@@ -869,17 +949,32 @@ void onboarding_open(void)
     s_ob.step = 0;
     s_ob.sel = 0;
     s_ob.prov_started = app_net_prov_active();
+
+    // 浮层只压暗内容区：状态栏继续显示时间，提示条继续显示按键约定。
     s_ob.ov = lv_obj_create(lv_screen_active());
     lv_obj_remove_flag(s_ob.ov, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_pos(s_ob.ov, 0, 0);
-    lv_obj_set_size(s_ob.ov, UI_W, UI_H);
+    lv_obj_set_pos(s_ob.ov, 0, UI_STATUS_H);
+    lv_obj_set_size(s_ob.ov, UI_W, UI_H - UI_STATUS_H - UI_HINT_H);
     lv_obj_set_style_bg_color(s_ob.ov, lv_color_hex(0x000000), 0);
     lv_obj_set_style_bg_opa(s_ob.ov, LV_OPA_60, 0);
     lv_obj_set_style_border_width(s_ob.ov, 0, 0);
     lv_obj_set_style_radius(s_ob.ov, 0, 0);
     lv_obj_set_style_pad_all(s_ob.ov, 0, 0);
 
-    page_settings_build_onboarding();
+    onboarding_render();
+}
+
+void onboarding_tick(void)
+{
+    if (!s_ob.ov || ui_timeedit_active()) return;
+    if (s_ob.step != 2) return;
+
+    // 热点是异步拉起的：状态变化后重画一次，把地址与密码显示出来。
+    bool active = app_net_prov_active();
+    if (active != s_ob.prov_started) {
+        s_ob.prov_started = active;
+        onboarding_render();
+    }
 }
 
 void onboarding_close(void)
