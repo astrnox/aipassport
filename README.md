@@ -79,6 +79,31 @@ The firmware gate produces the verified merged image at
 A successful build is not hardware validation. Report build results, host-test
 results, device-test results, and unverified checks separately.
 
+## Delivery status
+
+The verified merged image is committed for delivery at
+[`dist/FoloToy-AI-Passport-full.bin`](dist/FoloToy-AI-Passport-full.bin), with its
+checksum in [`dist/SHA256SUMS`](dist/SHA256SUMS). The single file covers the
+bootloader, partition table, and application, and is written at offset `0x0`.
+
+```bash
+esptool.py --chip esp32c3 -b 460800 --before default_reset --after hard_reset \
+    write_flash --flash_mode dio --flash_freq 80m --flash_size 8MB \
+    0x0 dist/FoloToy-AI-Passport-full.bin
+```
+
+| Check | Result |
+| --- | --- |
+| Firmware build and merged-image verification | PASS |
+| Repository checks and host-side logic tests | PASS |
+| On-device tests | NOT RUN — needs a connected board and approval to flash |
+| Unverified | On-device rendering and CJK glyph coverage, BLE provisioning end to end, live esports data and its offline fallback, odd/even routine switching after time sync, power behaviour |
+
+`dist/` is a delivery snapshot: rerunning the firmware gate refreshes `build/`
+only, so refresh `dist/` and its checksum deliberately. Light sleep and deep
+sleep are not part of this delivery; automatic screen-off and the power-saving
+option are implemented.
+
 ## Project structure
 
 ```text
@@ -88,6 +113,7 @@ assets/fonts/     Generated CJK bitmap fonts and their reproducible sources
 tests/            Host-side logic tests that run without hardware
 tools/            Shared local/CI validation scripts
 docs/product/     Product requirements document and UI prototype
+dist/             Delivered merged firmware image and checksum
 ```
 
 ## Documentation

@@ -65,6 +65,28 @@
 
 构建通过不等于硬件验证。交付时请分别报告构建结果、主机测试结果、真机测试结果与未验证项。
 
+## 交付状态
+
+经校验的合并镜像已随仓库交付，见
+[`dist/FoloToy-AI-Passport-full.bin`](dist/FoloToy-AI-Passport-full.bin)，校验值见
+[`dist/SHA256SUMS`](dist/SHA256SUMS)。单个文件已包含 bootloader、分区表与应用，写入 `0x0` 偏移。
+
+```bash
+esptool.py --chip esp32c3 -b 460800 --before default_reset --after hard_reset \
+    write_flash --flash_mode dio --flash_freq 80m --flash_size 8MB \
+    0x0 dist/FoloToy-AI-Passport-full.bin
+```
+
+| 检查项 | 结果 |
+| --- | --- |
+| 固件构建与合并镜像校验 | PASS |
+| 仓库检查与主机侧纯逻辑测试 | PASS |
+| 真机测试 | NOT RUN —— 需连接开发板并取得烧录授权 |
+| 未验证项 | 真机渲染与中文字形覆盖、BLE 配网端到端、赛事实时数据与离线降级、时间校准后的单双周切换、功耗表现 |
+
+`dist/` 是交付快照：重新运行固件门禁只刷新 `build/`，需要更新 `dist/` 及其校验值时应显式操作。
+本次交付不含浅睡眠与深睡眠，已实现自动息屏与省电选项。
+
 ## 项目结构
 
 ```text
@@ -74,6 +96,7 @@ assets/fonts/     生成的中文字库及其可复现来源
 tests/            无需硬件的纯逻辑主机测试
 tools/            本地与 CI 共用的校验脚本
 docs/product/     产品需求文档与界面原型
+dist/             交付的合并固件与校验和
 ```
 
 ## 文档
