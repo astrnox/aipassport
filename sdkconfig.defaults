@@ -7,7 +7,8 @@ CONFIG_IDF_TARGET="esp32c3"
 CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
 # 固定 8MB 镜像头，关闭 detect，便于 idf.py merge-bin。
 CONFIG_ESPTOOLPY_HEADER_FLASHSIZE_UPDATE=n
-# 默认模板只保留 NVS、PHY data 和占用剩余空间的 factory app；用户可按需修改。
+# 本产品不使用模板默认的最小分区表：NVS 扩到 88KB，并从 factory 尾部切出 2.625MB
+# 的 assets 分区存动图帧。取舍理由见 docs/development/engineering/firmware-layout.md。
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
@@ -31,6 +32,9 @@ CONFIG_LV_FONT_MONTSERRAT_40=y
 # 工具箱界面比原 demo 复杂(滚动列表、环形进度、日历网格),24KB 偏紧,这里留足余量;
 # 若出现绘制卡死/看门狗,再向上调。
 CONFIG_LV_MEM_SIZE_KILOBYTES=48
+# 名片动图用 animimg 逐帧播放。手机端已把 GIF 解码成 RGB565 帧,设备端不需要 GIF
+# 解码器,所以这里不开 LV_USE_GIF——它对无 PSRAM 的 C3 来说内存代价过大。
+CONFIG_LV_USE_ANIMIMG=y
 
 # --- 系统 ---
 CONFIG_FREERTOS_HZ=1000

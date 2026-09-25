@@ -192,12 +192,18 @@ void ui_app_show_onboarding(void)  { onboarding_open(); }
 static void advance_pomodoro(void)
 {
     app_pomodoro_t *p = app_state_pomodoro();
-    if (p->state == APP_POMO_FOCUS || p->state == APP_POMO_BREAK) {
-        if (app_pomodoro_tick(p, 1)) {
-            // 阶段切换：写入一次持久化，让重启后能回到正确的段；同时给出提示音。
-            app_state_save_pomodoro();
-            ui_sound_beep();
-        }
+
+    // 本地日期按 year*10000+month*100+day 每拍喂一次：跨零点时今日统计归零，永久累计不动。
+    // 调用很廉价，无需额外缓存日期。
+    app_datetime_t now = app_state_now();
+    app_pomodoro_roll_day(p, (uint32_t)(now.year * 10000 + now.month * 100 + now.day));
+
+    // 长休息也要推进，因此用 tick 的返回值判断阶段切换，而不是先看状态。
+    app_pomo_event_t ev = app_pomodoro_tick(p, 1);
+    if (ev != APP_POMO_EVENT_NONE) {
+        // 阶段切换：写入一次持久化，让重启后能回到正确的段；同时给出提示音。
+        app_state_save_pomodoro();
+        ui_sound_beep();
     }
 }
 

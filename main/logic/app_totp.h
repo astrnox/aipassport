@@ -9,7 +9,9 @@
 #include <stdint.h>
 
 #define APP_TOTP_MAX_SECRET_BYTES 64
-#define APP_TOTP_MAX_ACCOUNTS     5
+// 账户上限 10：设备端按列表翻页展示，10 个正好覆盖"校园邮箱 + 若干平台"的常见组合，
+// 再多的条目在只有三键的设备上翻找反而更慢。
+#define APP_TOTP_MAX_ACCOUNTS     10
 #define APP_TOTP_ALGO_SHA1   0
 #define APP_TOTP_ALGO_SHA256 1
 

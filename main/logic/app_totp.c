@@ -1,23 +1,22 @@
 // main/logic/app_totp.c —— RFC 6238 TOTP 的纯逻辑实现。
 //
-// 内含自实现的 SHA1 / SHA256 与 HMAC，均为 static，不外泄符号。选择自实现而非
-// 依赖 mbedtls，是为了让这一层能在主机上脱离 ESP-IDF 直接编译与单测。
+// SHA-256 与 HMAC 由 logic/app_crypto 提供（密码本也用同一份实现），本文件只保留
+// TOTP 特有的部分：SHA-1（RFC 6238 的默认算法，密码本用不到）、HMAC 的算法表、
+// Base32 解码与 otpauth:// 解析。全部自实现而不依赖 mbedtls，是为了让这一层能在
+// 主机上脱离 ESP-IDF 直接编译与单测。
 #include "app_totp.h"
+
+#include "app_crypto.h"
 
 #include <stdio.h>
 #include <string.h>
 
 // ---------------------------------------------------------------------------
-// 32 位循环移位：SHA1 左移，SHA256 右移。
+// 32 位循环左移（SHA-1 用；SHA-256 的循环右移在 app_crypto 内）。
 // ---------------------------------------------------------------------------
 static uint32_t rol32(uint32_t value, int bits)
 {
     return (value << bits) | (value >> (32 - bits));
-}
-
-static uint32_t ror32(uint32_t value, int bits)
-{
-    return (value >> bits) | (value << (32 - bits));
 }
 
 // ---------------------------------------------------------------------------
@@ -128,131 +127,6 @@ static void sha1_final(sha1_ctx_t *ctx, uint8_t *out)
 }
 
 // ---------------------------------------------------------------------------
-// SHA256
-// ---------------------------------------------------------------------------
-typedef struct {
-    uint32_t h[8];
-    uint64_t total;
-    uint8_t  buf[64];
-    size_t   buf_len;
-} sha256_ctx_t;
-
-static const uint32_t SHA256_K[64] = {
-    0x428A2F98u, 0x71374491u, 0xB5C0FBCFu, 0xE9B5DBA5u, 0x3956C25Bu, 0x59F111F1u,
-    0x923F82A4u, 0xAB1C5ED5u, 0xD807AA98u, 0x12835B01u, 0x243185BEu, 0x550C7DC3u,
-    0x72BE5D74u, 0x80DEB1FEu, 0x9BDC06A7u, 0xC19BF174u, 0xE49B69C1u, 0xEFBE4786u,
-    0x0FC19DC6u, 0x240CA1CCu, 0x2DE92C6Fu, 0x4A7484AAu, 0x5CB0A9DCu, 0x76F988DAu,
-    0x983E5152u, 0xA831C66Du, 0xB00327C8u, 0xBF597FC7u, 0xC6E00BF3u, 0xD5A79147u,
-    0x06CA6351u, 0x14292967u, 0x27B70A85u, 0x2E1B2138u, 0x4D2C6DFCu, 0x53380D13u,
-    0x650A7354u, 0x766A0ABBu, 0x81C2C92Eu, 0x92722C85u, 0xA2BFE8A1u, 0xA81A664Bu,
-    0xC24B8B70u, 0xC76C51A3u, 0xD192E819u, 0xD6990624u, 0xF40E3585u, 0x106AA070u,
-    0x19A4C116u, 0x1E376C08u, 0x2748774Cu, 0x34B0BCB5u, 0x391C0CB3u, 0x4ED8AA4Au,
-    0x5B9CCA4Fu, 0x682E6FF3u, 0x748F82EEu, 0x78A5636Fu, 0x84C87814u, 0x8CC70208u,
-    0x90BEFFFAu, 0xA4506CEBu, 0xBEF9A3F7u, 0xC67178F2u,
-};
-
-static void sha256_init(sha256_ctx_t *ctx)
-{
-    ctx->h[0] = 0x6A09E667u;
-    ctx->h[1] = 0xBB67AE85u;
-    ctx->h[2] = 0x3C6EF372u;
-    ctx->h[3] = 0xA54FF53Au;
-    ctx->h[4] = 0x510E527Fu;
-    ctx->h[5] = 0x9B05688Cu;
-    ctx->h[6] = 0x1F83D9ABu;
-    ctx->h[7] = 0x5BE0CD19u;
-    ctx->total = 0;
-    ctx->buf_len = 0;
-}
-
-static void sha256_block(sha256_ctx_t *ctx, const uint8_t *block)
-{
-    uint32_t w[64];
-    for (int i = 0; i < 16; i++) {
-        w[i] = ((uint32_t)block[i * 4] << 24) | ((uint32_t)block[i * 4 + 1] << 16) |
-               ((uint32_t)block[i * 4 + 2] << 8) | (uint32_t)block[i * 4 + 3];
-    }
-    for (int i = 16; i < 64; i++) {
-        uint32_t s0 = ror32(w[i - 15], 7) ^ ror32(w[i - 15], 18) ^ (w[i - 15] >> 3);
-        uint32_t s1 = ror32(w[i - 2], 17) ^ ror32(w[i - 2], 19) ^ (w[i - 2] >> 10);
-        w[i] = w[i - 16] + s0 + w[i - 7] + s1;
-    }
-
-    uint32_t a = ctx->h[0];
-    uint32_t b = ctx->h[1];
-    uint32_t c = ctx->h[2];
-    uint32_t d = ctx->h[3];
-    uint32_t e = ctx->h[4];
-    uint32_t f = ctx->h[5];
-    uint32_t g = ctx->h[6];
-    uint32_t h = ctx->h[7];
-    for (int i = 0; i < 64; i++) {
-        uint32_t s1 = ror32(e, 6) ^ ror32(e, 11) ^ ror32(e, 25);
-        uint32_t ch = (e & f) ^ ((~e) & g);
-        uint32_t t1 = h + s1 + ch + SHA256_K[i] + w[i];
-        uint32_t s0 = ror32(a, 2) ^ ror32(a, 13) ^ ror32(a, 22);
-        uint32_t maj = (a & b) ^ (a & c) ^ (b & c);
-        uint32_t t2 = s0 + maj;
-        h = g;
-        g = f;
-        f = e;
-        e = d + t1;
-        d = c;
-        c = b;
-        b = a;
-        a = t1 + t2;
-    }
-    ctx->h[0] += a;
-    ctx->h[1] += b;
-    ctx->h[2] += c;
-    ctx->h[3] += d;
-    ctx->h[4] += e;
-    ctx->h[5] += f;
-    ctx->h[6] += g;
-    ctx->h[7] += h;
-}
-
-static void sha256_update(sha256_ctx_t *ctx, const uint8_t *data, size_t len)
-{
-    ctx->total += len;
-    while (len > 0) {
-        size_t space = sizeof(ctx->buf) - ctx->buf_len;
-        size_t take = len < space ? len : space;
-        memcpy(ctx->buf + ctx->buf_len, data, take);
-        ctx->buf_len += take;
-        data += take;
-        len -= take;
-        if (ctx->buf_len == sizeof(ctx->buf)) {
-            sha256_block(ctx, ctx->buf);
-            ctx->buf_len = 0;
-        }
-    }
-}
-
-static void sha256_final(sha256_ctx_t *ctx, uint8_t *out)
-{
-    uint64_t bits = ctx->total * 8;
-    uint8_t pad = 0x80;
-    sha256_update(ctx, &pad, 1);
-    uint8_t zero = 0;
-    while (ctx->buf_len != 56) {
-        sha256_update(ctx, &zero, 1);
-    }
-    uint8_t length_be[8];
-    for (int i = 0; i < 8; i++) {
-        length_be[i] = (uint8_t)(bits >> (56 - 8 * i));
-    }
-    sha256_update(ctx, length_be, 8);
-
-    for (int i = 0; i < 8; i++) {
-        out[i * 4]     = (uint8_t)(ctx->h[i] >> 24);
-        out[i * 4 + 1] = (uint8_t)(ctx->h[i] >> 16);
-        out[i * 4 + 2] = (uint8_t)(ctx->h[i] >> 8);
-        out[i * 4 + 3] = (uint8_t)(ctx->h[i]);
-    }
-}
-
-// ---------------------------------------------------------------------------
 // HMAC：用函数表抹平 SHA1 / SHA256 的差异。
 // ---------------------------------------------------------------------------
 typedef struct {
@@ -264,8 +138,8 @@ typedef struct {
 } hash_ops_t;
 
 typedef union {
-    sha1_ctx_t sha1;
-    sha256_ctx_t sha256;
+    sha1_ctx_t        sha1;
+    app_sha256_ctx_t  sha256;
 } hash_ctx_t;
 
 static void sha1_init_v(void *ctx) { sha1_init((sha1_ctx_t *)ctx); }
@@ -275,12 +149,15 @@ static void sha1_update_v(void *ctx, const uint8_t *data, size_t len)
 }
 static void sha1_final_v(void *ctx, uint8_t *out) { sha1_final((sha1_ctx_t *)ctx, out); }
 
-static void sha256_init_v(void *ctx) { sha256_init((sha256_ctx_t *)ctx); }
+static void sha256_init_v(void *ctx) { app_sha256_init((app_sha256_ctx_t *)ctx); }
 static void sha256_update_v(void *ctx, const uint8_t *data, size_t len)
 {
-    sha256_update((sha256_ctx_t *)ctx, data, len);
+    app_sha256_update((app_sha256_ctx_t *)ctx, data, len);
 }
-static void sha256_final_v(void *ctx, uint8_t *out) { sha256_final((sha256_ctx_t *)ctx, out); }
+static void sha256_final_v(void *ctx, uint8_t *out)
+{
+    app_sha256_final((app_sha256_ctx_t *)ctx, out);
+}
 
 static const hash_ops_t HASH_SHA1 = { sha1_init_v, sha1_update_v, sha1_final_v, 20, 64 };
 static const hash_ops_t HASH_SHA256 = { sha256_init_v, sha256_update_v, sha256_final_v, 32, 64 };

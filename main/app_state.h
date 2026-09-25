@@ -14,6 +14,7 @@
 #include "logic/app_routine.h"
 #include "logic/app_time.h"
 #include "logic/app_totp.h"
+#include "logic/app_vault.h"
 
 #include "esp_err.h"
 
@@ -49,6 +50,7 @@ typedef enum {
     APP_DATA_TOTP,
     APP_DATA_REMINDERS,
     APP_DATA_ESPORTS,
+    APP_DATA_VAULT,
     APP_DATA_SETTINGS,
     APP_DATA_ALL,
 } app_data_kind_t;
@@ -101,6 +103,10 @@ app_reminder_list_t *app_state_reminders(void);
 app_pomodoro_t     *app_state_pomodoro(void);
 app_esport_cache_t *app_state_esports(void);
 
+// 密码本。明文与加密两种模式的容器都由 logic/app_vault 定义；这里只负责在 NVS 里
+// 存取字节流，解锁状态是运行态、重启即回到锁定（加密模式）。
+app_vault_t        *app_state_vault(void);
+
 // ---- 作息取表 ----
 // 当前应使用的套别：0 单周 / 1 双周。未启用单双周时恒为 0。
 int app_state_routine_slot(void);
@@ -127,6 +133,7 @@ void app_state_save_totp(void);
 void app_state_save_reminders(void);
 void app_state_save_pomodoro(void);
 void app_state_save_esports(void);
+void app_state_save_vault(void);
 void app_state_save_all(void);
 
 // 分类清除。清除前由界面层完成二次确认。

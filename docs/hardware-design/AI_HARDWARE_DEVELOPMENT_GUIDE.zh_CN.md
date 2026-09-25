@@ -255,7 +255,7 @@ SOC 准确度取决于电芯与 profile 的匹配程度。本驱动给出的是�
 
 ## 10. Flash、控制台和资源预算
 
-默认自定义固件基线使用 8 MB Flash。`sdkconfig.defaults` 固定使用 8 MB Flash 镜像配置，并关闭 `CONFIG_ESPTOOLPY_HEADER_FLASHSIZE_UPDATE`（不按探测容量回写镜像头，便于 `idf.py merge-bin`）；默认 `partitions.csv` 只提供 24 KB NVS、4 KB PHY data，以及从 `0x10000` 延伸到 Flash 末尾的 factory app（大小 `0x7F0000`）。它没有 OTA、设备身份或未使用的预留分区。用户固件可以把它替换成其它合法的 8 MB 分区布局。若实机探测结果不是 8 MB，则该设备不符合当前硬件基线；修改项目默认值前应先确认板卡和 Flash 料号。
+自定义固件基线使用 8 MB Flash。`sdkconfig.defaults` 固定使用 8 MB Flash 镜像配置，并关闭 `CONFIG_ESPTOOLPY_HEADER_FLASHSIZE_UPDATE`（不按探测容量回写镜像头，便于 `idf.py merge-bin`）。本产品的 `partitions.csv` 定义了 88 KB NVS、4 KB PHY data、从 `0x20000` 起的 5.25 MB factory app，以及 2.625 MB 的自定义类型 `0x40` 分区 `assets`（存放动图帧）；它没有 OTA 或设备身份分区。上游模板默认布局更小（24 KB NVS、4 KB PHY data，以及从 `0x10000` 延伸到 Flash 末尾的 factory app）。当前分区表、取舍理由和修改方式见[固件布局](../development/engineering/firmware-layout.zh_CN.md)。若实机探测结果不是 8 MB，则该设备不符合当前硬件基线；修改项目默认值前应先确认板卡和 Flash 料号。
 
 从 `0x0` 写入合并镜像时，单文件中的间隙填充可能重置 NVS。需要保留已存应用
 状态时，应使用分段 `idf.py flash`。详见[固件布局](../development/engineering/firmware-layout.zh_CN.md)。

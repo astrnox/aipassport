@@ -413,7 +413,10 @@ python -m esptool --chip esp32c3 -p <port> -b 460800 \
 idf.py -p <port> monitor
 ```
 
-普通的 `build/FoloToy-AI-Passport.bin` 只是 app，只能位于 `0x10000`，不得烧到
+从 `0x0` 写入合并镜像会同时重写分区表，因此从旧布局升级的设备也会丢失已存的
+NVS 数据。烧录前必须先告知用户，并让其自行导出需要保留的内容。
+
+普通的 `build/FoloToy-AI-Passport.bin` 只是 app，只能位于 `0x20000`，不得烧到
 `0x0`。`idf.py flash` 只用于明确需要的增量开发烧录，不作为默认交付或验收方式。
 
 ## 故障处理

@@ -18,12 +18,15 @@
 #include "bsp_i2c.h"
 #include "bsp_pins.h"
 
+#include "app_assets.h"
 #include "app_state.h"
+#include "logic/app_vault.h"
 #include "net/app_net.h"
 #include "ui/ui_app.h"
 #include "ui/ui_theme.h"
 
 #include "esp_log.h"
+#include "esp_random.h"
 #include "esp_sleep.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -74,6 +77,14 @@ static esp_err_t input_dispatch_init(void)
     return ESP_OK;
 }
 
+// 密码本的随机源：硬件 RNG。C3 的 RNG 由射频子系统提供熵，Wi-Fi/BT 未开启时也
+// 有足够熵用于生成 DEK 与恢复码。
+static void vault_random(void *ctx, void *out, size_t len)
+{
+    (void)ctx;
+    esp_fill_random(out, len);
+}
+
 // 按设置决定开机主题：固定明/暗直接用，自动模式按本地时段判断。
 static void apply_theme(void)
 {
@@ -120,6 +131,16 @@ void app_main(void)
     esp_err_t state_err = app_state_init();
     if (state_err != ESP_OK) {
         ESP_LOGW(TAG, "数据载入失败(%s)，以默认值运行", esp_err_to_name(state_err));
+    }
+
+    // 密码本的密钥与随机数只能来自硬件 RNG：注入失败就不允许加密，绝不退化成用
+    // 可预测的字节当密钥（app_vault 在未注入时会让所有需要随机数的操作报错）。
+    app_vault_set_random(vault_random, NULL);
+
+    // 动图资源分区：挂在界面之前，页面创建时才能判断某个槽位是否已有动图。
+    // 失败不影响离线功能，只是动图不可用。
+    if (app_assets_init() != ESP_OK) {
+        ESP_LOGW(TAG, "动图资源分区不可用，名片将只显示文字");
     }
 
     // 联网基础设施（默认事件循环与 netif）只准备一次，不打开射频。

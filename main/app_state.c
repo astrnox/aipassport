@@ -42,6 +42,7 @@ typedef struct {
     app_pomodoro_t      pomodoro;
     app_esport_cache_t  esports;
     totp_store_t        totp;
+    app_vault_t         vault;
 
     app_net_state_t net;
     char            ssid[33];
@@ -52,6 +53,10 @@ typedef struct {
 } app_runtime_t;
 
 static app_runtime_t s;
+
+// 密码本容器序列化缓冲。放静态区而不是栈上：加密本上限约 4.7KB，栈上再叠上
+// 本次调用的其它局部变量容易顶到任务栈上限。
+static uint8_t s_vault_blob[APP_VAULT_CONTAINER_MAX];
 
 // ---------------------------------------------------------------------------
 // 时间换算（公历与 Unix 秒互转，避免依赖 newlib 的时区表）
@@ -228,6 +233,7 @@ static void runtime_defaults(void)
     app_pomodoro_init(&s.pomodoro);
     memset(&s.esports, 0, sizeof(s.esports));
     memset(&s.totp, 0, sizeof(s.totp));
+    app_vault_init(&s.vault);
     s.net = APP_NET_OFF;
     s.ssid[0] = '\0';
     s.battery = -1;
@@ -284,6 +290,16 @@ esp_err_t app_state_init(void)
             memset(&s.totp, 0, sizeof(s.totp));
         }
 
+        // 密码本：容器长度可变，按记录的长度读出来再解析。解析失败会被重置成空本，
+        // 因此损坏或旧版本的字节不会留下半个可用的密码本。
+        size_t vault_len = 0;
+        if (blob_load("vault", s_vault_blob, sizeof(s_vault_blob), &vault_len) == ESP_OK &&
+            vault_len > 0) {
+            if (app_vault_deserialize(&s.vault, s_vault_blob, vault_len) != APP_VAULT_OK) {
+                ESP_LOGW(TAG, "密码本容器无法解析，已重置为空本");
+            }
+        }
+
         // 恢复上次已知的墙钟。重启后时钟不可信，故标记为未同步。
         int64_t stored = 0;
         size_t stored_len = 0;
@@ -297,9 +313,9 @@ esp_err_t app_state_init(void)
     }
 
     s.loaded = true;
-    ESP_LOGI(TAG, "状态载入完成: 主题=%d 工牌=%d 提醒=%d 口令=%d 赛事缓存=%d",
+    ESP_LOGI(TAG, "状态载入完成: 主题=%d 工牌=%d 提醒=%d 口令=%d 密码本=%d(%s) 赛事缓存=%d",
              s.settings.theme, s.badges.count, s.reminders.count, s.totp.count,
-             s.esports.valid);
+             s.vault.count, app_vault_mode_name(s.vault.mode), s.esports.valid);
     return ESP_OK;
 }
 
@@ -393,6 +409,7 @@ app_routine_t      *app_state_routine(void)    { return &s.routine; }
 app_reminder_list_t *app_state_reminders(void) { return &s.reminders; }
 app_pomodoro_t     *app_state_pomodoro(void)   { return &s.pomodoro; }
 app_esport_cache_t *app_state_esports(void)    { return &s.esports; }
+app_vault_t        *app_state_vault(void)      { return &s.vault; }
 
 int app_state_routine_slot(void)
 {
@@ -462,6 +479,19 @@ void app_state_save_reminders(void){ blob_save("reminders", &s.reminders, sizeof
 void app_state_save_pomodoro(void) { blob_save("pomodoro", &s.pomodoro, sizeof(s.pomodoro)); }
 void app_state_save_esports(void)  { blob_save("esports", &s.esports, sizeof(s.esports)); }
 
+void app_state_save_vault(void)
+{
+    size_t len = app_vault_serialize(&s.vault, s_vault_blob, sizeof(s_vault_blob));
+    if (len == 0) {
+        // 序列化失败通常意味着"加密但未解锁且没有原文"。这种情况直接不落盘，
+        // 保留 NVS 里已有的容器，好过用空容器覆盖掉用户还没解开的密码。
+        ESP_LOGW(TAG, "密码本序列化失败，保留原有存储");
+        return;
+    }
+    esp_err_t err = blob_save("vault", s_vault_blob, len);
+    if (err != ESP_OK) ESP_LOGE(TAG, "密码本写入失败: %s", esp_err_to_name(err));
+}
+
 void app_state_save_all(void)
 {
     app_state_save_settings();
@@ -471,6 +501,7 @@ void app_state_save_all(void)
     app_state_save_reminders();
     app_state_save_pomodoro();
     app_state_save_esports();
+    app_state_save_vault();
 }
 
 void app_state_clear(app_data_kind_t kind)
@@ -496,6 +527,10 @@ void app_state_clear(app_data_kind_t kind)
         memset(&s.esports, 0, sizeof(s.esports));
         blob_erase("esports");
         break;
+    case APP_DATA_VAULT:
+        app_vault_init(&s.vault);
+        blob_erase("vault");
+        break;
     case APP_DATA_SETTINGS:
         settings_defaults(&s.settings);
         app_pomodoro_init(&s.pomodoro);
@@ -514,6 +549,7 @@ void app_state_clear(app_data_kind_t kind)
         blob_erase("reminders");
         blob_erase("pomodoro");
         blob_erase("esports");
+        blob_erase("vault");
         blob_erase("clock");
         break;
     }
