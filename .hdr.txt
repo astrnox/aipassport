@@ -1,0 +1,22 @@
+HTTP/1.1 200 OK
+date: Fri, 25 Sep 2026 02:16:27 GMT
+
+HTTP/2 200 
+content-type: application/json
+content-length: 72900
+x-amz-cf-pop: NRT20-P9
+date: Fri, 25 Sep 2026 02:16:28 GMT
+access-control-allow-methods: PUT, GET, POST, PATCH, DELETE, OPTIONS
+x-amzn-requestid: e32dcaad-ecf5-404c-9e3b-20c8fea0ce88
+access-control-allow-origin: *
+access-control-allow-headers: Content-Type, Authorization
+x-amzn-remapped-content-length: 72900
+x-amzn-remapped-connection: keep-alive
+x-amz-apigw-id: EO7rdFPJvHcEEFw=
+cache-control: no-transform, max-age=60
+via: 1.1 e5de3d8e620b41fd833ffc798321c120.cloudfront.net (CloudFront), 1.1 f7bf1ec0adf35e50bf79ca67ac3c3616.cloudfront.net (CloudFront)
+vary: Accept-Encoding
+x-cache: Miss from cloudfront
+x-amz-cf-pop: NRT20-P9
+x-amz-cf-id: lmkxva0pdPSD077zV6gJChsJGmRHNZpK4QhSBnEpURLy_6GFV_zxgw==
+
