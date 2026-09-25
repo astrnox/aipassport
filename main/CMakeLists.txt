@@ -15,6 +15,7 @@ idf_component_register(
          "logic/app_text.c"
          "logic/app_time.c"
          "logic/app_totp.c"
+         "net/app_blufi.c"
          "net/app_net.c"
          "ui/ui_app.c"
          "ui/ui_esports.c"

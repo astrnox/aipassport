@@ -4,9 +4,10 @@
 // 列表，不做多层菜单：网络、时间、显示、声音、数据各占一小段。UP/DOWN 移动，OK 直接
 // 修改（开关类就地切换、枚举类循环、需要输入的开浮层），长按 OK 返回主页。
 //
-// 两条配网路径里，本文件只用设备热点网页配网：设备开热点、手机连上后打开
-// http://192.168.4.1/ 填写 Wi-Fi、用手机时间校准、粘贴 otpauth 链接导入口令密钥。
-// 该页面是设备本地服务，不需要互联网，所以纯离线用户也能用它配置与备份。
+// 两条配网路径都在这里：蓝牙配网（BLUFI）适合"手机在身边、不想切 Wi-Fi"的场景；
+// 热点网页配网则设备开热点、手机连上后打开 http://192.168.4.1/ 填写 Wi-Fi、用手机时间
+// 校准、粘贴 otpauth 链接导入口令密钥。热点页是设备本地服务，不需要互联网，所以纯离线
+// 用户也能用它配置与备份。两条路径不能同时开启，避免抢占同一套 Wi-Fi 射频。
 //
 // 首次引导复用同一套控件：三步（时间 / 作息模板 / 口令密钥），每步都能跳过，
 // 跳过之后主页与全部离线功能仍然完整可用。
@@ -19,6 +20,7 @@
 #include "app_state.h"
 #include "logic/app_routine.h"
 #include "logic/app_time.h"
+#include "net/app_blufi.h"
 #include "net/app_net.h"
 
 #include "bsp_display.h"
@@ -38,6 +40,7 @@ enum {
     SET_NET = 0,
     SET_WIFI,
     SET_PROV,
+    SET_BLE,
     SET_SYNC,
     SET_TIME,
     SET_TZ,
@@ -53,7 +56,7 @@ enum {
 };
 
 static const char *const SET_TITLES[SET_ROW_N] = {
-    "网络状态", "Wi-Fi 网络", "热点配网", "网络校时", "手动设置时间", "时区",
+    "网络状态", "Wi-Fi 网络", "热点配网", "蓝牙配网", "网络校时", "手动设置时间", "时区",
     "自动息屏", "屏幕亮度", "主题", "提示音", "提示音音量", "省电选项",
     "首次引导", "数据备份与清除",
 };
@@ -95,6 +98,10 @@ static struct {
     lv_obj_t *prov;
     lv_obj_t *prov_note;
 
+    // 蓝牙配网浮层
+    lv_obj_t *ble;
+    lv_obj_t *ble_note;
+
     // 数据清除浮层
     lv_obj_t *data_panel;
     ui_row_t data_rows[CLR_ROW_N];
@@ -106,6 +113,11 @@ static volatile bool s_prov_busy;
 static volatile bool s_prov_cancel;
 static volatile int  s_prov_err;
 
+// 蓝牙配网开启耗时更长（要拉起 BT 控制器与 NimBLE 主机），同样异步启动。
+static volatile bool s_ble_busy;
+static volatile bool s_ble_cancel;
+static volatile int  s_ble_err;
+
 static int s_edit_values[5];
 static int s_clear_kind;
 
@@ -113,6 +125,8 @@ static void refresh_values(void);
 static void update_hint(void);
 static void prov_open(void);
 static void prov_close(void);
+static void ble_open(void);
+static void ble_close(void);
 
 // ---------------------------------------------------------------------------
 // 小工具
@@ -189,6 +203,19 @@ static void settings_focus(int index)
     ui_scroll_into_view(s.rows[index].obj);
 }
 
+// 蓝牙配网状态的简短名称，用于设置列表右侧的值。
+static const char *ble_state_name(void)
+{
+    switch (app_ble_prov_state()) {
+    case APP_BLE_PROV_ADVERTISING: return "广播中";
+    case APP_BLE_PROV_CONNECTED:   return "已连接";
+    case APP_BLE_PROV_APPLYING:    return "连接中";
+    case APP_BLE_PROV_DONE:        return "已完成";
+    case APP_BLE_PROV_FAILED:      return "失败";
+    default:                       return "关闭";
+    }
+}
+
 static void refresh_banner(void)
 {
     if (!s.banner_lbl) return;
@@ -230,6 +257,7 @@ static void refresh_values(void)
     const char *ssid = app_net_saved_ssid();
     ui_row_set_value(s.rows[SET_WIFI], (ssid && ssid[0]) ? ssid : "未配置");
     ui_row_set_value(s.rows[SET_PROV], app_net_prov_active() ? "已开启" : "关闭");
+    ui_row_set_value(s.rows[SET_BLE], s_ble_busy ? "开启中" : ble_state_name());
 
     app_fetch_state_t ts = app_net_time_state();
     if (ts == APP_FETCH_RUNNING) {
@@ -271,7 +299,7 @@ static void refresh_values(void)
 
 static void update_hint(void)
 {
-    if (s.prov) return;   // 浮层自己维护提示
+    if (s.prov || s.ble) return;   // 浮层自己维护提示
     set_hint(HINT_SETTINGS);
 }
 
@@ -398,6 +426,113 @@ static void prov_close(void)
         lv_obj_delete(s.prov);
         s.prov = NULL;
         s.prov_note = NULL;
+    }
+    s.hint[0] = '\0';
+    refresh_values();
+    update_hint();
+}
+
+// ---------------------------------------------------------------------------
+// 蓝牙配网浮层（BLUFI）
+// ---------------------------------------------------------------------------
+// 与热点配网同构：异步启动、浮层显示状态、长按 OK 关闭。差别在于手机端要用官方
+// EspBlufi App 连接设备广播的 FoloPassport，并下发 2.4 GHz Wi-Fi 凭证。
+
+static void ble_start_task(void *arg)
+{
+    (void)arg;
+    esp_err_t err = app_ble_prov_start();
+    if (s_ble_cancel) {
+        app_ble_prov_stop();
+        // 启动任务被取消：没连上 Wi-Fi 时把射频一起放掉，避免空转耗电。
+        if (!app_net_wifi_connected()) app_net_wifi_stop();
+        err = ESP_ERR_INVALID_STATE;
+        s_ble_cancel = false;
+    }
+    s_ble_err = (int)err;
+    s_ble_busy = false;
+    vTaskDelete(NULL);
+}
+
+static void ble_refresh(void)
+{
+    if (!s.ble || !s.ble_note) return;
+
+    char text[200];
+    if (s_ble_busy) {
+        snprintf(text, sizeof(text), "正在开启蓝牙，请稍候…");
+    } else if (s_ble_err != 0) {
+        const char *err = app_ble_prov_error();
+        snprintf(text, sizeof(text), "%s", err ? err : "蓝牙配网开启失败，请重试。");
+    } else {
+        switch (app_ble_prov_state()) {
+        case APP_BLE_PROV_ADVERTISING:
+            snprintf(text, sizeof(text),
+                     "设备广播名：%s\n在手机 EspBlufi App 中连接该设备，\n"
+                     "选择 2.4G Wi-Fi 并输入密码。",
+                     app_ble_prov_name());
+            break;
+        case APP_BLE_PROV_CONNECTED:
+            snprintf(text, sizeof(text), "手机已连接，等待下发 Wi-Fi 信息…");
+            break;
+        case APP_BLE_PROV_APPLYING:
+            snprintf(text, sizeof(text), "已收到 Wi-Fi 信息，正在连接…");
+            break;
+        case APP_BLE_PROV_DONE: {
+            const char *ssid = app_net_saved_ssid();
+            snprintf(text, sizeof(text), "配网成功：%s\n凭证已保存，可以关闭了。",
+                     (ssid && ssid[0]) ? ssid : "已连接");
+            break;
+        }
+        default:
+            snprintf(text, sizeof(text), "蓝牙配网未开启。");
+            break;
+        }
+    }
+    lv_label_set_text(s.ble_note, text);
+}
+
+static void ble_open(void)
+{
+    if (s.ble) return;
+
+    lv_obj_t *card = NULL;
+    s.ble = overlay_create(200, &card, "蓝牙配网");
+
+    s.ble_note = ui_label_create(card, "", ui_font_body, ui_c_text());
+    lv_obj_set_width(s.ble_note, UI_W - 24 - 24);
+    lv_label_set_long_mode(s.ble_note, LV_LABEL_LONG_WRAP);
+
+    if (!app_ble_prov_active() && !s_ble_busy) {
+        s_ble_busy = true;
+        s_ble_cancel = false;
+        s_ble_err = 0;
+        if (xTaskCreate(ble_start_task, "ble_start", 4096, NULL, 5, NULL) != pdPASS) {
+            s_ble_busy = false;
+            s_ble_err = (int)ESP_ERR_NO_MEM;
+        }
+    }
+
+    ble_refresh();
+    set_hint("在手机 EspBlufi 里连接 FoloPassport  长按OK 关闭");
+    refresh_values();
+}
+
+static void ble_close(void)
+{
+    if (s_ble_busy) {
+        // 启动任务还没结束：交给它收尾，避免与蓝牙协议栈的状态竞争。
+        s_ble_cancel = true;
+    } else if (app_ble_prov_active()) {
+        app_ble_prov_stop();
+        // 没连上 Wi-Fi 时顺手释放射频；已连上则保持，交给联网逻辑管理。
+        if (!app_net_wifi_connected()) app_net_wifi_stop();
+    }
+
+    if (s.ble) {
+        lv_obj_delete(s.ble);
+        s.ble = NULL;
+        s.ble_note = NULL;
     }
     s.hint[0] = '\0';
     refresh_values();
@@ -544,6 +679,11 @@ static void activate(void)
         else prov_open();
         break;
 
+    case SET_BLE:
+        if (s.ble) ble_close();
+        else ble_open();
+        break;
+
     case SET_SYNC:
         if (!app_net_has_credentials()) {
             ui_hint_flash("先开启热点配网填写 Wi-Fi", 1800);
@@ -661,6 +801,14 @@ void page_settings_exit(void)
     } else if (app_net_prov_active()) {
         app_net_prov_stop();
     }
+    if (s.ble) {
+        // 同理关蓝牙配网：释放 BLE 协议栈与 BT 控制器。
+        ble_close();
+    } else if (s_ble_busy) {
+        s_ble_cancel = true;
+    } else if (app_ble_prov_active()) {
+        app_ble_prov_stop();
+    }
     if (s.data_panel) {
         lv_obj_delete(s.data_panel);
         s.data_panel = NULL;
@@ -678,6 +826,11 @@ void page_settings_key(bsp_btn_t btn, bsp_btn_ev_t ev)
 
     if (s.prov) {
         if (ev == BSP_BTN_LONG && btn == BSP_BTN_OK) prov_close();
+        return;
+    }
+
+    if (s.ble) {
+        if (ev == BSP_BTN_LONG && btn == BSP_BTN_OK) ble_close();
         return;
     }
 
@@ -713,6 +866,10 @@ void page_settings_tick(void)
     // 配网启动任务、校时任务都在别的任务里推进，这里只把结果搬到界面上。
     if (s.prov) {
         prov_refresh();
+        return;
+    }
+    if (s.ble) {
+        ble_refresh();
         return;
     }
     if (s.data_panel) return;

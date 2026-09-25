@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 // 本地时间。年范围 1970..2099。
 typedef struct {
@@ -49,6 +50,11 @@ int  app_time_day_of_year(int year, int month, int day);    // 1 起
 bool app_time_valid(const app_datetime_t *dt);
 bool app_time_add_days(int year, int month, int day, int delta, int *oy, int *om, int *od);
 bool app_time_add_months(int year, int month, int delta, int *oy, int *om);
+
+// Unix 秒与公历互转。本层不做时区处理：时区偏移由调用方按分钟自行加减，
+// 传入 UTC 得到 UTC、传入本地时间得到"本地 Unix 秒"。
+int64_t app_time_to_unix(int year, int month, int day, int hour, int minute, int second);
+bool    app_time_from_unix(int64_t unix_sec, app_datetime_t *out);
 
 bool app_lunar_from_solar(int year, int month, int day, app_lunar_t *out);
 const char *app_solar_term_name(int year, int month, int day);   // 无节气返回 NULL

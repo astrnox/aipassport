@@ -1,0 +1,16 @@
+HTTP/1.1 200 OK
+date: Fri, 25 Sep 2026 02:16:19 GMT
+
+HTTP/2 403 
+content-type: application/json
+content-length: 0
+x-amz-cf-pop: NRT20-P9
+date: Fri, 25 Sep 2026 02:16:22 GMT
+x-amz-apigw-id: EO7qmHH3PHcEe3A=
+x-amzn-requestid: 867c7c92-f4c8-46fe-952b-040c106af536
+x-amzn-errortype: MissingAuthenticationTokenException
+via: 1.1 0977bc7110d2cb9bae1b93beda73da08.cloudfront.net (CloudFront), 1.1 2126787ea947883b506ffa51b8d15d30.cloudfront.net (CloudFront)
+x-cache: Error from cloudfront
+x-amz-cf-pop: NRT20-P9
+x-amz-cf-id: 7DDANUJEzIs3uKVleempvpJzWC00wvU6Q5VVkIOjwDES2756GwhOxA==
+

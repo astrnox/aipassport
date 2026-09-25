@@ -706,3 +706,67 @@ bool ui_dialog_handle(bsp_btn_t btn, bsp_btn_ev_t ev)
     }
     return true;
 }
+
+// ---------------------------------------------------------------------------
+// 通知弹层
+// ---------------------------------------------------------------------------
+
+static lv_obj_t *s_alert;
+
+bool ui_alert_is_open(void)
+{
+    return s_alert != NULL;
+}
+
+void ui_alert_close(void)
+{
+    if (s_alert) {
+        lv_obj_delete(s_alert);
+        s_alert = NULL;
+    }
+}
+
+void ui_alert_open(lv_obj_t *parent, const char *title, const char *body)
+{
+    ui_alert_close();
+    if (!parent) return;
+
+    lv_obj_t *overlay = lv_obj_create(parent);
+    lv_obj_remove_flag(overlay, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_pos(overlay, 0, 0);
+    lv_obj_set_size(overlay, UI_W, UI_H);
+    lv_obj_set_style_bg_color(overlay, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(overlay, LV_OPA_60, 0);
+    lv_obj_set_style_border_width(overlay, 0, 0);
+    lv_obj_set_style_radius(overlay, 0, 0);
+    lv_obj_set_style_pad_all(overlay, 0, 0);
+
+    lv_obj_t *card = ui_card_create(overlay, 16, 92, UI_W - 32, 136, ui_c_accent());
+    lv_obj_set_style_bg_color(card, lv_color_hex(ui_c_card()), 0);
+
+    lv_obj_t *title_lbl = ui_label_create(card, title ? title : "", ui_font_title,
+                                          ui_c_accent());
+    lv_obj_align(title_lbl, LV_ALIGN_TOP_LEFT, 12, 10);
+
+    lv_obj_t *body_lbl = ui_label_create(card, body ? body : "", ui_font_hint, ui_c_text());
+    lv_obj_set_width(body_lbl, UI_W - 60);
+    lv_obj_set_style_text_align(body_lbl, LV_TEXT_ALIGN_LEFT, 0);
+    lv_label_set_long_mode(body_lbl, LV_LABEL_LONG_WRAP);
+    lv_obj_align(body_lbl, LV_ALIGN_TOP_LEFT, 12, 40);
+
+    lv_obj_t *option = ui_label_create(card, "OK 知道了", ui_font_body, ui_c_accent());
+    lv_obj_align(option, LV_ALIGN_BOTTOM_MID, 0, -10);
+
+    s_alert = overlay;
+}
+
+bool ui_alert_handle(bsp_btn_t btn, bsp_btn_ev_t ev)
+{
+    (void)btn;
+    if (!s_alert) return false;
+    // 任意按键都只关掉弹层：把它当作"我知道了"，不做其它动作。
+    if (ev == BSP_BTN_CLICK || ev == BSP_BTN_LONG) {
+        ui_alert_close();
+    }
+    return true;
+}

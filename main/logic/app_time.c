@@ -178,6 +178,40 @@ bool app_time_add_months(int year, int month, int delta, int *oy, int *om)
     return true;
 }
 
+int64_t app_time_to_unix(int year, int month, int day, int hour, int minute, int second)
+{
+    if (!date_valid(year, month, day)) return 0;
+    if (hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 59) {
+        return 0;
+    }
+    long days = days_from_civil(year, month, day);
+    return (int64_t)days * 86400 + (int64_t)hour * 3600 + (int64_t)minute * 60 + second;
+}
+
+bool app_time_from_unix(int64_t unix_sec, app_datetime_t *out)
+{
+    if (!out) return false;
+
+    int64_t days = unix_sec / 86400;
+    int64_t rem = unix_sec % 86400;
+    if (rem < 0) {
+        rem += 86400;
+        days -= 1;
+    }
+
+    int year, month, day;
+    civil_from_days((long)days, &year, &month, &day);
+    if (!date_valid(year, month, day)) return false;
+
+    out->year = year;
+    out->month = month;
+    out->day = day;
+    out->hour = (int)(rem / 3600);
+    out->minute = (int)((rem / 60) % 60);
+    out->second = (int)(rem % 60);
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 // 农历
 // ---------------------------------------------------------------------------

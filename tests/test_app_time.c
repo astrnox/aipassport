@@ -235,6 +235,44 @@ int main(void)
     assert(strcmp(app_precision_name((app_precision_t)99), "??") == 0);
     assert(strcmp(app_precision_name((app_precision_t)-1), "??") == 0);
 
+    // ---- Unix 秒与公历互转 ----
+    // 已知基准：1970-01-01 00:00:00 UTC 为 0。
+    assert(app_time_to_unix(1970, 1, 1, 0, 0, 0) == 0);
+    assert(app_time_to_unix(1970, 1, 1, 0, 0, 1) == 1);
+    assert(app_time_to_unix(1970, 1, 1, 0, 1, 0) == 60);
+    assert(app_time_to_unix(1970, 1, 2, 0, 0, 0) == 86400);
+    // 2000-03-01 是闰年之后，跨过 2000-02-29。
+    assert(app_time_to_unix(2000, 3, 1, 0, 0, 0) -
+           app_time_to_unix(2000, 2, 28, 0, 0, 0) == 2 * 86400);
+    // 非法日期/越界时间返回 0。
+    assert(app_time_to_unix(2026, 2, 30, 0, 0, 0) == 0);
+    assert(app_time_to_unix(2026, 1, 1, 24, 0, 0) == 0);
+    assert(app_time_to_unix(2026, 1, 1, 0, 60, 0) == 0);
+
+    // 往返一致：公历 -> Unix -> 公历。
+    {
+        static const app_datetime_t samples[] = {
+            { 1970, 1, 1, 0, 0, 0 },
+            { 2026, 9, 24, 10, 30, 59 },
+            { 2000, 2, 29, 23, 59, 59 },
+            { 2099, 12, 31, 12, 0, 0 },
+        };
+        for (size_t i = 0; i < sizeof(samples) / sizeof(samples[0]); i++) {
+            int64_t unix_sec = app_time_to_unix(samples[i].year, samples[i].month,
+                                                samples[i].day, samples[i].hour,
+                                                samples[i].minute, samples[i].second);
+            assert(unix_sec >= 0);
+            app_datetime_t back;
+            assert(app_time_from_unix(unix_sec, &back));
+            assert(memcmp(&back, &samples[i], sizeof(back)) == 0);
+        }
+        // 同一时刻的星期在两种表示下一致。
+        app_datetime_t dt;
+        assert(app_time_from_unix(app_time_to_unix(2026, 9, 24, 10, 0, 0), &dt));
+        assert(app_time_weekday(dt.year, dt.month, dt.day) ==
+               app_time_weekday(2026, 9, 24));
+    }
+
     puts("test_app_time: PASS");
     return 0;
 }

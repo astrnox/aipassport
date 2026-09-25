@@ -405,6 +405,12 @@ const char *app_net_saved_ssid(void)
     return buf;
 }
 
+esp_err_t app_net_wifi_radio_up(void)
+{
+    if (!s_inited) return ESP_ERR_INVALID_STATE;
+    return wifi_ensure_started();
+}
+
 // ---------------------------------------------------------------------------
 // NTP 校时
 // ---------------------------------------------------------------------------

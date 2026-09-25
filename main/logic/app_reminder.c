@@ -163,3 +163,56 @@ int app_reminder_schedule_text(const app_reminder_t *r, char *out, size_t cap)
     }
     return (int)used;
 }
+
+int app_reminder_missed(const app_reminder_list_t *list,
+                        int64_t from_unix, int64_t to_unix,
+                        int utc_offset_minutes,
+                        char (*times)[6], int max)
+{
+    if (!list || !times || max <= 0) return 0;
+    if (from_unix <= 0 || to_unix <= from_unix) return 0;
+
+    // 只回溯固定窗口，且从整分钟之后开始，避免把基准那一分钟本身算进来。
+    int64_t start = from_unix;
+    if (to_unix - start > APP_REMINDER_MISSED_WINDOW_S) {
+        start = to_unix - APP_REMINDER_MISSED_WINDOW_S;
+    }
+    start -= start % 60;
+
+    int64_t offset = (int64_t)utc_offset_minutes * 60;
+    int  minutes_of_day[APP_REMINDER_MAX];   // 每条提醒最近一次命中的时刻
+    int  slot[APP_REMINDER_MAX];             // 提醒下标 -> 输出位置
+    bool hit[APP_REMINDER_MAX];
+    memset(hit, 0, sizeof(hit));
+
+    int found = 0;
+    for (int64_t t = start + 60; t <= to_unix; t += 60) {
+        app_datetime_t dt;
+        if (!app_time_from_unix(t + offset, &dt)) continue;
+        int weekday = app_time_weekday(dt.year, dt.month, dt.day);
+        if (weekday < 0) continue;
+
+        for (int i = 0; i < list->count; i++) {
+            if (!app_reminder_due(&list->items[i], &dt, weekday)) continue;
+            if (hit[i]) {
+                // 同一条提醒在同一窗口内命中多次时保留最近一次。
+                minutes_of_day[slot[i]] = dt.hour * 60 + dt.minute;
+                continue;
+            }
+            if (found >= max) continue;
+            hit[i] = true;
+            slot[i] = found;
+            minutes_of_day[found] = dt.hour * 60 + dt.minute;
+            found++;
+        }
+    }
+
+    for (int i = 0; i < found; i++) {
+        // 先夹到 0..23:59，让编译器能确定格式化长度不超过缓冲（6 字节）。
+        int mo = minutes_of_day[i];
+        if (mo < 0) mo = 0;
+        if (mo > 23 * 60 + 59) mo = 23 * 60 + 59;
+        snprintf(times[i], 6, "%02d:%02d", mo / 60, mo % 60);
+    }
+    return found;
+}

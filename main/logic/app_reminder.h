@@ -9,6 +9,10 @@
 
 #define APP_REMINDER_MAX 16
 
+// 开机汇总错过的提醒时最多回溯的时长。超过这个窗口的错过提醒不再计入，
+// 避免长时间关机后开机扫描过久、也避免提示早已失去时效的内容。
+#define APP_REMINDER_MISSED_WINDOW_S (24 * 3600)
+
 // 单条提醒。重复方式二选一：按周重复（weekday_mask）或一次性日期（year/month/day）。
 typedef struct {
     bool    enabled;
@@ -44,3 +48,13 @@ bool app_reminder_due(const app_reminder_t *r, const app_datetime_t *now, int no
 
 // 形如 "每天" / "周一 周三" / "2026-09-24"。返回写入字节数（不含结尾 NUL），失败 -1。
 int  app_reminder_schedule_text(const app_reminder_t *r, char *out, size_t cap);
+
+// 汇总 (from_unix, to_unix] 之间本应触发、但设备未运行因而错过的提醒。
+// utc_offset_minutes 为本地时区偏移；times 依次写入 "HH:MM"（每项至少 6 字节）。
+// 每条提醒最多计一次（取最近一次命中），因此一周内重复 7 次的提醒只算一条。
+// from_unix <= 0 或 to_unix <= from_unix 时返回 0；最多回溯
+// APP_REMINDER_MISSED_WINDOW_S 秒。返回写入的条数（不超过 max）。
+int  app_reminder_missed(const app_reminder_list_t *list,
+                         int64_t from_unix, int64_t to_unix,
+                         int utc_offset_minutes,
+                         char (*times)[6], int max);

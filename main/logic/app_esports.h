@@ -8,9 +8,14 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define APP_ESPORT_MAX_MATCHES 48
-#define APP_ESPORT_MAX_TEAMS   32
-#define APP_ESPORT_MAX_FOLLOWS 5
+#define APP_ESPORT_MAX_MATCHES  48
+#define APP_ESPORT_MAX_TEAMS    32
+#define APP_ESPORT_MAX_FOLLOWS  5
+#define APP_ESPORT_TEAM_PLAYERS 5   // 每队选手数（上单/打野/中单/下路/辅助）
+
+#define APP_ESPORT_ROLE_LEN     8   // 中文位置名（"上单" 为 6 字节 + NUL）
+#define APP_ESPORT_CHAMP_LEN    20  // 英雄标识（接口原文，最长如 "MonkeyKing"）
+#define APP_ESPORT_PLAYER_LEN   20  // 选手名（接口原文）
 
 typedef enum {
     APP_MATCH_UNKNOWN = 0,

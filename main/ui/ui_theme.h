@@ -160,3 +160,14 @@ bool ui_dialog_is_open(void);
 // 对话框打开时由控制器把按键转交到这里；返回 true 表示已消费。
 bool ui_dialog_handle(bsp_btn_t btn, bsp_btn_ev_t ev);
 void ui_dialog_close(void);
+
+// ---------------------------------------------------------------------------
+// 通知弹层（提醒到点、错过提醒汇总）
+// ---------------------------------------------------------------------------
+// 与确认对话框的区别：只有一个"知道了"，不做二选一，用于"发生过什么事"的告知。
+// 弹层挂在传入的屏幕上；调用方负责在该屏幕被删除前关闭，否则控件会随之失效。
+void ui_alert_open(lv_obj_t *parent, const char *title, const char *body);
+void ui_alert_close(void);
+bool ui_alert_is_open(void);
+// 弹层打开时由控制器把按键转交到这里；返回 true 表示已消费（任意按键关闭）。
+bool ui_alert_handle(bsp_btn_t btn, bsp_btn_ev_t ev);

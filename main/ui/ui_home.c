@@ -409,6 +409,13 @@ void page_home_enter(void)
 
 void page_home_exit(void)
 {
+    // 焦点位置在这里落盘：每按一次 UP/DOWN 都写 NVS 会放大闪存写入，而离开主页必然
+    // 经过这里（进入模块、回到主页都会先退出主页），写一次就够。
+    if (s.page.scr) {
+        app_state_settings()->home_focus = s.focus;
+        app_state_save_settings();
+    }
+
     if (s.quick) {
         lv_obj_delete(s.quick);
         s.quick = NULL;
