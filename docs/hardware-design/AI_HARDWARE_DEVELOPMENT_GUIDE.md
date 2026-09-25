@@ -274,7 +274,7 @@ the demo test UI just to follow these examples.
 | --- | --- |
 | Pin/I2C | scan, all shared devices, boot straps, USB logs |
 | LCD | color blocks, orientation, clipping, inversion, byte order, backlight levels |
-| ADC/buttons | released and pressed mV, click/double/long events, margin across battery levels |
+| ADC/buttons | released and pressed mV, one action per press (single click on release, long press at 500 ms), rapid-press responsiveness, margin across battery levels |
 | Codec/I2S | 1 kHz tone, non-zero recording, correct playback speed, format changes, page exit |
 | Battery | plausible SOC/mV, graceful missing-device behavior, intermittent-I2C recovery |
 | Wi-Fi | visible scan count/SSID/RSSI, rescan, repeated entry/exit |

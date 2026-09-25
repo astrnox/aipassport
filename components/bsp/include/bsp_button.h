@@ -12,12 +12,23 @@ typedef enum {
     BSP_BTN_OK,
 } bsp_btn_t;
 
+// 一次物理按压最多产生两个事件，顺序固定：
+//   BSP_BTN_PRESS  按下瞬间(低延迟,适合游戏类即时响应)
+//   BSP_BTN_CLICK  抬起即发的一次短按
+//   BSP_BTN_LONG   按住达到 BSP_BTN_LONG_PRESS_MS 时长按下；之后抬起不再补发 CLICK
+// 即单次按住 500 毫秒以内只出 PRESS + CLICK，超过阈值只出 PRESS + LONG。
+//
+// 刻意不做双击手势：双击需要判定窗口，会把每次单击都拖到窗口结束才确认，手感变钝且
+// 容易误触；连续快按还会被合并成双击而丢失单次动作。全部界面操作只由短按与长按构成，
+// 见 docs/product/passport-toolbox-prd.zh_CN.md 的交互原则。
 typedef enum {
-    BSP_BTN_PRESS = 0,   // 按下瞬间(低延迟,适合游戏类即时响应)
-    BSP_BTN_CLICK,       // 单击(按下并抬起)
-    BSP_BTN_DOUBLE,      // 双击
-    BSP_BTN_LONG,        // 长按
+    BSP_BTN_PRESS = 0,
+    BSP_BTN_CLICK,
+    BSP_BTN_LONG,
 } bsp_btn_ev_t;
+
+// 长按阈值(毫秒)。产品验收口径为达到 500 毫秒即触发。
+#define BSP_BTN_LONG_PRESS_MS 500
 
 // 按键事件回调。运行于 button 组件使用的共享 esp_timer 任务,只能入队或执行同等级
 // 的有界操作；勿在其中阻塞、访问 LVGL 或做重活。

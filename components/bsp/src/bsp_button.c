@@ -37,6 +37,13 @@ static int64_t s_sample_time;
 static int s_sample_mv = -1;
 static bool s_sample_valid;
 
+// 长按由本文件计时，不使用 button 组件的 BUTTON_LONG_PRESS_START：组件的判定会把
+// "短按后立刻再按下并按住"当成重复按击，那条状态路径永远不产生长按，而长按是本产品
+// 的主要手势。这里每个按键一个一次性定时器，按下即起算，抬起即取消。
+static bool              s_pressed[BSP_BTN_COUNT];
+static bool              s_long_fired[BSP_BTN_COUNT];
+static esp_timer_handle_t s_long_timer[BSP_BTN_COUNT];
+
 static uint8_t button_level(button_driver_t *driver) {
     if (!s_ready) return BUTTON_INACTIVE;
     const bsp_adc_button_t *button = (const bsp_adc_button_t *)driver;
@@ -75,10 +82,44 @@ static void on_event(void *arg, void *usr_data, bsp_btn_ev_t ev) {
     if (!s_ready || !s_cb) return;
     s_cb((bsp_btn_t)(intptr_t)usr_data, ev, s_user);
 }
-static void cb_press (void *a, void *u) { on_event(a, u, BSP_BTN_PRESS);  }
-static void cb_click (void *a, void *u) { on_event(a, u, BSP_BTN_CLICK);  }
-static void cb_double(void *a, void *u) { on_event(a, u, BSP_BTN_DOUBLE); }
-static void cb_long  (void *a, void *u) { on_event(a, u, BSP_BTN_LONG);   }
+
+// 长按定时器到点。与组件的轮询同在 esp_timer 任务上串行执行，故只需普通标志位；
+// s_pressed 为空说明这一拍已经抬起，定时器晚到一步时不再补发长按。
+static void long_press_cb(void *arg) {
+    const int index = (int)(intptr_t)arg;
+    if (index < 0 || index >= BSP_BTN_COUNT) return;
+    if (!s_ready || !s_cb) return;
+    if (!s_pressed[index] || s_long_fired[index]) return;
+    s_long_fired[index] = true;
+    s_cb((bsp_btn_t)index, BSP_BTN_LONG, s_user);
+}
+
+static void cb_press(void *a, void *u) {
+    const int index = (int)(intptr_t)u;
+    if (index >= 0 && index < BSP_BTN_COUNT) {
+        s_pressed[index] = true;
+        s_long_fired[index] = false;
+        if (s_long_timer[index]) {
+            esp_timer_stop(s_long_timer[index]);
+            esp_timer_start_once(s_long_timer[index],
+                                 (uint64_t)BSP_BTN_LONG_PRESS_MS * 1000);
+        }
+    }
+    on_event(a, u, BSP_BTN_PRESS);
+}
+
+static void cb_release(void *a, void *u) {
+    const int index = (int)(intptr_t)u;
+    bool was_long = false;
+    if (index >= 0 && index < BSP_BTN_COUNT) {
+        if (s_long_timer[index]) esp_timer_stop(s_long_timer[index]);
+        s_pressed[index] = false;
+        was_long = s_long_fired[index];
+        s_long_fired[index] = false;
+    }
+    // 长按已经报过一次，抬起不再补发短按；否则这次抬起的语义就是一次短按。
+    if (!was_long) on_event(a, u, BSP_BTN_CLICK);
+}
 
 // 初始化中途失败时先停掉所有 button driver，再释放本文件持有的校准与 ADC unit。
 // button driver 仍在轮询时不能先删 ADC，否则 timer callback 会访问失效句柄。
@@ -87,6 +128,17 @@ static void button_cleanup(void) {
     s_user = NULL;
     s_ready = false;
     s_sample_valid = false;
+
+    // 先撤长按定时器：此后即使有到点的回调，s_ready 已为 false，不会再上报事件。
+    for (int i = 0; i < BSP_BTN_COUNT; i++) {
+        if (s_long_timer[i]) {
+            esp_timer_stop(s_long_timer[i]);
+            esp_timer_delete(s_long_timer[i]);
+            s_long_timer[i] = NULL;
+        }
+        s_pressed[i] = false;
+        s_long_fired[i] = false;
+    }
 
     for (int i = BSP_BTN_COUNT - 1; i >= 0; i--) {
         if (!s_btn[i]) continue;
@@ -116,10 +168,10 @@ static void button_cleanup(void) {
 }
 
 static esp_err_t register_callbacks(button_handle_t button, void *index) {
+    // 只订阅原始边沿：按下与抬起。单击与长按的语义由本文件给出（见 bsp_button.h），
+    // 不再订阅组件的 SINGLE_CLICK / DOUBLE_CLICK / LONG_PRESS_START。
     esp_err_t e = iot_button_register_cb(button, BUTTON_PRESS_DOWN, NULL, cb_press, index);
-    if (e == ESP_OK) e = iot_button_register_cb(button, BUTTON_SINGLE_CLICK, NULL, cb_click, index);
-    if (e == ESP_OK) e = iot_button_register_cb(button, BUTTON_DOUBLE_CLICK, NULL, cb_double, index);
-    if (e == ESP_OK) e = iot_button_register_cb(button, BUTTON_LONG_PRESS_START, NULL, cb_long, index);
+    if (e == ESP_OK) e = iot_button_register_cb(button, BUTTON_PRESS_UP, NULL, cb_release, index);
     return e;
 }
 
@@ -172,6 +224,20 @@ esp_err_t bsp_button_init(bsp_btn_cb_t cb, void *user) {
     }
 
     for (int i = 0; i < BSP_BTN_COUNT; i++) {
+        const esp_timer_create_args_t long_args = {
+            .callback = long_press_cb,
+            .arg = (void *)(intptr_t)i,
+            .dispatch_method = ESP_TIMER_TASK,
+            .name = "bsp_btn_long",
+        };
+        esp_err_t te = esp_timer_create(&long_args, &s_long_timer[i]);
+        if (te != ESP_OK) {
+            ESP_LOGE(TAG, "按键 %d 长按定时器创建失败: %s", i, esp_err_to_name(te));
+            s_long_timer[i] = NULL;
+            button_cleanup();
+            return te;
+        }
+
         s_drivers[i] = (bsp_adc_button_t){
             .base = { .get_key_level = button_level, .del = button_driver_delete },
             .index = (unsigned)i,
