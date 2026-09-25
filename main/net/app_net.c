@@ -28,6 +28,7 @@
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_netif_sntp.h"
+#include "esp_timer.h"
 #include "esp_wifi.h"
 #include "nvs.h"
 #include "nvs_flash.h"
@@ -1459,6 +1460,13 @@ static const char PROV_PAGE[] =
     "<p class=\"st\">口令只在设备小屏上查看，网页不回显。若设备上开启了加密，需先在设备上用手势解锁再保存。</p>\n"
     "</form>\n"
     "<div id=\"vaultList\" class=\"st\"></div>\n"
+    "<form method=\"post\" action=\"/vault_unlock\">\n"
+    "<h2>忘了手势？用恢复码解锁</h2>\n"
+    "<label>恢复码（设备上生成的那串，忽略横线）</label>"
+    "<input name=\"code\" maxlength=\"40\" placeholder=\"ABCDE-FGHJK-...\">\n"
+    "<button type=\"submit\">用恢复码解锁</button>\n"
+    "<p class=\"st\">设备只有三个键，敲不了 31 位恢复码，所以在这里输入。解锁后即可继续添加条目。</p>\n"
+    "</form>\n"
 
     "<form method=\"post\" action=\"/totp_secret\">\n"
     "<h2>动态口令</h2>\n"
@@ -1963,6 +1971,30 @@ static esp_err_t prov_post_vault_del(httpd_req_t *req)
     return prov_reply(req, "已删除");
 }
 
+// 网页端恢复码解锁：设备三键无法输入 31 位恢复码，忘了手势时这是唯一的出口。
+// 同样走带退避的 try_ 版本：连续乱填会进入冷却，避免在这里无限探测恢复码。
+static esp_err_t prov_post_vault_unlock(httpd_req_t *req)
+{
+    char body[200];
+    if (!read_form_checked(req, body, sizeof(body))) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        return prov_reply(req, "内容为空或过长");
+    }
+    char code[FORM_RAW_CAP(APP_VAULT_RECOVERY_LEN + 1)];
+    if (!form_field(body, "code", code, sizeof(code))) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        return prov_reply(req, "请填写恢复码");
+    }
+
+    uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    app_vault_status_t st = app_vault_try_unlock_recovery(app_state_vault(), code, now_ms);
+    if (st != APP_VAULT_OK) {
+        return prov_reply(req, app_vault_status_text(st));
+    }
+    // 解锁只改运行态，不写 NVS：设备重启或再次上锁后仍需重新解锁。
+    return prov_reply(req, "恢复码正确，密码本已解锁，可以继续添加条目了");
+}
+
 // 动态口令：只让用户填备注名与 Base32 密钥，算法/位数/周期用最常见的默认值，避免
 // 在手机上多填三格还填错。
 static esp_err_t prov_post_totp_secret(httpd_req_t *req)
@@ -2363,6 +2395,7 @@ esp_err_t app_net_prov_start(void)
     httpd_uri_t u_info = { .uri = "/info", .method = HTTP_GET, .handler = prov_get_info, .user_ctx = NULL };
     httpd_uri_t u_vault = { .uri = "/vault", .method = HTTP_POST, .handler = prov_post_vault, .user_ctx = NULL };
     httpd_uri_t u_vault_del = { .uri = "/vault_del", .method = HTTP_POST, .handler = prov_post_vault_del, .user_ctx = NULL };
+    httpd_uri_t u_vault_unlock = { .uri = "/vault_unlock", .method = HTTP_POST, .handler = prov_post_vault_unlock, .user_ctx = NULL };
     httpd_uri_t u_totp_secret = { .uri = "/totp_secret", .method = HTTP_POST, .handler = prov_post_totp_secret, .user_ctx = NULL };
     httpd_uri_t u_totp_del = { .uri = "/totp_del", .method = HTTP_POST, .handler = prov_post_totp_del, .user_ctx = NULL };
     httpd_uri_t u_badge = { .uri = "/badge", .method = HTTP_POST, .handler = prov_post_badge, .user_ctx = NULL };
@@ -2376,6 +2409,7 @@ esp_err_t app_net_prov_start(void)
     httpd_register_uri_handler(s_httpd, &u_info);
     httpd_register_uri_handler(s_httpd, &u_vault);
     httpd_register_uri_handler(s_httpd, &u_vault_del);
+    httpd_register_uri_handler(s_httpd, &u_vault_unlock);
     httpd_register_uri_handler(s_httpd, &u_totp_secret);
     httpd_register_uri_handler(s_httpd, &u_totp_del);
     httpd_register_uri_handler(s_httpd, &u_badge);

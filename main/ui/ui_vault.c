@@ -17,6 +17,7 @@
 
 #include "app_state.h"
 
+#include "esp_timer.h"
 #include "lvgl.h"
 
 #include <stdio.h>
@@ -25,6 +26,10 @@
 #define VV_CW         (UI_W - 2 * UI_MARGIN_X)   // 内容区可用宽度 224
 #define VV_PASS_MASK  "********"
 #define VV_MODE_ROWS  4                          // 加密模式下模式页的行数上限
+
+// 加密本闲置多久自动回锁。运行态参数，每次进入本页时设置，不进 NVS：设备重启本来就会
+// 回到锁定，无需持久化。
+#define VV_AUTOLOCK_S 120
 
 typedef enum {
     VV_UNLOCK = 0,   // 加密且未解锁：敲击手势
@@ -98,6 +103,17 @@ static void close_overlay(void);
 // ---- 小工具 ----
 
 static app_vault_t *vault(void) { return app_state_vault(); }
+
+// 单调毫秒。自动回锁与失败退避都只关心时间差，用 esp_timer 的单调时钟即可，
+// 与墙钟是否校准无关。
+static uint32_t mono_ms(void) { return (uint32_t)(esp_timer_get_time() / 1000); }
+
+// 把自动回锁时长套到当前密码本上；明文模式下该设置无副作用（永不回锁）。
+static void apply_autolock(void)
+{
+    app_vault_t *v = vault();
+    if (v) app_vault_set_autolock(v, VV_AUTOLOCK_S);
+}
 
 // 清掉详情缓冲。任何离开详情页或整页销毁的路径都必须经过它。
 static void pass_clear(void)
@@ -206,8 +222,9 @@ static void try_unlock(void)
         ui_hint_flash("手势至少敲 4 次", 1500);
         return;
     }
-    // 失败时只反馈状态文案，不透露条目数量、长度或任何内容。
-    app_vault_status_t st = app_vault_unlock_knock(vault(), &s.knock);
+    // 失败时只反馈状态文案，不透露条目数量、长度或任何内容。走 try_ 版本：连续失败会
+    // 进入冷却，冷却期内连一次密钥派生都不做，暴力尝试得不到额外信息。
+    app_vault_status_t st = app_vault_try_unlock_knock(vault(), &s.knock, mono_ms());
     app_vault_knock_clear(&s.knock);
     if (st == APP_VAULT_OK) {
         ui_sound_beep();
@@ -616,7 +633,8 @@ static void open_overlay(vault_overlay_t kind, vault_view_t back)
     } else {
         lv_obj_t *body = ui_label_create(ov,
             "本机只有三个键，无法输入 31 位恢复码。\n\n"
-            "请用手机连上设备热点，打开配置页，在配置页里用恢复码解锁并重新设置手势。",
+            "请用手机连上设备热点，打开配置页，在配置页里用恢复码解锁。"
+            "解锁后设备即处于解锁态，可在本页退回明文再重新设置手势。",
             ui_font_hint, ui_c_text());
         lv_obj_set_width(body, 208);
         lv_label_set_long_mode(body, LV_LABEL_LONG_WRAP);
@@ -653,6 +671,7 @@ void page_vault_enter(void)
     memset(&s, 0, sizeof(s));
     s.active = true;
     s.page = ui_page_create(NULL);
+    apply_autolock();
     // 锁定态由 set_view 统一折回解锁视图；解锁态直接进列表。
     set_view(VV_LIST);
 }
@@ -665,6 +684,11 @@ void page_vault_key(bsp_btn_t btn, bsp_btn_ev_t ev)
     if (s.overlay) {
         if (btn == BSP_BTN_OK && (ev == BSP_BTN_CLICK || ev == BSP_BTN_LONG)) overlay_ok();
         return;
+    }
+    // 解锁态下的任何按键都算一次活动，把自动回锁的倒计时往后推。
+    {
+        app_vault_t *v = vault();
+        if (v && !app_vault_is_locked(v)) app_vault_touch(v, mono_ms());
     }
     // 长按 OK 返回上一级：详情/模式回列表，设置手势回模式，列表/解锁则退出本页。
     if (ev == BSP_BTN_LONG && btn == BSP_BTN_OK) {
@@ -696,7 +720,14 @@ void page_vault_tick(void)
 {
     if (!s.active || !s.page.scr || s.overlay) return;
     app_vault_t *v = vault();
-    if (!v || app_vault_is_locked(v)) return;
+    if (!v) return;
+    // 闲置到点自动回锁：先把明文界面折回解锁页，再提示，避免任何仍显示口令的瞬间。
+    if (app_vault_poll_autolock(v, mono_ms())) {
+        set_view(VV_UNLOCK);
+        ui_hint_flash("闲置太久，已自动上锁", 2000);
+        return;
+    }
+    if (app_vault_is_locked(v)) return;
     // 条目数可能被配网页或网络侧改动：变了就重建列表。
     if (s.view == VV_LIST && v->count != s.built_count) build_list();
 }

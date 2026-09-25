@@ -1033,6 +1033,96 @@ void app_vault_lock(app_vault_t *v)
     v->has_dek = false;
     v->unlocked = false;
     v->selected = 0;
+    v->activity_ms = 0;   // 下次解锁时重新开始计时，避免刚解锁就被判超时
+}
+
+// ---------------------------------------------------------------------------
+// 安全策略：自动回锁与失败节流
+// ---------------------------------------------------------------------------
+void app_vault_set_autolock(app_vault_t *v, int seconds)
+{
+    if (!v) return;
+    v->autolock_seconds = seconds > 0 ? seconds : 0;
+}
+
+void app_vault_touch(app_vault_t *v, uint32_t now_ms)
+{
+    if (!v) return;
+    v->activity_ms = now_ms;
+}
+
+bool app_vault_poll_autolock(app_vault_t *v, uint32_t now_ms)
+{
+    if (!v || v->mode != APP_VAULT_ENCRYPTED || !v->unlocked) return false;
+    if (v->autolock_seconds <= 0 || v->activity_ms == 0) return false;
+
+    // 用无符号差比较，单调时钟回绕时结论依然正确，不需要额外分支。
+    uint32_t limit = (uint32_t)v->autolock_seconds * 1000u;
+    if ((uint32_t)(now_ms - v->activity_ms) < limit) return false;
+
+    app_vault_lock(v);
+    return true;
+}
+
+uint32_t app_vault_lockout_remaining_ms(const app_vault_t *v, uint32_t now_ms)
+{
+    if (!v || v->lockout_until_ms == 0) return 0;
+    if ((int32_t)(v->lockout_until_ms - now_ms) <= 0) return 0;
+    return v->lockout_until_ms - now_ms;
+}
+
+// 记一次失败并进入指数退避。前 APP_VAULT_FAIL_FREE 次只累计不罚等，避免手滑输错就被
+// 关在门外；之后每次等待翻倍，上限 APP_VAULT_LOCKOUT_MAX_S。
+static void note_unlock_failure(app_vault_t *v, uint32_t now_ms)
+{
+    if (v->fail_count < 1000) v->fail_count++;
+
+    if (v->fail_count <= APP_VAULT_FAIL_FREE) {
+        v->lockout_until_ms = 0;
+        return;
+    }
+
+    int shift = v->fail_count - APP_VAULT_FAIL_FREE - 1;
+    if (shift > 20) shift = 20;                 // 防止移位越界；结果本就会被下面的上限截断
+    uint32_t wait_s = 1u << shift;
+    if (wait_s > APP_VAULT_LOCKOUT_MAX_S) wait_s = APP_VAULT_LOCKOUT_MAX_S;
+    v->lockout_until_ms = now_ms + wait_s * 1000u;
+}
+
+static void note_unlock_success(app_vault_t *v, uint32_t now_ms)
+{
+    v->fail_count = 0;
+    v->lockout_until_ms = 0;
+    v->activity_ms = now_ms;   // 解锁即一次活动，回锁计时从这里开始
+}
+
+app_vault_status_t app_vault_try_unlock_knock(app_vault_t *v, const app_vault_knock_t *knock,
+                                              uint32_t now_ms)
+{
+    if (!v) return APP_VAULT_ERR_RANGE;
+    // 冷却中直接返回，连一次 PBKDF2 都不做——否则罚等只是"提示"，暴力尝试仍不受限。
+    if (app_vault_lockout_remaining_ms(v, now_ms) > 0) return APP_VAULT_ERR_THROTTLED;
+
+    app_vault_status_t status = app_vault_unlock_knock(v, knock);
+    if (status == APP_VAULT_OK) note_unlock_success(v, now_ms);
+    else if (status == APP_VAULT_ERR_AUTH) note_unlock_failure(v, now_ms);
+    return status;
+}
+
+app_vault_status_t app_vault_try_unlock_recovery(app_vault_t *v, const char *code,
+                                                 uint32_t now_ms)
+{
+    if (!v) return APP_VAULT_ERR_RANGE;
+    if (app_vault_lockout_remaining_ms(v, now_ms) > 0) return APP_VAULT_ERR_THROTTLED;
+
+    app_vault_status_t status = app_vault_unlock_recovery(v, code);
+    if (status == APP_VAULT_OK) {
+        note_unlock_success(v, now_ms);
+    } else if (status == APP_VAULT_ERR_AUTH || status == APP_VAULT_ERR_RANGE) {
+        // 格式错误也算一次失败：否则可以靠乱填恢复码无限探测而不触发退避。
+        note_unlock_failure(v, now_ms);
+    }
+    return status;
 }
 
 app_vault_status_t app_vault_change_knock(app_vault_t *v, const app_vault_knock_t *knock)
@@ -1161,14 +1251,15 @@ const char *app_vault_status_text(app_vault_status_t status)
 {
     switch (status) {
     case APP_VAULT_OK:           return "成功";
-    case APP_VAULT_ERR_FORMAT:   return "数据损坏";
-    case APP_VAULT_ERR_LOCKED:   return "未解锁";
-    case APP_VAULT_ERR_AUTH:     return "手势或恢复码不正确";
-    case APP_VAULT_ERR_STATE:    return "当前状态不允许";
-    case APP_VAULT_ERR_FULL:     return "条目已满";
+    case APP_VAULT_ERR_FORMAT:   return "数据已损坏，请重置密码本";
+    case APP_VAULT_ERR_LOCKED:   return "请先解锁";
+    case APP_VAULT_ERR_AUTH:     return "手势或恢复码不对";
+    case APP_VAULT_ERR_STATE:    return "当前不能执行这个操作";
+    case APP_VAULT_ERR_FULL:     return "条目已满，先删掉一条";
     case APP_VAULT_ERR_RANGE:    return "输入不合法";
     case APP_VAULT_ERR_MEMORY:   return "空间不足";
-    case APP_VAULT_ERR_ENTROPY:  return "随机数不可用";
+    case APP_VAULT_ERR_ENTROPY:  return "设备随机数异常，请重启后再试";
+    case APP_VAULT_ERR_THROTTLED:return "试错太多，请稍后再试";
     default:                     return "未知错误";
     }
 }

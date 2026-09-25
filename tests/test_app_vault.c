@@ -1050,6 +1050,130 @@ static void test_null_and_text(void)
     assert(app_vault_mode_name((app_vault_mode_t)77) != NULL);
 }
 
+// ---------------------------------------------------------------------------
+// 17. 安全策略：自动回锁与失败节流
+// ---------------------------------------------------------------------------
+static void test_autolock_and_throttle(void)
+{
+    inject_random();
+
+    // ---- 自动回锁 ----
+    app_vault_t v;
+    app_vault_init(&v);
+    must_add(&v, "邮箱", "me@example.com", "pw-1");
+    app_vault_knock_t k = knock_udud();
+    assert(app_vault_enable_encryption(&v, &k) == APP_VAULT_OK);
+    assert(!app_vault_is_locked(&v));
+
+    // 未设时长：无论过多久都不自动回锁。
+    app_vault_touch(&v, 1000);
+    assert(!app_vault_poll_autolock(&v, 100000000u));
+    assert(!app_vault_is_locked(&v));
+
+    // 60 秒：差 1 毫秒不回锁，正好到点回锁。
+    app_vault_set_autolock(&v, 60);
+    app_vault_touch(&v, 5000);
+    assert(!app_vault_poll_autolock(&v, 5000 + 59999));
+    assert(!app_vault_is_locked(&v));
+    assert(app_vault_poll_autolock(&v, 5000 + 60000));
+    assert(app_vault_is_locked(&v));
+    // 回锁后手动活动不再复活（必须先解锁），poll 持续返回 false。
+    app_vault_touch(&v, 200000);
+    assert(!app_vault_poll_autolock(&v, 999999u));
+
+    // 负数时长按"不自动回锁"处理。
+    app_vault_set_autolock(&v, -5);
+    assert(v.autolock_seconds == 0);
+
+    // 明文模式：设置与轮询都无副作用，永远不锁。
+    app_vault_t p;
+    app_vault_init(&p);
+    app_vault_set_autolock(&p, 1);
+    app_vault_touch(&p, 0);
+    assert(!app_vault_poll_autolock(&p, 10u * 1000u));
+    assert(!app_vault_is_locked(&p));
+
+    // ---- 失败节流 ----
+    inject_random();
+    app_vault_t t;
+    app_vault_init(&t);
+    must_add(&t, "邮箱", "me@example.com", "pw-1");
+    app_vault_knock_t good = knock_udud();
+    assert(app_vault_enable_encryption(&t, &good) == APP_VAULT_OK);
+    app_vault_lock(&t);
+
+    app_vault_knock_t bad = knock_dduu();
+    const uint32_t t0 = 100000;
+
+    // 前 APP_VAULT_FAIL_FREE 次失败只累计、不罚等，避免手滑就被关在门外。
+    for (int i = 0; i < APP_VAULT_FAIL_FREE; i++) {
+        assert(app_vault_try_unlock_knock(&t, &bad, t0) == APP_VAULT_ERR_AUTH);
+        assert(app_vault_lockout_remaining_ms(&t, t0) == 0);
+    }
+    // 第 4 次失败 -> 冷却 1 秒。
+    assert(app_vault_try_unlock_knock(&t, &bad, t0) == APP_VAULT_ERR_AUTH);
+    assert(app_vault_lockout_remaining_ms(&t, t0) == 1000);
+
+    // 冷却期内即使敲对也被挡回，且不解锁——否则罚等形同虚设。
+    assert(app_vault_try_unlock_knock(&t, &good, t0 + 500) == APP_VAULT_ERR_THROTTLED);
+    assert(app_vault_is_locked(&t));
+    // 到点后正确手势可解锁，且失败计数清零。
+    assert(app_vault_try_unlock_knock(&t, &good, t0 + 1000) == APP_VAULT_OK);
+    assert(!app_vault_is_locked(&t));
+    assert(t.fail_count == 0);
+    assert(app_vault_lockout_remaining_ms(&t, t0 + 1000) == 0);
+
+    // 退避按 1s / 2s / 4s 翻倍。
+    app_vault_lock(&t);
+    uint32_t now = 0;
+    for (int i = 0; i < APP_VAULT_FAIL_FREE; i++) {
+        assert(app_vault_try_unlock_knock(&t, &bad, now) == APP_VAULT_ERR_AUTH);
+    }
+    assert(app_vault_try_unlock_knock(&t, &bad, now) == APP_VAULT_ERR_AUTH);
+    assert(app_vault_lockout_remaining_ms(&t, now) == 1000);
+    now += 1000;
+    assert(app_vault_try_unlock_knock(&t, &bad, now) == APP_VAULT_ERR_AUTH);
+    assert(app_vault_lockout_remaining_ms(&t, now) == 2000);
+    now += 2000;
+    assert(app_vault_try_unlock_knock(&t, &bad, now) == APP_VAULT_ERR_AUTH);
+    assert(app_vault_lockout_remaining_ms(&t, now) == 4000);
+
+    // 恢复码路径同样受节流保护（乱填恢复码不能无限探测）。
+    inject_random();
+    app_vault_t r;
+    app_vault_init(&r);
+    must_add(&r, "邮箱", "me@example.com", "pw-1");
+    assert(app_vault_enable_encryption(&r, &good) == APP_VAULT_OK);
+
+    char saved[APP_VAULT_RECOVERY_LEN + 1];
+    memcpy(saved, app_vault_pending_recovery(&r), sizeof(saved));
+    app_vault_lock(&r);
+
+    // 由真码改掉首位构造一个"格式合法但内容错误"的码：首位不参与末尾的补零校验位，
+    // 因此它能通过解码进入密钥派生，最终以 ERR_AUTH 失败（而不是被当成格式错误）。
+    char wrong[APP_VAULT_RECOVERY_LEN + 1];
+    memcpy(wrong, saved, sizeof(wrong));
+    wrong[0] = (wrong[0] == '0') ? '1' : '0';
+
+    uint32_t now2 = 0;
+    for (int i = 0; i < APP_VAULT_FAIL_FREE; i++) {
+        assert(app_vault_try_unlock_recovery(&r, wrong, now2) == APP_VAULT_ERR_AUTH);
+    }
+    assert(app_vault_try_unlock_recovery(&r, wrong, now2) == APP_VAULT_ERR_AUTH);
+    assert(app_vault_lockout_remaining_ms(&r, now2) == 1000);
+    assert(app_vault_try_unlock_recovery(&r, saved, now2 + 100) == APP_VAULT_ERR_THROTTLED);
+    assert(app_vault_try_unlock_recovery(&r, saved, now2 + 1000) == APP_VAULT_OK);
+    assert(!app_vault_is_locked(&r));
+
+    // NULL 参数不崩。
+    assert(app_vault_try_unlock_knock(NULL, &bad, 0) == APP_VAULT_ERR_RANGE);
+    assert(app_vault_try_unlock_recovery(NULL, "x", 0) == APP_VAULT_ERR_RANGE);
+    assert(app_vault_lockout_remaining_ms(NULL, 0) == 0);
+    app_vault_set_autolock(NULL, 10);
+    app_vault_touch(NULL, 10);
+    assert(!app_vault_poll_autolock(NULL, 10));
+}
+
 int main(void)
 {
     inject_random();
@@ -1071,6 +1195,7 @@ int main(void)
     test_tamper_detection();
     test_boundary();
     test_null_and_text();
+    test_autolock_and_throttle();
 
     puts("test_app_vault: PASS");
     return 0;

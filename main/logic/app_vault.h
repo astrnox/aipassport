@@ -43,6 +43,12 @@
 #define APP_VAULT_KNOCK_MAX    16    // 手势最长敲击数
 #define APP_VAULT_ITERATIONS   20000 // PBKDF2 迭代次数，见文件头的定位说明
 
+// 失败节流：连续错到第 APP_VAULT_FAIL_FREE + 1 次才开始罚等，每多错一次等待翻倍，
+// 上限 APP_VAULT_LOCKOUT_MAX_S 秒。16 bit 的手势熵靠一次 PBKDF2 挡不住离线暴力，但
+// 设备端的在线尝试必须变慢，否则旁人拿着设备几十秒就能把常见手势试完。
+#define APP_VAULT_FAIL_FREE    3
+#define APP_VAULT_LOCKOUT_MAX_S 300
+
 // 恢复码：128 位随机数用 Crockford Base32 表示成 26 个字符，按 5 位一组用 '-' 分隔，
 // 共 31 个字符（26 + 5）。Crockford 表去掉了 I/L/O/U，避免与 1/0 混淆。
 #define APP_VAULT_RECOVERY_CHARS 26
@@ -80,6 +86,7 @@ typedef enum {
     APP_VAULT_ERR_RANGE,     // 下标或长度越界
     APP_VAULT_ERR_MEMORY,    // 输出缓冲不足
     APP_VAULT_ERR_ENTROPY,   // 随机源未注入或返回失败
+    APP_VAULT_ERR_THROTTLED, // 连续失败过多，正在冷却等待
 } app_vault_status_t;
 
 typedef struct {
@@ -120,6 +127,12 @@ typedef struct {
     bool     has_dek;                           // dek 是否已恢复
     uint8_t  dek[32];
     char     recovery[APP_VAULT_RECOVERY_LEN + 1];  // 待展示的恢复码；空串表示不展示
+
+    // ---- 安全策略运行态，不序列化 ----
+    int      autolock_seconds;   // 自动回锁时长；0 表示不自动回锁
+    uint32_t activity_ms;        // 最近一次解锁/活动时刻；0 表示尚未开始计时
+    int      fail_count;         // 连续失败次数，成功解锁后清零
+    uint32_t lockout_until_ms;   // 冷却截止的单调毫秒；0 表示无冷却
 } app_vault_t;
 
 // ---------------------------------------------------------------------------
@@ -182,6 +195,31 @@ app_vault_status_t app_vault_unlock_recovery(app_vault_t *v, const char *code);
 
 // 立即上锁：清空 DEK 与已解密条目。明文模式下该调用无副作用。
 void app_vault_lock(app_vault_t *v);
+
+// ---------------------------------------------------------------------------
+// 安全策略：自动回锁与失败节流
+// ---------------------------------------------------------------------------
+// 两者都只作用于运行态，不写进容器：重启后加密本必然回到锁定，策略参数由设置注入。
+
+// 设置自动回锁时长（秒）；0 表示不自动回锁。
+void app_vault_set_autolock(app_vault_t *v, int seconds);
+
+// 记录一次用户活动或一次成功解锁，回锁计时从此刻重新开始。
+void app_vault_touch(app_vault_t *v, uint32_t now_ms);
+
+// 推进回锁判定：超过时长则上锁并返回 true；未超时、未解锁、未开启计时都返回 false。
+// 调用方通常每秒调用一次。
+bool app_vault_poll_autolock(app_vault_t *v, uint32_t now_ms);
+
+// 距冷却结束还剩多少毫秒；不在冷却中返回 0。
+uint32_t app_vault_lockout_remaining_ms(const app_vault_t *v, uint32_t now_ms);
+
+// 带节流的解锁：处于冷却中直接返回 APP_VAULT_ERR_THROTTLED，且不再做一次昂贵的派生；
+// 失败累计次数并按指数退避进入冷却，成功则清零。解锁请优先用这两个而不是裸函数。
+app_vault_status_t app_vault_try_unlock_knock(app_vault_t *v, const app_vault_knock_t *knock,
+                                              uint32_t now_ms);
+app_vault_status_t app_vault_try_unlock_recovery(app_vault_t *v, const char *code,
+                                                 uint32_t now_ms);
 
 // 改手势：重新派生并封装 DEK，条目密文不变。要求已解锁。
 app_vault_status_t app_vault_change_knock(app_vault_t *v, const app_vault_knock_t *knock);
