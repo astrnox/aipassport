@@ -1,9 +1,12 @@
-// main/ui/ui_home.c —— 主页：个人名片卡 + 三张信息卡 + 六个模块入口 + 快捷面板。
+// main/ui/ui_home.c —— 主页：个人名片卡 + 模块轮播。
 //
-// 主页是开机第一眼的内容，遵循"信息先于菜单"：名片卡、时间、下一作息节点倒计时、
-// 赛事卡排在模块列表之前，用户不点进任何一层就能获得主要价值。信息卡片不参与焦点
-// 移动，OK 只作用于模块列表；名片卡本身只作展示，想看完整工牌请走"身份与工具"模块
-// 入口，本页不额外给它绑按键。
+// 用户要求主页"只有个人名片与时钟，而无其他"：时钟由全局状态栏始终显示在左上角（很小、
+// 常驻），主页内容区只放个人名片卡。原先的主页把大号时间卡、作息卡、赛事卡、竖排模块
+// 列表全塞在一起，信息过载、要滑很久才能看到模块入口，因此整体删掉。
+//
+// 六个模块入口改为横向轮播：UP 看上一个、DOWN 看下一个，到两端再按会循环回另一端
+// （第一个再按 UP 跳到最后一个，最后一个再按 DOWN 回到第一个），OK 进入当前模块。
+// 轮播卡内用左右箭头、页码与圆点同时表达"还有其它模块"，不让用户以为只有一张卡。
 //
 // 个人名片卡把选中工牌的身份直接搬到首页：左侧是头像，有动图时用 lv_animimg 播放
 // 手机端上传的 RGB565 帧序列，右侧是昵称与一行补充信息。动图帧不复制进 RAM，而是
@@ -23,11 +26,7 @@
 #include "app_state.h"
 #include "logic/app_anim.h"
 #include "logic/app_badge.h"
-#include "logic/app_esports.h"
 #include "logic/app_pomodoro.h"
-#include "logic/app_routine.h"
-#include "logic/app_text.h"
-#include "logic/app_time.h"
 
 #include "lvgl.h"
 
@@ -38,10 +37,14 @@
 #define HOME_QUICK_N   5
 
 // 个人名片卡几何：头像框是正方形，文字区占右侧剩余宽度。高度压到 64：正好容纳 56
-// 头像与两行文字（16px 行高 31 + 12px 行高 23），把纵向空间尽量留给下面的模块列表。
+// 头像与两行文字（16px 行高 31 + 12px 行高 23）。
 #define HOME_AVATAR    56
 #define HOME_CARD_H    64
 #define HOME_TEXT_W    136
+
+// 模块轮播卡：中间是大号模块名，上方左右箭头，下方页码与圆点。
+#define HOME_CAROUSEL_H  120
+#define HOME_MODULE_MAX  6
 
 enum { QUIET_MUTE = 0, QUIET_THEME, QUIET_BRIGHT, QUIET_POMO, QUIET_DND };
 
@@ -61,17 +64,12 @@ static struct {
     esp_partition_mmap_handle_t anim_handle;
     bool anim_mapped;
 
-    lv_obj_t *time_lbl;
-    lv_obj_t *date_lbl;
-    lv_obj_t *lunar_lbl;
-
-    lv_obj_t *routine_title;
-    lv_obj_t *routine_sub;
-
-    lv_obj_t *esport_title;
-    lv_obj_t *esport_sub;
-
-    ui_row_t rows[6];
+    // 模块轮播
+    lv_obj_t *mod_card;
+    lv_obj_t *mod_title;
+    lv_obj_t *mod_page;
+    lv_obj_t *mod_dots[HOME_MODULE_MAX];
+    int module_count;
     int focus;
 
     lv_obj_t *quick;
@@ -178,7 +176,7 @@ static bool avatar_anim_mount(lv_obj_t *box, const app_badge_t *b)
 }
 
 // 建个人名片卡：取当前选中工牌，左侧头像（有动图就播，否则显首字），右侧昵称与
-// 第一条非空文本行。没有工牌时给出引导文案。卡片不参与焦点，OK 仍只作用于模块列表。
+// 第一条非空文本行。没有工牌时给出引导文案。
 static void build_badge_card(void)
 {
     app_badge_list_t *list = app_state_badges();
@@ -229,165 +227,95 @@ static void build_badge_card(void)
 }
 
 // ---------------------------------------------------------------------------
-// 信息卡片
+// 模块轮播
 // ---------------------------------------------------------------------------
 
-static void render_time(void)
+// 刷新轮播卡：当前模块名、页码与圆点。焦点永远在 0..module_count-1 之间。
+static void module_render(void)
 {
-    if (!s.time_lbl) return;
-    app_datetime_t now = app_state_now();
-    lv_label_set_text_fmt(s.time_lbl, "%02d:%02d", now.hour, now.minute);
+    if (!s.mod_card || s.module_count <= 0) return;
 
-    int wd = app_time_weekday(now.year, now.month, now.day);
-    char date[32];
-    app_fmt_date_short(date, sizeof(date), now.month, now.day, wd);
-    lv_label_set_text(s.date_lbl, date);
+    lv_label_set_text(s.mod_title, ui_app_module_title(s.focus));
 
-    app_lunar_t lunar;
-    if (app_lunar_from_solar(now.year, now.month, now.day, &lunar)) {
-        const char *term = app_solar_term_name(now.year, now.month, now.day);
-        char buf[40];
-        if (term) snprintf(buf, sizeof(buf), "%s%s · %s", lunar.leap ? "闰" : "",
-                           lunar.month_name, term);
-        else snprintf(buf, sizeof(buf), "%s%s%s", lunar.leap ? "闰" : "",
-                      lunar.month_name, lunar.day_name);
-        lv_label_set_text(s.lunar_lbl, buf);
-    } else {
-        lv_label_set_text(s.lunar_lbl, "");
-    }
-}
+    char page[16];
+    snprintf(page, sizeof(page), "%d / %d", s.focus + 1, s.module_count);
+    lv_label_set_text(s.mod_page, page);
 
-static void render_routine(void)
-{
-    if (!s.routine_title) return;
-
-    app_datetime_t now = app_state_now();
-    int wd = app_time_weekday(now.year, now.month, now.day);
-    const app_routine_day_t *day = app_state_routine_day(wd);
-    if (!day) {
-        lv_label_set_text(s.routine_title, "暂无作息表");
-        lv_label_set_text(s.routine_sub, "进入作息模块可套用模板");
-        return;
-    }
-
-    app_routine_status_t st;
-    app_routine_status(day, now.hour * 60 + now.minute, now.second, &st);
-
-    char cd[16];
-    if (st.pos == APP_ROUTINE_IN_NODE) {
-        const app_routine_node_t *cur = &day->nodes[st.current_index];
-        if (st.next_index >= 0) {
-            const app_routine_node_t *nx = &day->nodes[st.next_index];
-            char title[40];
-            snprintf(title, sizeof(title), "距离%s", nx->name);
-            lv_label_set_text(s.routine_title, title);
-            app_fmt_countdown(cd, sizeof(cd), st.seconds_to_next);
-        } else {
-            lv_label_set_text(s.routine_title, "距离本节结束");
-            app_fmt_countdown(cd, sizeof(cd), st.seconds_to_end);
+    for (int i = 0; i < HOME_MODULE_MAX; i++) {
+        if (!s.mod_dots[i]) continue;
+        if (i >= s.module_count) {
+            lv_obj_add_flag(s.mod_dots[i], LV_OBJ_FLAG_HIDDEN);
+            continue;
         }
-        char sub[48];
-        char t1[8], t2[8];
-        app_fmt_hhmm(t1, sizeof(t1), cur->start_min);
-        app_fmt_hhmm(t2, sizeof(t2), cur->end_min);
-        snprintf(sub, sizeof(sub), "%s %s - %s", cur->name, t1, t2);
-        lv_label_set_text(s.routine_sub, sub);
-    } else if (st.pos == APP_ROUTINE_BETWEEN && st.next_index >= 0) {
-        const app_routine_node_t *nx = &day->nodes[st.next_index];
-        char title[40];
-        snprintf(title, sizeof(title), "距离%s", nx->name);
-        lv_label_set_text(s.routine_title, title);
-        app_fmt_countdown(cd, sizeof(cd), st.seconds_to_next);
-        char sub[48];
-        char t1[8];
-        app_fmt_hhmm(t1, sizeof(t1), nx->start_min);
-        snprintf(sub, sizeof(sub), "下一个 %s %s", nx->name, t1);
-        lv_label_set_text(s.routine_sub, sub);
-    } else {
-        lv_label_set_text(s.routine_title, "今日作息已结束");
-        char sub[32];
-        app_fmt_date_short(sub, sizeof(sub), now.month, now.day, wd);
-        lv_label_set_text(s.routine_sub, sub);
-        return;
+        lv_obj_remove_flag(s.mod_dots[i], LV_OBJ_FLAG_HIDDEN);
+        bool on = (i == s.focus);
+        lv_obj_set_style_bg_color(s.mod_dots[i],
+            lv_color_hex(on ? ui_c_accent() : ui_c_border()), 0);
+        lv_obj_set_size(s.mod_dots[i], on ? 8 : 6, on ? 8 : 6);
     }
-    lv_label_set_text(s.time_lbl, lv_label_get_text(s.time_lbl));   // 占位，无副作用
 }
 
-static void render_esports(void)
+// 循环移动焦点：到两端再按会绕回另一端。
+static void module_move(int delta)
 {
-    if (!s.esport_title) return;
-
-    app_esport_cache_t *cache = app_state_esports();
-    int now_utc = (int)app_state_now_unix();
-
-    if (!cache->valid || cache->match_count <= 0) {
-        lv_label_set_text(s.esport_title, "暂无赛事数据");
-        lv_label_set_text(s.esport_sub, "进入赛事中心联网获取");
-        return;
-    }
-
-    int pick = app_esport_home_pick(cache->matches, cache->match_count, now_utc);
-    if (pick < 0) {
-        lv_label_set_text(s.esport_title, "今日暂无赛事");
-        lv_label_set_text(s.esport_sub, "进入赛事中心查看本周赛程");
-        return;
-    }
-
-    const app_esport_match_t *m = &cache->matches[pick];
-    if (m->state == APP_MATCH_LIVE) {
-        char title[48];
-        snprintf(title, sizeof(title), "%s %d : %d %s",
-                 m->team_a, m->score_a, m->score_b, m->team_b);
-        lv_label_set_text(s.esport_title, title);
-        char sub[32];
-        snprintf(sub, sizeof(sub), "进行中 · 第%d局", m->score_a + m->score_b + 1);
-        lv_label_set_text(s.esport_sub, sub);
-        lv_obj_set_style_text_color(s.esport_sub, lv_color_hex(ui_c_live()), 0);
-        return;
-    }
-
-    char title[48];
-    snprintf(title, sizeof(title), "%s vs %s", m->team_a, m->team_b);
-    lv_label_set_text(s.esport_title, title);
-
-    app_settings_t *st = app_state_settings();
-    int local_min = (m->start_utc + st->utc_offset_minutes * 60) % 86400;
-    if (local_min < 0) local_min += 86400;
-    int hh = local_min / 3600;
-    int mm = (local_min % 3600) / 60;
-
-    int delta = m->start_utc - now_utc;
-    char sub[48];
-    if (delta >= 0 && delta <= 24 * 3600) {
-        char cd[16];
-        app_fmt_countdown(cd, sizeof(cd), delta);
-        snprintf(sub, sizeof(sub), "%02d:%02d 开赛 · 还有 %s", hh, mm, cd);
-    } else {
-        snprintf(sub, sizeof(sub), "%02d:%02d 开赛", hh, mm);
-    }
-    lv_label_set_text(s.esport_sub, sub);
-    lv_obj_set_style_text_color(s.esport_sub,
-        lv_color_hex(delta >= 0 && delta <= 30 * 60 ? ui_c_soon() : ui_c_dim()), 0);
+    if (s.module_count <= 0) return;
+    s.focus = (s.focus + delta) % s.module_count;
+    if (s.focus < 0) s.focus += s.module_count;
+    module_render();
+    app_state_settings()->home_focus = s.focus;
 }
 
-// ---------------------------------------------------------------------------
-// 模块列表
-// ---------------------------------------------------------------------------
-
-static void module_focus(int index)
+static void build_module_carousel(void)
 {
-    int count = ui_app_module_count();
-    if (count <= 0) return;
-    if (index < 0) index = 0;
-    if (index >= count) index = count - 1;
+    s.module_count = ui_app_module_count();
+    if (s.module_count > HOME_MODULE_MAX) s.module_count = HOME_MODULE_MAX;
+    if (s.module_count < 1) s.module_count = 1;
 
-    s.focus = index;
-    for (int i = 0; i < count; i++) {
-        ui_row_set_selected(s.rows[i], i == index);
+    s.mod_card = ui_card_create(s.page.content, 0, 0, HOME_CW, HOME_CAROUSEL_H,
+                                ui_c_accent());
+
+    lv_obj_t *left = ui_label_create(s.mod_card, LV_SYMBOL_LEFT, ui_font_title, ui_c_dim());
+    lv_obj_align(left, LV_ALIGN_LEFT_MID, 8, -8);
+    lv_obj_t *right = ui_label_create(s.mod_card, LV_SYMBOL_RIGHT, ui_font_title, ui_c_dim());
+    lv_obj_align(right, LV_ALIGN_RIGHT_MID, -8, -8);
+
+    s.mod_title = ui_label_create(s.mod_card, "", ui_font_title, ui_c_text());
+    lv_obj_set_width(s.mod_title, HOME_CW - 24);
+    lv_obj_set_style_text_align(s.mod_title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(s.mod_title, LV_LABEL_LONG_WRAP);
+    lv_obj_align(s.mod_title, LV_ALIGN_CENTER, 0, -12);
+
+    s.mod_page = ui_label_create(s.mod_card, "", ui_font_hint, ui_c_dim());
+    lv_obj_align(s.mod_page, LV_ALIGN_CENTER, 0, 22);
+
+    // 圆点排成一行，居中放在卡片底部，直观表达"六个模块"。
+    lv_obj_t *dots = lv_obj_create(s.mod_card);
+    lv_obj_remove_flag(dots, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(dots, LV_SIZE_CONTENT, 12);
+    lv_obj_align(dots, LV_ALIGN_BOTTOM_MID, 0, -10);
+    lv_obj_set_style_bg_opa(dots, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(dots, 0, 0);
+    lv_obj_set_style_pad_all(dots, 0, 0);
+    lv_obj_set_style_pad_column(dots, 6, 0);
+    lv_obj_set_flex_flow(dots, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(dots, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+
+    for (int i = 0; i < HOME_MODULE_MAX; i++) {
+        lv_obj_t *dot = lv_obj_create(dots);
+        lv_obj_remove_flag(dot, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_size(dot, 6, 6);
+        lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_border_width(dot, 0, 0);
+        lv_obj_set_style_bg_color(dot, lv_color_hex(ui_c_border()), 0);
+        lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, 0);
+        s.mod_dots[i] = dot;
     }
-    ui_scroll_into_view(s.rows[index].obj);
 
-    app_state_settings()->home_focus = index;
+    int focus = app_state_settings()->home_focus;
+    if (focus < 0 || focus >= s.module_count) focus = 0;
+    s.focus = focus;
+    module_render();
 }
 
 // ---------------------------------------------------------------------------
@@ -430,8 +358,9 @@ static void quick_update_values(void)
 
 static void quick_focus(int index)
 {
-    if (index < 0) index = 0;
-    if (index >= HOME_QUICK_N) index = HOME_QUICK_N - 1;
+    // 与主页模块轮播、设置列表同一套循环：最后一项再按 DOWN 回到第一项。
+    index %= HOME_QUICK_N;
+    if (index < 0) index += HOME_QUICK_N;
     s.quick_sel = index;
     for (int i = 0; i < HOME_QUICK_N; i++) {
         lv_obj_t *row = s.quick_rows[i];
@@ -452,6 +381,8 @@ static void quick_focus(int index)
 #define QUICK_STEP     36
 #define QUICK_PAD_B    8
 #define QUICK_CARD_H   (QUICK_TOP + (HOME_QUICK_N - 1) * QUICK_STEP + QUICK_ROW_H + QUICK_PAD_B)
+
+#define HINT_HOME "↑↓ 切换模块  OK 进入  长按↑ 面板  长按OK 熄屏"
 
 void home_quick_open(void)
 {
@@ -493,11 +424,7 @@ void home_quick_close(void)
     if (!s.quick) return;
     lv_obj_delete(s.quick);
     s.quick = NULL;
-    ui_page_set_hint("↑↓ 选择  OK 进入  长按↑ 面板  长按OK 熄屏");
-    // 关闭面板后刷新主页卡片，反映静音/主题等变化。
-    render_time();
-    render_routine();
-    render_esports();
+    ui_page_set_hint(HINT_HOME);
 }
 
 bool home_quick_active(void) { return s.quick != NULL; }
@@ -566,48 +493,13 @@ void home_quick_key(bsp_btn_t btn, bsp_btn_ev_t ev)
 void page_home_enter(void)
 {
     memset(&s, 0, sizeof(s));
-    s.page = ui_page_create("↑↓ 选择  OK 进入  长按↑ 面板  长按OK 熄屏");
+    s.page = ui_page_create(HINT_HOME);
 
-    // 个人名片卡排在最前：开机第一眼先看到自己的身份，是"信息先于菜单"的首要一条。
+    // 个人名片卡排在最前：开机第一眼先看到自己的身份。
     build_badge_card();
 
-    // 时间卡。
-    lv_obj_t *card = ui_card_create(s.page.content, 0, 0, HOME_CW, 64, ui_c_accent());
-    s.time_lbl = ui_label_create(card, "--:--", ui_font_display, ui_c_text());
-    lv_obj_set_pos(s.time_lbl, 10, 6);
-    s.date_lbl = ui_label_create(card, "", ui_font_body, ui_c_text());
-    lv_obj_align(s.date_lbl, LV_ALIGN_TOP_RIGHT, -10, 8);
-    s.lunar_lbl = ui_label_create(card, "", ui_font_hint, ui_c_dim());
-    lv_obj_align(s.lunar_lbl, LV_ALIGN_TOP_RIGHT, -10, 34);
-
-    // 作息卡。
-    card = ui_card_create(s.page.content, 0, 0, HOME_CW, 56, ui_c_soon());
-    s.routine_title = ui_label_create(card, "", ui_font_body, ui_c_text());
-    lv_obj_set_pos(s.routine_title, 10, 8);
-    s.routine_sub = ui_label_create(card, "", ui_font_hint, ui_c_dim());
-    lv_obj_set_pos(s.routine_sub, 10, 32);
-
-    // 赛事卡。
-    card = ui_card_create(s.page.content, 0, 0, HOME_CW, 56, ui_c_live());
-    s.esport_title = ui_label_create(card, "", ui_font_body, ui_c_text());
-    lv_obj_set_pos(s.esport_title, 10, 8);
-    s.esport_sub = ui_label_create(card, "", ui_font_hint, ui_c_dim());
-    lv_obj_set_pos(s.esport_sub, 10, 32);
-
-    // 模块列表。
-    int count = ui_app_module_count();
-    if (count > 6) count = 6;
-    lv_obj_t *list = ui_list_create(s.page.content);
-    for (int i = 0; i < count; i++) {
-        s.rows[i] = ui_row_create(list, ui_app_module_title(i), "");
-    }
-
-    render_time();
-    render_routine();
-    render_esports();
-
-    int focus = app_state_settings()->home_focus;
-    module_focus(focus);
+    // 模块轮播卡：六个模块入口。
+    build_module_carousel();
 }
 
 void page_home_exit(void)
@@ -635,16 +527,13 @@ void page_home_key(bsp_btn_t btn, bsp_btn_ev_t ev)
 {
     if (ev != BSP_BTN_CLICK) return;
 
-    if (btn == BSP_BTN_UP) module_focus(s.focus - 1);
-    else if (btn == BSP_BTN_DOWN) module_focus(s.focus + 1);
+    if (btn == BSP_BTN_UP) module_move(-1);
+    else if (btn == BSP_BTN_DOWN) module_move(1);
     else if (btn == BSP_BTN_OK) ui_app_open_module(s.focus);
 }
 
 void page_home_tick(void)
 {
     if (!s.page.scr) return;
-    render_time();
-    render_routine();
-    render_esports();
     if (s.quick) quick_update_values();
 }

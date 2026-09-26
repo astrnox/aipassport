@@ -38,10 +38,10 @@ static const char *const VIEW_NAMES[VIEW_COUNT] = {
 // 提示条只有 240px 宽、单行不换行，所以这里用紧凑写法：按键符号紧跟动词，
 // 分隔用单空格。"换页"统一指长按↓切到下一个视图（与其它页的约定一致）。
 static const char *const VIEW_HINTS[VIEW_COUNT] = {
-    "↑↓翻月 OK进度 长按↑农历 长按↓换页 长按OK返回",
-    "↑↓精度 OK尺度 长按↑生日 长按↓换页 长按OK返回",
-    "OK开始 ↑记圈 长按↑清零 长按↓换页 长按OK返回",
-    "OK开始 ↑重置 长按↑设时长 长按↓换页 长按OK返回",
+    "↑↓ 翻月  OK 时间进度  长按↓ 换页  长按OK 返回",
+    "↑↓ 精度  OK 尺度  长按↑ 生日  长按↓ 换页  长按OK 返回",
+    "OK 开始  ↑ 记圈  长按↑ 清零  长按↓ 换页  长按OK 返回",
+    "OK 开始  ↑ 重置  长按↑ 设时长  长按↓ 换页  长按OK 返回",
 };
 
 static struct {
@@ -54,7 +54,6 @@ static struct {
 
     // 万年历
     int cy, cm;
-    bool cn_view;
     int rendered_day;      // year*10000 + month*100 + day，避免每秒重绘整月
     lv_obj_t *cal_cells[CAL_CELLS];
     lv_obj_t *cal_info1;
@@ -194,33 +193,32 @@ static void calendar_render(void)
         }
     }
 
+    // 信息行只保留两行、每行一个主题：上行农历日期，下行节气/星期。原先把干支、生肖、
+    // 月名、节气、值神、宜、忌全部挤在两行里，用户反映"看不懂"，这里做减法。
     app_lunar_t lunar;
     if (app_lunar_from_solar(now.year, now.month, now.day, &lunar)) {
         char line1[64];
-        snprintf(line1, sizeof(line1), "%s%s年 %s%s%s · %s %s",
-                 lunar.ganzhi, lunar.zodiac, lunar.leap ? "闰" : "",
-                 lunar.month_name, lunar.day_name, lunar.zodiac, "");
-        // 农历年只在信息行出现一次，这里去掉重复的生肖，保持一行可读。
-        snprintf(line1, sizeof(line1), "%s年 %s%s%s",
+        snprintf(line1, sizeof(line1), "农历 %s年 %s%s%s",
                  lunar.ganzhi, lunar.leap ? "闰" : "",
                  lunar.month_name, lunar.day_name);
         lv_label_set_text(s.cal_info1, line1);
     } else {
-        lv_label_set_text(s.cal_info1, "-");
+        lv_label_set_text(s.cal_info1, "农历日期不可用");
     }
 
-    if (s.cn_view) {
+    {
+        static const char *const WD[7] = { "日", "一", "二", "三", "四", "五", "六" };
         const char *term = app_solar_term_name(now.year, now.month, now.day);
-        const char *duty = app_lunar_duty_name(now.year, now.month, now.day);
-        char yi[48] = { 0 };
-        char ji[48] = { 0 };
-        app_lunar_yi_ji(now.year, now.month, now.day, yi, sizeof(yi), ji, sizeof(ji));
-        char line2[128];
-        snprintf(line2, sizeof(line2), "%s%s%s  宜 %s  忌 %s",
-                 term ? term : "", term ? " · " : "", duty ? duty : "", yi, ji);
+        char line2[48];
+        if (term) {
+            snprintf(line2, sizeof(line2), "%s · 星期%s", term, WD[app_time_weekday(
+                         now.year, now.month, now.day)]);
+        } else {
+            snprintf(line2, sizeof(line2), "今天 %d 月 %d 日 · 星期%s",
+                     now.month, now.day,
+                     WD[app_time_weekday(now.year, now.month, now.day)]);
+        }
         lv_label_set_text(s.cal_info2, line2);
-    } else {
-        lv_label_set_text(s.cal_info2, "长按↑ 叠加节气与宜忌");
     }
 
     s.rendered_day = now.year * 10000 + now.month * 100 + now.day;
@@ -377,10 +375,10 @@ static void birth_saved(bool saved, void *user)
 static void progress_edit_birth(void)
 {
     static const ui_timeedit_field_t FIELDS[4] = {
-        { "年", 1940, 2025, 5 },
-        { "月", 1, 12, 1 },
-        { "日", 1, 31, 1 },
-        { "寿命", 60, 120, 5 },
+        { "年", 1940, 2025, 10, NULL },
+        { "月", 1, 12, 1, NULL },
+        { "日", 1, 31, 10, NULL },
+        { "寿命", 60, 120, 10, NULL },
     };
     static int values[4];
     app_settings_t *st = app_state_settings();
@@ -542,8 +540,8 @@ static void timer_edit_done(bool saved, void *user)
 static void timer_edit_open(void)
 {
     static const ui_timeedit_field_t FIELDS[2] = {
-        { "分", 0, 99, 5 },
-        { "秒", 0, 59, 10 },
+        { "分", 0, 99, 10, NULL },
+        { "秒", 0, 59, 10, NULL },
     };
     static int values[2];
     values[0] = s.timer_seconds / 60;
@@ -580,12 +578,6 @@ void page_time_key(bsp_btn_t btn, bsp_btn_ev_t ev)
 
     switch (s.view) {
     case VIEW_CAL:
-        if (ev == BSP_BTN_LONG && btn == BSP_BTN_UP) {
-            s.cn_view = !s.cn_view;
-            calendar_render();
-            ui_hint_flash(s.cn_view ? "已叠加农历与宜忌" : "已切回公历视图", 1200);
-            return;
-        }
         if (ev != BSP_BTN_CLICK) return;
         if (btn == BSP_BTN_UP) calendar_shift_month(-1);
         else if (btn == BSP_BTN_DOWN) calendar_shift_month(1);

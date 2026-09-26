@@ -258,10 +258,11 @@ static void update_hint(void)
 static void move_focus(int delta)
 {
     app_reminder_list_t *list = app_state_reminders();
-    int max = list->count + 1;
-    s.focus += delta;
-    if (s.focus < 0) s.focus = 0;
-    if (s.focus > max) s.focus = max;
+    // 焦点项 = 番茄钟卡(0) + 每条提醒 + "新增提醒"(count+1)，循环移动：在最末一行再按
+    // DOWN 回到番茄钟卡，在最前一行再按 UP 到"新增提醒"。与首页轮播/设置列表一致。
+    int n = list->count + 2;
+    s.focus = (s.focus + delta) % n;
+    if (s.focus < 0) s.focus += n;
     render_focus();
     update_hint();
 }
@@ -332,7 +333,7 @@ static void reminder_edit_open(void)
     s.edit_values[2] = repeat_mode_of(r);
 
     static const ui_timeedit_field_t fields[3] = {
-        { "时",   0, 23, 5, NULL },
+        { "时",   0, 23, 10, NULL },
         { "分",   0, 59, 10, NULL },
         { "重复", 0, 2, 1, REPEAT_NAMES },
     };
@@ -448,10 +449,10 @@ static void pomodoro_edit_open(void)
     s.edit_values[4] = p->auto_next ? 1 : 0;
 
     static const ui_timeedit_field_t fields[5] = {
-        { "专注", APP_POMO_FOCUS_MIN_MIN, APP_POMO_FOCUS_MIN_MAX, 5, NULL },
-        { "短休", APP_POMO_BREAK_MIN_MIN, APP_POMO_BREAK_MIN_MAX, 5, NULL },
-        { "长休", APP_POMO_LONG_MIN_MIN,  APP_POMO_LONG_MIN_MAX,  5, NULL },
-        { "循环", APP_POMO_CYCLES_MIN,    APP_POMO_CYCLES_MAX,    1, NULL },
+        { "专注", APP_POMO_FOCUS_MIN_MIN, APP_POMO_FOCUS_MIN_MAX, 10, NULL },
+        { "短休", APP_POMO_BREAK_MIN_MIN, APP_POMO_BREAK_MIN_MAX, 10, NULL },
+        { "长休", APP_POMO_LONG_MIN_MIN,  APP_POMO_LONG_MIN_MAX,  10, NULL },
+        { "循环", APP_POMO_CYCLES_MIN,    APP_POMO_CYCLES_MAX,     1, NULL },
         { "接续", 0, 1, 1, POMO_AUTO_NAMES },
     };
     ui_timeedit_open(s.page.scr, "番茄钟设置", fields, s.edit_values, 5,

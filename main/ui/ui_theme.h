@@ -49,6 +49,9 @@ void ui_theme_apply_auto(bool auto_mode, int hour);
 
 uint32_t ui_c_bg(void);
 uint32_t ui_c_card(void);
+// 卡片内部再嵌一层容器（凭证面板、分组框）时用的底色。比 card 再亮/再深一档，
+// 用"容器叠容器"表达层级，不靠阴影——Material 3 的 surface container 也是这个思路。
+uint32_t ui_c_panel(void);
 uint32_t ui_c_text(void);
 uint32_t ui_c_dim(void);
 uint32_t ui_c_accent(void);
