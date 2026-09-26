@@ -44,19 +44,23 @@ void ui_fonts_init(void)
 // ---------------------------------------------------------------------------
 
 typedef struct {
-    uint32_t bg, card, text, dim, accent, live, soon, done, ok, warn, sel, border;
+    uint32_t bg, card, panel, text, dim, accent, live, soon, done, ok, warn, sel, border;
 } palette_t;
 
+// panel 是卡片内部的嵌套容器底色：深色主题比 card 亮一档，浅色主题比 card 暗一档，
+// 只靠明度差分层，不引入阴影（单缓冲屏重绘阴影会掉帧）。
 static const palette_t PALETTE_DARK = {
-    .bg = 0x0B0E13, .card = 0x151A22, .text = 0xE8EDF4, .dim = 0x93A0B4,
-    .accent = 0x22D3EE, .live = 0xFF4757, .soon = 0xFFB020, .done = 0x6B7280,
-    .ok = 0x34D399, .warn = 0xF59E0B, .sel = 0x1E2632, .border = 0x262E3A,
+    .bg = 0x0B0E13, .card = 0x151A22, .panel = 0x1F2833, .text = 0xE8EDF4,
+    .dim = 0x93A0B4, .accent = 0x22D3EE, .live = 0xFF4757, .soon = 0xFFB020,
+    .done = 0x6B7280, .ok = 0x34D399, .warn = 0xF59E0B, .sel = 0x1E2632,
+    .border = 0x262E3A,
 };
 
 static const palette_t PALETTE_LIGHT = {
-    .bg = 0xF5F7FA, .card = 0xFFFFFF, .text = 0x10141A, .dim = 0x5B6577,
-    .accent = 0x0891B2, .live = 0xE11D48, .soon = 0xB45309, .done = 0x9AA3B2,
-    .ok = 0x059669, .warn = 0xB45309, .sel = 0xE6EEF6, .border = 0xD8DFE8,
+    .bg = 0xF5F7FA, .card = 0xFFFFFF, .panel = 0xEDF1F6, .text = 0x10141A,
+    .dim = 0x5B6577, .accent = 0x0891B2, .live = 0xE11D48, .soon = 0xB45309,
+    .done = 0x9AA3B2, .ok = 0x059669, .warn = 0xB45309, .sel = 0xE6EEF6,
+    .border = 0xD8DFE8,
 };
 
 static ui_theme_mode_t s_mode = UI_THEME_DARK;
@@ -84,6 +88,7 @@ void ui_theme_apply_auto(bool auto_mode, int hour)
 
 uint32_t ui_c_bg(void)     { return palette()->bg; }
 uint32_t ui_c_card(void)   { return palette()->card; }
+uint32_t ui_c_panel(void)  { return palette()->panel; }
 uint32_t ui_c_text(void)   { return palette()->text; }
 uint32_t ui_c_dim(void)    { return palette()->dim; }
 uint32_t ui_c_accent(void) { return palette()->accent; }
@@ -224,7 +229,11 @@ ui_page_t ui_page_create(const char *hint_text)
     lv_obj_set_size(hint, UI_W, UI_HINT_H);
     lv_obj_set_style_bg_color(hint, lv_color_hex(ui_c_card()), 0);
     lv_obj_set_style_bg_opa(hint, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(hint, 0, 0);
+    // 提示条与内容区在深色主题下同为深色，只靠底色差几乎看不出分界。加一条上边框，
+    // 让"操作提示"这条带在视觉上独立出来。
+    lv_obj_set_style_border_side(hint, LV_BORDER_SIDE_TOP, 0);
+    lv_obj_set_style_border_width(hint, 1, 0);
+    lv_obj_set_style_border_color(hint, lv_color_hex(ui_c_border()), 0);
     lv_obj_set_style_radius(hint, 0, 0);
     lv_obj_set_style_pad_all(hint, 0, 0);
     page.hint = hint;
@@ -342,7 +351,9 @@ lv_obj_t *ui_card_create(lv_obj_t *parent, int x, int y, int w, int h, uint32_t 
     lv_obj_set_size(card, w, h);
     lv_obj_set_style_bg_color(card, lv_color_hex(ui_c_card()), 0);
     lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(card, 6, 0);
+    // 8px 圆角：Material 的 small 形状档就是这个量级，卡片、对话框、面板共用一档，
+    // 界面之间不再出现"这张卡比那张卡更方"的差异。
+    lv_obj_set_style_radius(card, 8, 0);
     lv_obj_set_style_border_width(card, 1, 0);
     lv_obj_set_style_border_color(card, lv_color_hex(ui_c_border()), 0);
     lv_obj_set_style_pad_all(card, 0, 0);
@@ -353,12 +364,15 @@ lv_obj_t *ui_card_create(lv_obj_t *parent, int x, int y, int w, int h, uint32_t 
         // LVGL 9 的 flex/grid 布局会覆盖 lv_obj_set_pos 设置的坐标；accent bar
         // 是纯装饰条，必须钉在 (0,0)，所以用 FLOATING 把它排除在布局之外。
         lv_obj_add_flag(bar, LV_OBJ_FLAG_FLOATING);
-        lv_obj_set_pos(bar, 0, 0);
-        lv_obj_set_size(bar, 3, h);
+        // 通高的方条会从圆角处戳出来。把它缩进成一段圆头竖条：上下各留出圆角的高度，
+        // 落点正好在卡片侧边变直的位置，看起来是有意留白而不是画歪了。
+        int inset = (h > 40) ? 8 : 0;
+        lv_obj_set_pos(bar, 0, inset);
+        lv_obj_set_size(bar, 3, h - inset * 2);
         lv_obj_set_style_bg_color(bar, lv_color_hex(accent), 0);
         lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
         lv_obj_set_style_border_width(bar, 0, 0);
-        lv_obj_set_style_radius(bar, 0, 0);
+        lv_obj_set_style_radius(bar, 2, 0);
     }
     return card;
 }
@@ -420,7 +434,9 @@ ui_row_t ui_row_create(lv_obj_t *parent, const char *title, const char *value)
     lv_obj_set_height(obj, UI_ROW_H);
     lv_obj_set_style_bg_color(obj, lv_color_hex(ui_c_card()), 0);
     lv_obj_set_style_bg_opa(obj, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(obj, 5, 0);
+    // 圆角按 4 / 6 / 8 三档走：小药丸 4、列表行 6、卡片 8。同一类控件在任何页面都是
+    // 同一个圆角，不再出现"这页的按钮是圆的、那页是方的"。
+    lv_obj_set_style_radius(obj, 6, 0);
     lv_obj_set_style_border_width(obj, 0, 0);
     lv_obj_set_style_pad_all(obj, 0, 0);
     row.obj = obj;
@@ -488,6 +504,14 @@ lv_obj_t *ui_tabs_create(lv_obj_t *parent, const char *const *names, int count)
     for (int i = 0; i < count; i++) {
         lv_obj_t *label = ui_label_create(tabs, names[i], ui_font_hint, ui_c_dim());
         lv_obj_set_style_pad_hor(label, 8, 0);
+        // 选中项用一条 2px 下划线标出。只换文字颜色的话，在 12px 字号下"当前在哪一页"
+        // 要凑近看；下划线是位置线索，一眼就能定位。宽度固定为 2、用不透明度切换，
+        // 避免切换时标签宽度变化导致整排文字抖动。
+        lv_obj_set_style_border_side(label, LV_BORDER_SIDE_BOTTOM, 0);
+        lv_obj_set_style_border_width(label, 2, 0);
+        lv_obj_set_style_border_color(label, lv_color_hex(ui_c_accent()), 0);
+        lv_obj_set_style_border_opa(label, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_pad_bottom(label, 4, 0);
     }
     ui_tabs_select(tabs, 0);
     return tabs;
@@ -502,6 +526,7 @@ void ui_tabs_select(lv_obj_t *tabs, int index)
         bool active = ((int)i == index);
         lv_obj_set_style_text_color(label,
             lv_color_hex(active ? ui_c_accent() : ui_c_dim()), 0);
+        lv_obj_set_style_border_opa(label, active ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
     }
 }
 
@@ -631,12 +656,29 @@ void ui_scroll_into_view(lv_obj_t *obj)
 typedef struct {
     lv_obj_t *overlay;
     lv_obj_t *options[2];
+    char opt_text[2][16];
     ui_dialog_cb_t cb;
     void *user;
     int focus;
 } dialog_t;
 
 static dialog_t s_dialog;
+
+// 把当前焦点画出来：选中项用语义色 + 前置箭头，未选中项压暗。只改文字颜色的话，
+// 两个选项都偏暗，用户分不清当前按 OK 会执行哪一个——这正是"以为删除失效"的来源。
+// 箭头用等宽的空格占位，切换时标签宽度不变，不会左右跳。
+static void dialog_render_focus(void)
+{
+    for (int i = 0; i < 2; i++) {
+        lv_obj_t *opt = s_dialog.options[i];
+        if (!opt) continue;
+        bool sel = (i == s_dialog.focus);
+        uint32_t color = sel ? (i == 0 ? ui_c_accent() : ui_c_warn()) : ui_c_dim();
+        lv_label_set_text_fmt(opt, "%s%s", sel ? LV_SYMBOL_RIGHT " " : "  ",
+                              s_dialog.opt_text[i]);
+        lv_obj_set_style_text_color(opt, lv_color_hex(color), 0);
+    }
+}
 
 bool ui_dialog_is_open(void)
 {
@@ -649,6 +691,10 @@ void ui_dialog_close(void)
         lv_obj_delete(s_dialog.overlay);
         s_dialog.overlay = NULL;
     }
+    // 选项标签随浮层一起被删掉，指针必须清空：否则下一次进入对话框前若有按键落到
+    // dialog_render_focus，会写到已经释放的对象上。
+    s_dialog.options[0] = NULL;
+    s_dialog.options[1] = NULL;
     s_dialog.cb = NULL;
     s_dialog.user = NULL;
 }
@@ -697,21 +743,34 @@ void ui_dialog_open(lv_obj_t *parent, const char *title, const char *body,
                                          ui_font_hint, ui_c_dim());
     lv_obj_align(key_hint, LV_ALIGN_BOTTOM_LEFT, 12, -10);
 
-    // 默认焦点放在安全选项（取消）上。
-    s_dialog.options[0] = ui_label_create(card, "取消", ui_font_body, ui_c_text());
-    lv_obj_align(s_dialog.options[0], LV_ALIGN_BOTTOM_RIGHT, -16, -40);
-    s_dialog.options[1] = ui_label_create(card,
-        confirm_text ? confirm_text : "确认", ui_font_body, ui_c_warn());
-    lv_obj_align(s_dialog.options[1], LV_ALIGN_BOTTOM_RIGHT, -86, -40);
+    // 两个选项放进一个右对齐的横向容器：从左到右是"取消 / 确认"，确认项在右，符合
+    // 常见的对话按钮习惯；间距交给布局算，不再用写死的偏移量——加了选中箭头之后，
+    // 固定偏移会把两个选项算偏。
+    lv_obj_t *optrow = lv_obj_create(card);
+    lv_obj_remove_flag(optrow, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(optrow, LV_SIZE_CONTENT, 26);
+    lv_obj_align(optrow, LV_ALIGN_BOTTOM_RIGHT, -12, -36);
+    lv_obj_set_style_bg_opa(optrow, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(optrow, 0, 0);
+    lv_obj_set_style_pad_all(optrow, 0, 0);
+    lv_obj_set_style_pad_column(optrow, 18, 0);
+    lv_obj_set_flex_flow(optrow, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(optrow, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+
+    snprintf(s_dialog.opt_text[0], sizeof(s_dialog.opt_text[0]), "取消");
+    snprintf(s_dialog.opt_text[1], sizeof(s_dialog.opt_text[1]), "%s",
+             confirm_text ? confirm_text : "确认");
+
+    // 默认焦点放在安全选项（取消）上，由 dialog_render_focus 画出选中态。
+    s_dialog.options[0] = ui_label_create(optrow, "", ui_font_body, ui_c_dim());
+    s_dialog.options[1] = ui_label_create(optrow, "", ui_font_body, ui_c_dim());
 
     s_dialog.overlay = overlay;
     s_dialog.cb = cb;
     s_dialog.user = user;
     s_dialog.focus = 0;
-    for (int i = 0; i < 2; i++) {
-        lv_obj_set_style_text_color(s_dialog.options[i],
-            lv_color_hex(i == 0 ? ui_c_accent() : ui_c_warn()), 0);
-    }
+    dialog_render_focus();
 }
 
 bool ui_dialog_handle(bsp_btn_t btn, bsp_btn_ev_t ev)
@@ -721,13 +780,7 @@ bool ui_dialog_handle(bsp_btn_t btn, bsp_btn_ev_t ev)
     if (ev == BSP_BTN_CLICK) {
         if (btn == BSP_BTN_UP || btn == BSP_BTN_DOWN) {
             s_dialog.focus = 1 - s_dialog.focus;
-            for (int i = 0; i < 2; i++) {
-                lv_obj_set_style_text_color(s_dialog.options[i],
-                    lv_color_hex(i == s_dialog.focus
-                                     ? (i == 0 ? ui_c_accent() : ui_c_warn())
-                                     : ui_c_dim()),
-                    0);
-            }
+            dialog_render_focus();
         } else if (btn == BSP_BTN_OK) {
             dialog_confirm(s_dialog.focus == 1);
         }

@@ -94,12 +94,20 @@ static struct {
     int focus;
     char hint[64];
 
-    // 热点配网浮层
+    // 热点配网浮层：状态行 + 凭证面板 + 说明行
     lv_obj_t *prov;
+    lv_obj_t *prov_state;
+    lv_obj_t *prov_panel;
+    lv_obj_t *prov_ssid;    // 热点名称取值
+    lv_obj_t *prov_pass;    // 热点密码取值（药丸底）
+    lv_obj_t *prov_url;     // 配置网址取值
     lv_obj_t *prov_note;
 
-    // 蓝牙配网浮层
+    // 蓝牙配网浮层：状态行 + 广播名 + 说明行
     lv_obj_t *ble;
+    lv_obj_t *ble_state;
+    lv_obj_t *ble_name_row; // 广播名整行（未广播时整行隐藏）
+    lv_obj_t *ble_name;     // 设备广播名（药丸底）
     lv_obj_t *ble_note;
 
     // 数据清除浮层
@@ -189,6 +197,65 @@ static ui_row_t overlay_row_create(lv_obj_t *parent, const char *title, const ch
 }
 
 // ---------------------------------------------------------------------------
+// 信息取值行（配网浮层共用）
+// ---------------------------------------------------------------------------
+// 左侧小字标签、右侧取值。emphasize 为真时把取值做成强调色药丸底 + 底色文字——密码、
+// 广播名这类"要照着抄到手机上"的内容必须一眼看清，不能和普通说明混在一起。
+// 取值用 CLIP 而不是 WRAP：行高固定，宁可截断也不许折行把下一行挤出去。
+static lv_obj_t *info_row_create(lv_obj_t *parent, const char *label, bool emphasize,
+                                 lv_obj_t **row_out)
+{
+    lv_obj_t *row = lv_obj_create(parent);
+    lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_width(row, LV_PCT(100));
+    lv_obj_set_height(row, 26);
+    lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(row, 0, 0);
+    lv_obj_set_style_pad_all(row, 0, 0);
+    if (row_out) *row_out = row;
+
+    lv_obj_t *name = ui_label_create(row, label, ui_font_hint, ui_c_dim());
+    lv_obj_align(name, LV_ALIGN_LEFT_MID, 2, 0);
+
+    lv_obj_t *value = ui_label_create(row, "", ui_font_body, ui_c_text());
+    lv_label_set_long_mode(value, LV_LABEL_LONG_CLIP);
+    lv_obj_align(value, LV_ALIGN_RIGHT_MID, -2, 0);
+    if (emphasize) {
+        // 药丸底：4px 圆角对应 Material 里 chip 一档的形状，比列表行和卡片都小一号。
+        lv_obj_set_style_bg_color(value, lv_color_hex(ui_c_accent()), 0);
+        lv_obj_set_style_bg_opa(value, LV_OPA_COVER, 0);
+        lv_obj_set_style_text_color(value, lv_color_hex(ui_c_bg()), 0);
+        lv_obj_set_style_radius(value, 4, 0);
+        lv_obj_set_style_pad_hor(value, 8, 0);
+        lv_obj_set_style_pad_ver(value, 3, 0);
+    } else {
+        lv_obj_set_style_text_color(value, lv_color_hex(ui_c_accent()), 0);
+    }
+    return value;
+}
+
+// 配网网址按浏览器地址栏的习惯显示：去掉 "http://" 与结尾斜杠。手机上直接输入
+// 192.168.4.1 也能打开，去掉前缀后一行放得下，不会挤到和左边的标签重叠。
+static void prov_url_display(char *out, size_t cap)
+{
+    const char *url = app_net_prov_url();
+    if (!url) { out[0] = '\0'; return; }
+    if (strncmp(url, "http://", 7) == 0) url += 7;
+    snprintf(out, cap, "%s", url);
+    size_t n = strlen(out);
+    if (n > 1 && out[n - 1] == '/') out[n - 1] = '\0';
+}
+
+// 状态行：统一样式，只换文字与颜色。配网浮层的重点是"现在到哪一步了"，把它单独
+// 放在标题下面一行，比塞进一长段说明里更容易看。
+static void state_label_set(lv_obj_t *label, const char *text, uint32_t color)
+{
+    if (!label) return;
+    lv_label_set_text(label, text ? text : "");
+    lv_obj_set_style_text_color(label, lv_color_hex(color), 0);
+}
+
+// ---------------------------------------------------------------------------
 // 设置列表
 // ---------------------------------------------------------------------------
 
@@ -260,7 +327,10 @@ static void refresh_values(void)
 
     const char *ssid = app_net_saved_ssid();
     ui_row_set_value(s.rows[SET_WIFI], (ssid && ssid[0]) ? ssid : "未配置");
-    ui_row_set_value(s.rows[SET_PROV], app_net_prov_active() ? "已开启" : "关闭");
+    // 热点开着时，列表右侧直接显示热点名（与密码一起在浮层里看）。这样不进浮层也能知道
+    // 该连哪个热点，列表和浮层的信息不会互相矛盾。
+    ui_row_set_value(s.rows[SET_PROV],
+                     app_net_prov_active() ? app_net_prov_ssid() : "关闭");
     ui_row_set_value(s.rows[SET_BLE], s_ble_busy ? "开启中" : ble_state_name());
 
     app_fetch_state_t ts = app_net_time_state();
@@ -393,30 +463,39 @@ static const char *prov_err_text(int err)
 
 static void prov_refresh(void)
 {
-    if (!s.prov || !s.prov_note) return;
+    if (!s.prov || !s.prov_state) return;
 
-    char text[220];
+    // 热点真的开着（不在启动中、也没失败）时，才把可照抄的凭证放出来。
+    bool active = !s_prov_busy && s_prov_err == 0 && app_net_prov_active();
+
     if (s_prov_busy) {
-        snprintf(text, sizeof(text), "正在开启热点，请稍候…");
+        state_label_set(s.prov_state, "正在开启热点…", ui_c_soon());
     } else if (s_prov_err != 0) {
-        // 失败时把具体原因和下一步动作都写清楚，用户不必退出去猜。
         const char *why = prov_err_text(s_prov_err);
-        snprintf(text, sizeof(text), "%s\n\n再按一次 OK 可重试。",
-                 why ? why : "热点开启失败，请重试。");
-    } else if (!app_net_prov_active()) {
-        // 既没在忙、也没报错、热点又没起来（例如上一次被取消）。原实现在这一支直接
-        // 落到 else，结果卡片留着空标签——用户看到的就是那个"蓝边空框"。这里给一句
-        // 明确的空状态，并提示可以就地重开。
-        snprintf(text, sizeof(text), "热点未开启。\n按 OK 重新开启。");
+        state_label_set(s.prov_state, why ? why : "热点开启失败。", ui_c_live());
+    } else if (!active) {
+        state_label_set(s.prov_state, "热点未开启，按 OK 重新开启。", ui_c_dim());
     } else {
-        // 密码放在第一行：卡片放不下时被裁掉的是尾部，第一行一定看得见。
-        const char *note = app_net_prov_note();
-        snprintf(text, sizeof(text),
-                 "密码：%s\n热点：%s\n网址：%s\n%s",
-                 app_net_prov_pass(), app_net_prov_ssid(), app_net_prov_url(),
-                 note ? note : "手机连上热点后打开网址填写 Wi-Fi、校准时间或导入口令密钥。");
+        state_label_set(s.prov_state, "已开启，等待手机连接", ui_c_ok());
     }
-    lv_label_set_text(s.prov_note, text);
+
+    if (active) {
+        lv_obj_remove_flag(s.prov_panel, LV_OBJ_FLAG_HIDDEN);
+        lv_label_set_text(s.prov_ssid, app_net_prov_ssid());
+        lv_label_set_text(s.prov_pass, app_net_prov_pass());
+        char url[48];
+        prov_url_display(url, sizeof(url));
+        lv_label_set_text(s.prov_url, url);
+
+        const char *note = app_net_prov_note();
+        lv_label_set_text(s.prov_note, note ? note
+            : "手机连上这个热点，再打开上面的网址填写 Wi-Fi。");
+    } else {
+        // 没开起来时不要把凭证面板留在屏幕上：否则用户会以为可以照着连。
+        lv_obj_add_flag(s.prov_panel, LV_OBJ_FLAG_HIDDEN);
+        lv_label_set_text(s.prov_note,
+                          s_prov_err != 0 ? "再按一次 OK 可重试。" : "");
+    }
 }
 
 // 拉起热点启动任务。已置忙或已在配网时直接返回，避免并发两次 esp_wifi_set_mode。
@@ -456,16 +535,38 @@ static void prov_open(void)
     }
 
     lv_obj_t *card = NULL;
-    // 卡片取 250 高：标题 + 密码/热点/网址/说明共约 7 行正文，200 高会把尾部（密码
-    // 之后的说明行）裁掉，用户就以为设备根本没给密码。
-    s.prov = overlay_create(250, &card, "热点配网");
+    // 卡片 240 高是照着实际内容算的：标题 + 状态行 + 凭证面板(3 行) + 说明行。上一版按
+    // "正文行数"估高，结果密码之后的说明被裁掉，用户以为设备根本没给密码。
+    s.prov = overlay_create(240, &card, "热点配网");
+    // 内容在卡片里纵向居中：失败/未开启时没有凭证面板，内容变矮，居中比顶对齐好看。
+    lv_obj_set_flex_align(card, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_START);
 
-    // 信息标签：多行文本，宽度受卡片约束，超出自动换行。
-    s.prov_note = ui_label_create(card, "", ui_font_body, ui_c_text());
-    lv_obj_set_width(s.prov_note, UI_W - 24 - 24);
+    // 状态行：现在开到哪一步。
+    s.prov_state = ui_label_create(card, "", ui_font_hint, ui_c_dim());
+    lv_obj_set_width(s.prov_state, LV_PCT(100));
+    lv_label_set_long_mode(s.prov_state, LV_LABEL_LONG_WRAP);
+
+    // 凭证面板：在卡片里再嵌一层容器，把"要照着抄的三行"框在一起。嵌套容器用
+    // ui_c_panel() 底色，与卡片差一档明度，不靠阴影也能看出这是卡片里的一个区块。
+    s.prov_panel = ui_card_create(card, 0, 0, LV_PCT(100), 104, ui_c_accent());
+    lv_obj_set_style_bg_color(s.prov_panel, lv_color_hex(ui_c_panel()), 0);
+    lv_obj_set_flex_flow(s.prov_panel, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s.prov_panel, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_START);
+    lv_obj_set_style_pad_all(s.prov_panel, 8, 0);
+    lv_obj_set_style_pad_row(s.prov_panel, 4, 0);
+
+    s.prov_ssid = info_row_create(s.prov_panel, "热点名称", false, NULL);
+    s.prov_pass = info_row_create(s.prov_panel, "热点密码", true, NULL);
+    s.prov_url  = info_row_create(s.prov_panel, "打开网址", false, NULL);
+
+    // 说明行：连上热点之后要做什么。
+    s.prov_note = ui_label_create(card, "", ui_font_hint, ui_c_dim());
+    lv_obj_set_width(s.prov_note, LV_PCT(100));
     lv_label_set_long_mode(s.prov_note, LV_LABEL_LONG_WRAP);
 
-    // 兜底：字号或文案变化导致仍放不下时，向上/下键可以滚动查看，而不是被裁掉。
+    // 兜底：文案变化导致仍放不下时，向上/下键可以滚动查看，而不是被裁掉。
     lv_obj_add_flag(card, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_scroll_dir(card, LV_DIR_VER);
     lv_obj_set_scrollbar_mode(card, LV_SCROLLBAR_MODE_AUTO);
@@ -473,7 +574,7 @@ static void prov_open(void)
     prov_kick_off();
 
     prov_refresh();
-    set_hint("↑↓ 滚动  按OK 重试  长按OK 关闭");
+    set_hint("↑↓ 滚动  OK 重试  长按OK 关闭");
     refresh_values();
 }
 
@@ -489,6 +590,11 @@ static void prov_close(void)
     if (s.prov) {
         lv_obj_delete(s.prov);
         s.prov = NULL;
+        s.prov_state = NULL;
+        s.prov_panel = NULL;
+        s.prov_ssid = NULL;
+        s.prov_pass = NULL;
+        s.prov_url = NULL;
         s.prov_note = NULL;
     }
     // 清掉上一次的结果，避免下次打开浮层先闪一帧旧错误。
@@ -522,40 +628,57 @@ static void ble_start_task(void *arg)
 
 static void ble_refresh(void)
 {
-    if (!s.ble || !s.ble_note) return;
+    if (!s.ble || !s.ble_state) return;
 
-    char text[200];
+    const char *note = "";
+    bool show_name = false;
+
     if (s_ble_busy) {
-        snprintf(text, sizeof(text), "正在开启蓝牙，请稍候…");
+        state_label_set(s.ble_state, "正在开启蓝牙…", ui_c_soon());
+        note = "蓝牙启动比热点慢一些，请稍等。";
     } else if (s_ble_err != 0) {
         const char *err = app_ble_prov_error();
-        snprintf(text, sizeof(text), "%s", err ? err : "蓝牙配网开启失败，请重试。");
+        state_label_set(s.ble_state, err ? err : "蓝牙配网开启失败。", ui_c_live());
+        note = "再按一次 OK 可重试。";
     } else {
         switch (app_ble_prov_state()) {
         case APP_BLE_PROV_ADVERTISING:
-            snprintf(text, sizeof(text),
-                     "设备广播名：%s\n在手机 EspBlufi App 中连接该设备，\n"
-                     "选择 2.4G Wi-Fi 并输入密码。",
-                     app_ble_prov_name());
+            state_label_set(s.ble_state, "已开始广播，等待手机连接", ui_c_ok());
+            show_name = true;
+            note = "在 EspBlufi App 里选中设备，选择 2.4G Wi-Fi 并输入密码。";
             break;
         case APP_BLE_PROV_CONNECTED:
-            snprintf(text, sizeof(text), "手机已连接，等待下发 Wi-Fi 信息…");
+            state_label_set(s.ble_state, "手机已连接", ui_c_ok());
+            show_name = true;
+            note = "在 App 里选择 Wi-Fi 并输入密码。";
             break;
         case APP_BLE_PROV_APPLYING:
-            snprintf(text, sizeof(text), "已收到 Wi-Fi 信息，正在连接…");
+            state_label_set(s.ble_state, "已收到 Wi-Fi 信息，正在连接…", ui_c_soon());
+            show_name = true;
             break;
         case APP_BLE_PROV_DONE: {
             const char *ssid = app_net_saved_ssid();
-            snprintf(text, sizeof(text), "配网成功：%s\n凭证已保存，可以关闭了。",
+            char buf[64];
+            snprintf(buf, sizeof(buf), "配网成功：%s",
                      (ssid && ssid[0]) ? ssid : "已连接");
+            state_label_set(s.ble_state, buf, ui_c_ok());
+            note = "凭证已保存，可以长按 OK 关闭了。";
             break;
         }
         default:
-            snprintf(text, sizeof(text), "蓝牙配网未开启。");
+            state_label_set(s.ble_state, "蓝牙配网未开启，按 OK 重新开启。", ui_c_dim());
             break;
         }
     }
-    lv_label_set_text(s.ble_note, text);
+
+    // 广播名只在真的在广播时才显示：没广播时留着会让用户以为手机能搜到。
+    if (show_name) {
+        lv_obj_remove_flag(s.ble_name_row, LV_OBJ_FLAG_HIDDEN);
+        lv_label_set_text(s.ble_name, app_ble_prov_name());
+    } else {
+        lv_obj_add_flag(s.ble_name_row, LV_OBJ_FLAG_HIDDEN);
+    }
+    lv_label_set_text(s.ble_note, note);
 }
 
 static void ble_open(void)
@@ -572,10 +695,21 @@ static void ble_open(void)
     }
 
     lv_obj_t *card = NULL;
-    s.ble = overlay_create(200, &card, "蓝牙配网");
+    s.ble = overlay_create(190, &card, "蓝牙配网");
+    lv_obj_set_flex_align(card, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_START);
 
-    s.ble_note = ui_label_create(card, "", ui_font_body, ui_c_text());
-    lv_obj_set_width(s.ble_note, UI_W - 24 - 24);
+    // 状态行：现在到哪一步。
+    s.ble_state = ui_label_create(card, "", ui_font_hint, ui_c_dim());
+    lv_obj_set_width(s.ble_state, LV_PCT(100));
+    lv_label_set_long_mode(s.ble_state, LV_LABEL_LONG_WRAP);
+
+    // 广播名单独一行、用药丸突出：手机端要靠这个名字在列表里找到本设备，和密码一样
+    // 属于"照着抄"的信息。未广播时整行隐藏。
+    s.ble_name = info_row_create(card, "设备名称", true, &s.ble_name_row);
+
+    s.ble_note = ui_label_create(card, "", ui_font_hint, ui_c_dim());
+    lv_obj_set_width(s.ble_note, LV_PCT(100));
     lv_label_set_long_mode(s.ble_note, LV_LABEL_LONG_WRAP);
 
     if (!app_ble_prov_active() && !s_ble_busy) {
@@ -589,7 +723,7 @@ static void ble_open(void)
     }
 
     ble_refresh();
-    set_hint("在手机 EspBlufi 里连接 FoloPassport  长按OK 关闭");
+    set_hint("在手机 App 中完成配网  长按OK 关闭");
     refresh_values();
 }
 
@@ -607,6 +741,9 @@ static void ble_close(void)
     if (s.ble) {
         lv_obj_delete(s.ble);
         s.ble = NULL;
+        s.ble_state = NULL;
+        s.ble_name_row = NULL;
+        s.ble_name = NULL;
         s.ble_note = NULL;
     }
     s.hint[0] = '\0';
