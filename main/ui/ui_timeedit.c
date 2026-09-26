@@ -6,6 +6,7 @@
 
 #include "ui_theme.h"
 
+#include <stdio.h>
 #include <string.h>
 
 #define TE_MAX_FIELDS 5
@@ -34,6 +35,34 @@ static void te_clamp(int index)
     if (v < f->min) v = f->min;
     if (v > f->max) v = f->max;
     s.values[index] = v;
+}
+
+// wrap=true 时在 [min,max] 内循环（到端点回到另一端）；false 时夹紧。
+static void te_apply(int index, int delta, bool wrap)
+{
+    const ui_timeedit_field_t *f = &s.fields[index];
+    int range = f->max - f->min + 1;
+    int v = s.values[index] + delta;
+    if (wrap && range > 1) {
+        v = (v - f->min) % range;
+        if (v < 0) v += range;
+        s.values[index] = v + f->min;
+        return;
+    }
+    s.values[index] = v;
+    te_clamp(index);
+}
+
+// 提示条写出当前字段真实的长按步长：数值字段来自 step，选项字段固定为 1。这样提示
+// 不会承诺一个实际不会发生的步长（"按钮与说的不一样"）。
+static void te_hint(void)
+{
+    int step = s.fields[s.cursor].step;
+    if (s.fields[s.cursor].names) step = 1;
+    if (step < 1) step = 1;
+    char buf[64];
+    snprintf(buf, sizeof(buf), "短按 ±1  长按 ±%d  OK 下一项  长按OK 保存", step);
+    ui_page_set_hint(buf);
 }
 
 static void te_render(void)
@@ -126,7 +155,7 @@ void ui_timeedit_open(lv_obj_t *parent, const char *title,
     }
 
     te_render();
-    ui_page_set_hint("短按 ±1  长按 ±10  OK 下一项  长按OK 保存");
+    te_hint();
 }
 
 void ui_timeedit_close(void)
@@ -160,10 +189,12 @@ bool ui_timeedit_handle(bsp_btn_t btn, bsp_btn_ev_t ev)
             return true;
         }
         if (btn == BSP_BTN_UP || btn == BSP_BTN_DOWN) {
-            int step = s.fields[s.cursor].step;
+            // 选项字段按 1 步循环；数值字段按字段自己的 step（默认 10，即"长按加十"）
+            // 大步调整，并在 min..max 内夹紧。
+            bool option = s.fields[s.cursor].names != NULL;
+            int step = option ? 1 : s.fields[s.cursor].step;
             if (step < 1) step = 1;
-            s.values[s.cursor] += (btn == BSP_BTN_UP) ? -step : step;
-            te_clamp(s.cursor);
+            te_apply(s.cursor, (btn == BSP_BTN_UP) ? -step : step, option);
             te_render();
             return true;
         }
@@ -173,8 +204,8 @@ bool ui_timeedit_handle(bsp_btn_t btn, bsp_btn_ev_t ev)
     if (ev != BSP_BTN_CLICK) return true;
 
     if (btn == BSP_BTN_UP || btn == BSP_BTN_DOWN) {
-        s.values[s.cursor] += (btn == BSP_BTN_UP) ? -1 : 1;
-        te_clamp(s.cursor);
+        // 短按 ±1 并在区间内循环：到最小值再按上跳到最大值，符合列表选择的直觉。
+        te_apply(s.cursor, (btn == BSP_BTN_UP) ? -1 : 1, true);
         te_render();
         return true;
     }
@@ -185,6 +216,7 @@ bool ui_timeedit_handle(bsp_btn_t btn, bsp_btn_ev_t ev)
         } else {
             s.cursor++;
             te_render();
+            te_hint();
         }
         return true;
     }

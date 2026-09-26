@@ -1,9 +1,9 @@
-// main/ui/ui_identity.c —— 身份与工具模块页：电子工牌 / 动态口令 / 硬件自检 / 密码本。
+// main/ui/ui_identity.c —— 身份与工具模块页：电子工牌 / 动态口令 / 密码本。
 //
-// 页面结构遵循应用统一约定：顶部 ui_tabs_create() 四个标签页（工牌 / 口令 / 自检 /
-// 密码本），短按 UP/DOWN 在当前标签内移动，长按 UP 执行该标签的主操作（全屏码 /
-// 恢复码 / 全部检查 / 打开密码本），长按 DOWN 切换标签页，长按 OK 返回主页。所有
-// 颜色与字号都取自 ui_theme，本文件不自定义样式。
+// 页面结构遵循应用统一约定：顶部 ui_tabs_create() 三个标签页（工牌 / 口令 / 密码本），
+// 短按 UP/DOWN 在当前标签内移动，长按 UP 执行该标签的主操作（全屏码 / 恢复码 / 打开
+// 密码本），长按 DOWN 切换标签页，长按 OK 返回主页。所有颜色与字号都取自 ui_theme，
+// 本文件不自定义样式。原先的"硬件自检"标签页已按用户要求彻底移除。
 //
 // 密码本是 ui_vault.c 实现的全屏子页面：身份页只负责入口与按键转发，进入后由密码本
 // 独占屏幕与按键。密码本退出时会删掉自己的 LVGL 屏幕，因此身份页在检测到它退出后必须
@@ -45,20 +45,10 @@
 // ---------------------------------------------------------------------------
 
 #define IDV_CW        (UI_W - 2 * UI_MARGIN_X)   // 内容区可用宽度 224
-#define IDV_TAB_COUNT 4
-#define IDV_CHECK_COUNT 5
+#define IDV_TAB_COUNT 3
 
-// 标签页顺序：工牌 / 口令 / 自检 / 密码本。密码本追加在最后，既有三个标签顺序不变。
-enum { IDV_TAB_BADGE = 0, IDV_TAB_TOTP, IDV_TAB_CHECK, IDV_TAB_VAULT };
-
-// 自检项下标。
-enum { IDV_ROW_DISPLAY = 0, IDV_ROW_KEY, IDV_ROW_AUDIO, IDV_ROW_BATTERY, IDV_ROW_STORAGE };
-
-typedef enum {
-    IDV_CHECK_WAIT = 0,
-    IDV_CHECK_PASS,
-    IDV_CHECK_FAIL,
-} idv_check_state_t;
+// 标签页顺序：工牌 / 口令 / 密码本。
+enum { IDV_TAB_BADGE = 0, IDV_TAB_TOTP, IDV_TAB_VAULT };
 
 // 覆盖层种类：全屏二维码可在一张工牌的多个码之间切换，恢复码只读展示。
 typedef enum {
@@ -74,10 +64,7 @@ static uint32_t s_qr_thumb_buf[(IDV_QR_THUMB_DIM * ((IDV_QR_THUMB_DIM + 7) / 8) 
 static uint32_t s_qr_full_buf[(IDV_QR_FULL_DIM * ((IDV_QR_FULL_DIM + 7) / 8) + 24) / 4];
 static uint8_t  s_qr_modules[APP_QR_MAX_SIZE * APP_QR_MAX_SIZE];
 
-static const char *const IDV_TAB_NAMES[IDV_TAB_COUNT] = { "工牌", "口令", "自检", "密码本" };
-static const char *const IDV_CHECK_NAMES[IDV_CHECK_COUNT] = {
-    "显示", "按键", "音频", "电池", "存储"
-};
+static const char *const IDV_TAB_NAMES[IDV_TAB_COUNT] = { "工牌", "口令", "密码本" };
 
 static struct {
     ui_page_t page;
@@ -106,12 +93,6 @@ static struct {
     lv_obj_t *totp_ring;
     lv_obj_t *totp_next;
     int totp_index;
-
-    // 自检
-    ui_row_t checks[IDV_CHECK_COUNT];
-    int check_sel;
-    int check_state[IDV_CHECK_COUNT];
-    bool check_key_armed;
 
     // 覆盖层（全屏二维码 / 恢复码），同一时刻最多一个。
     lv_obj_t *overlay;
@@ -317,91 +298,6 @@ static void group4(const char *src, char *out, size_t cap)
         n++;
     }
     out[oi] = '\0';
-}
-
-// ---------------------------------------------------------------------------
-// 自检
-// ---------------------------------------------------------------------------
-
-static void check_apply(int i)
-{
-    if (i < 0 || i >= IDV_CHECK_COUNT) return;
-
-    const char *txt;
-    uint32_t col;
-    switch (s.check_state[i]) {
-    case IDV_CHECK_PASS: txt = "✓ 通过";   col = ui_c_ok();   break;
-    case IDV_CHECK_FAIL: txt = "× 失败";   col = ui_c_live(); break;
-    default:             txt = "○ 待检查"; col = ui_c_dim();  break;
-    }
-    ui_row_set_value(s.checks[i], txt);
-    if (s.checks[i].value) {
-        lv_obj_set_style_text_color(s.checks[i].value, lv_color_hex(col), 0);
-    }
-}
-
-static void check_select(int index)
-{
-    if (index < 0 || index >= IDV_CHECK_COUNT) return;
-    s.check_sel = index;
-    for (int i = 0; i < IDV_CHECK_COUNT; i++) {
-        ui_row_set_selected(s.checks[i], i == index);
-    }
-    ui_scroll_into_view(s.checks[index].obj);
-}
-
-static void check_run(int i)
-{
-    switch (i) {
-    case IDV_ROW_DISPLAY:
-        s.check_state[i] = IDV_CHECK_PASS;
-        ui_hint_flash("显示检查通过", 1500);
-        break;
-    case IDV_ROW_KEY:
-        s.check_key_armed = true;
-        s.check_state[i] = IDV_CHECK_WAIT;
-        ui_hint_flash("请按任意键", 3000);
-        break;
-    case IDV_ROW_AUDIO:
-        // 真正出声属真机验证项，这里不占用音频通道、不阻塞界面。
-        s.check_state[i] = IDV_CHECK_PASS;
-        ui_hint_flash("音频需真机确认出声", 1800);
-        break;
-    case IDV_ROW_BATTERY: {
-        app_state_battery_refresh();
-        if (app_state_battery_soc() >= 0) {
-            s.check_state[i] = IDV_CHECK_PASS;
-            ui_hint_flash("电池读取正常", 1500);
-        } else {
-            s.check_state[i] = IDV_CHECK_FAIL;
-            ui_hint_flash("电池读取失败，请检查硬件", 2000);
-        }
-        break;
-    }
-    default:
-        app_state_save_settings();
-        s.check_state[i] = IDV_CHECK_PASS;
-        ui_hint_flash("存储读写通过", 1500);
-        break;
-    }
-    check_apply(i);
-}
-
-static void check_run_all(void)
-{
-    app_state_battery_refresh();
-
-    s.check_state[IDV_ROW_DISPLAY] = IDV_CHECK_PASS;
-    s.check_state[IDV_ROW_KEY] = IDV_CHECK_WAIT;
-    s.check_state[IDV_ROW_AUDIO] = IDV_CHECK_PASS;
-    s.check_state[IDV_ROW_BATTERY] =
-        (app_state_battery_soc() >= 0) ? IDV_CHECK_PASS : IDV_CHECK_FAIL;
-    app_state_save_settings();
-    s.check_state[IDV_ROW_STORAGE] = IDV_CHECK_PASS;
-
-    s.check_key_armed = true;
-    for (int i = 0; i < IDV_CHECK_COUNT; i++) check_apply(i);
-    ui_hint_flash("请按任意键完成按键检查", 3000);
 }
 
 // ---------------------------------------------------------------------------
@@ -642,22 +538,6 @@ static void build_totp(void)
     ui_page_set_hint("↑↓ 切换账户  长按↑ 恢复码  长按↓ 换页  长按OK 返回");
 }
 
-static void build_check(void)
-{
-    lv_obj_t *v = s.views[IDV_TAB_CHECK];
-    lv_obj_clean(v);
-
-    ui_header_create(v, "硬件自检", NULL, NULL, NULL);
-
-    lv_obj_t *list = ui_list_create(v);
-    for (int i = 0; i < IDV_CHECK_COUNT; i++) {
-        s.checks[i] = ui_row_create(list, IDV_CHECK_NAMES[i], "");
-        check_apply(i);
-    }
-    check_select(s.check_sel);
-    ui_page_set_hint("↑↓ 选择  OK 单项  长按↑ 全部  长按↓ 换页  长按OK 返回");
-}
-
 // 密码本入口：只给状态摘要与一句操作提示，真正的条目页在 ui_vault.c 里全屏打开。
 static void build_vault(void)
 {
@@ -708,7 +588,6 @@ static void show_tab(int index)
     case IDV_TAB_BADGE: build_badge(); break;
     case IDV_TAB_TOTP:  build_totp();  break;
     case IDV_TAB_VAULT: build_vault(); break;
-    default:            build_check(); break;
     }
 }
 
@@ -942,32 +821,6 @@ static void totp_key(bsp_btn_t btn, bsp_btn_ev_t ev)
     }
 }
 
-static void check_key(bsp_btn_t btn, bsp_btn_ev_t ev)
-{
-    // 按键自检待命中：任意按键即视为按键通路正常。
-    if (s.check_key_armed) {
-        s.check_key_armed = false;
-        s.check_state[IDV_ROW_KEY] = IDV_CHECK_PASS;
-        check_apply(IDV_ROW_KEY);
-        ui_hint_flash("按键检查通过", 1500);
-        return;
-    }
-
-    if (ev == BSP_BTN_LONG && btn == BSP_BTN_UP) {
-        check_run_all();
-        return;
-    }
-    if (ev != BSP_BTN_CLICK) return;
-
-    if (btn == BSP_BTN_UP) {
-        check_select((s.check_sel + IDV_CHECK_COUNT - 1) % IDV_CHECK_COUNT);
-    } else if (btn == BSP_BTN_DOWN) {
-        check_select((s.check_sel + 1) % IDV_CHECK_COUNT);
-    } else if (btn == BSP_BTN_OK) {
-        check_run(s.check_sel);
-    }
-}
-
 static void vault_key(bsp_btn_t btn, bsp_btn_ev_t ev)
 {
     // 密码本是全屏子页面：本页只负责把用户送进去。
@@ -1002,7 +855,6 @@ void page_identity_enter(void)
     }
 
     s.totp_index = 0;
-    s.check_sel = 0;
     show_tab(IDV_TAB_BADGE);
 }
 
@@ -1015,7 +867,6 @@ void page_identity_exit(void)
     if (s.page.scr) {
         lv_obj_delete(s.page.scr);
     }
-    // 自检结果不落盘，离开即清空。
     memset(&s, 0, sizeof(s));
 }
 
@@ -1068,7 +919,6 @@ void page_identity_key(bsp_btn_t btn, bsp_btn_ev_t ev)
     case IDV_TAB_BADGE: badge_key(btn, ev); break;
     case IDV_TAB_TOTP:  totp_key(btn, ev);  break;
     case IDV_TAB_VAULT: vault_key(btn, ev); break;
-    default:            check_key(btn, ev); break;
     }
 }
 

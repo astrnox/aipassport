@@ -192,10 +192,12 @@ static ui_row_t overlay_row_create(lv_obj_t *parent, const char *title, const ch
 // 设置列表
 // ---------------------------------------------------------------------------
 
+// 焦点循环：在最后一行再按 DOWN 回到第一行，在第一行再按 UP 到最末行。用户明确要求
+// "到最后一项按下要能跳到第一个"，且首页轮播、快捷面板都用同一套循环，保持一致。
 static void settings_focus(int index)
 {
-    if (index < 0) index = 0;
-    if (index >= SET_ROW_N) index = SET_ROW_N - 1;
+    index %= SET_ROW_N;
+    if (index < 0) index += SET_ROW_N;
     s.focus = index;
     for (int i = 0; i < SET_ROW_N; i++) {
         ui_row_set_selected(s.rows[i], i == index);
@@ -343,9 +345,9 @@ static void manual_time_open(void)
     static const ui_timeedit_field_t fields[5] = {
         { "年", 1970, 2099, 10, NULL },
         { "月", 1, 12, 1, NULL },
-        { "日", 1, 31, 5, NULL },
-        { "时", 0, 23, 1, NULL },
-        { "分", 0, 59, 5, NULL },
+        { "日", 1, 31, 10, NULL },
+        { "时", 0, 23, 10, NULL },
+        { "分", 0, 59, 10, NULL },
     };
     ui_timeedit_open(s.page.scr, "手动设置时间", fields, s_edit_values, 5,
                      manual_time_done, NULL);
@@ -440,6 +442,17 @@ static void prov_open(void)
         prov_refresh();
         refresh_values();
         return;
+    }
+
+    // 与蓝牙配网互斥：两者共用同一套 Wi-Fi 射频，同时开启会争抢内存与射频状态，在无
+    // PSRAM 的板子上很容易两边都起不来。文件头写了"不能同时开启"，这里真正落实：
+    // 开热点前先关蓝牙；蓝牙还在关闭中就先等它收尾，不并发操作射频。
+    if (s.ble || s_ble_busy || app_ble_prov_active()) {
+        ble_close();
+        if (s_ble_busy) {
+            ui_hint_flash("蓝牙配网正在关闭，请稍后再试", 1800);
+            return;
+        }
     }
 
     lv_obj_t *card = NULL;
@@ -549,6 +562,15 @@ static void ble_open(void)
 {
     if (s.ble) return;
 
+    // 与热点配网互斥（同上）：开蓝牙前先关热点，避免两套射频状态互相打断。
+    if (s.prov || s_prov_busy || app_net_prov_active()) {
+        prov_close();
+        if (s_prov_busy) {
+            ui_hint_flash("热点配网正在关闭，请稍后再试", 1800);
+            return;
+        }
+    }
+
     lv_obj_t *card = NULL;
     s.ble = overlay_create(200, &card, "蓝牙配网");
 
@@ -630,8 +652,8 @@ static void data_panel_refresh(void)
 
 static void data_panel_focus(int index)
 {
-    if (index < 0) index = 0;
-    if (index >= CLR_ROW_N) index = CLR_ROW_N - 1;
+    index %= CLR_ROW_N;
+    if (index < 0) index += CLR_ROW_N;
     s.data_sel = index;
     for (int i = 0; i < CLR_ROW_N; i++) {
         ui_row_set_selected(s.data_rows[i], i == index);
@@ -1103,9 +1125,9 @@ static void onboarding_manual_time(void)
     static const ui_timeedit_field_t fields[5] = {
         { "年", 1970, 2099, 10, NULL },
         { "月", 1, 12, 1, NULL },
-        { "日", 1, 31, 5, NULL },
-        { "时", 0, 23, 1, NULL },
-        { "分", 0, 59, 5, NULL },
+        { "日", 1, 31, 10, NULL },
+        { "时", 0, 23, 10, NULL },
+        { "分", 0, 59, 10, NULL },
     };
     ui_timeedit_open(s_ob.ov, "设置设备时间", fields, s_edit_values, 5,
                      onboarding_manual_done, NULL);
@@ -1114,8 +1136,8 @@ static void onboarding_manual_time(void)
 static void onboarding_focus(int index)
 {
     if (s_ob.row_count <= 0) return;
-    if (index < 0) index = 0;
-    if (index >= s_ob.row_count) index = s_ob.row_count - 1;
+    index %= s_ob.row_count;
+    if (index < 0) index += s_ob.row_count;
     s_ob.sel = index;
     for (int i = 0; i < s_ob.row_count; i++) {
         ui_row_set_selected(s_ob.rows[i], i == index);

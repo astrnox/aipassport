@@ -26,7 +26,7 @@ void page_routine_exit(void);
 void page_routine_key(bsp_btn_t btn, bsp_btn_ev_t ev);
 void page_routine_tick(void);
 
-// 4 身份与工具：电子工牌 / 动态口令 / 密码本 / 硬件自检
+// 4 身份与工具：电子工牌 / 动态口令 / 密码本
 void page_identity_enter(void);
 void page_identity_exit(void);
 void page_identity_key(bsp_btn_t btn, bsp_btn_ev_t ev);

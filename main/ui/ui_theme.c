@@ -209,6 +209,12 @@ ui_page_t ui_page_create(const char *hint_text)
     lv_obj_set_style_pad_row(content, UI_CARD_GAP, 0);
     lv_obj_set_flex_flow(content, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_scrollbar_mode(content, LV_SCROLLBAR_MODE_AUTO);
+    // 只允许纵向滚动，并关掉弹性回弹与惯性：设备靠焦点移动来滚动，弹性回弹会把内容
+    // 拖出边界、露出大片空白，用户看到的就是"能滑到没有文字的地方"。关掉后滚动只
+    // 在内容真实范围内发生。
+    lv_obj_set_scroll_dir(content, LV_DIR_VER);
+    lv_obj_remove_flag(content, LV_OBJ_FLAG_SCROLL_ELASTIC);
+    lv_obj_remove_flag(content, LV_OBJ_FLAG_SCROLL_MOMENTUM);
     page.content = content;
 
     // 提示条。
@@ -611,6 +617,10 @@ void ui_progress_set(lv_obj_t *bar, int permille)
 void ui_scroll_into_view(lv_obj_t *obj)
 {
     if (!obj) return;
+    // 先强制结算一次布局：刚创建的控件其父容器还没排好子控件坐标，此时
+    // lv_obj_scroll_to_view 会按陈旧坐标（常常是 0）计算滚动量，表现为"光标往下走了
+    // 屏幕却不跟着滑"。结算后再滚，坐标才是真实的。
+    lv_obj_update_layout(obj);
     lv_obj_scroll_to_view(obj, LV_ANIM_OFF);
 }
 
@@ -667,7 +677,9 @@ void ui_dialog_open(lv_obj_t *parent, const char *title, const char *body,
     lv_obj_set_style_radius(overlay, 0, 0);
     lv_obj_set_style_pad_all(overlay, 0, 0);
 
-    lv_obj_t *card = ui_card_create(overlay, 20, 96, UI_W - 40, 128, ui_c_warn());
+    // 卡片高度放宽到 148 并把两个选项上移一行：多出的底部一行专门留给按键提示，
+    // 提示与选项分处上下两条带，不会互相压字。
+    lv_obj_t *card = ui_card_create(overlay, 20, 86, UI_W - 40, 148, ui_c_warn());
     lv_obj_set_style_bg_color(card, lv_color_hex(ui_c_card()), 0);
 
     lv_obj_t *title_lbl = ui_label_create(card, title, ui_font_title, ui_c_text());
@@ -676,14 +688,21 @@ void ui_dialog_open(lv_obj_t *parent, const char *title, const char *body,
     lv_obj_t *body_lbl = ui_label_create(card, body, ui_font_hint, ui_c_dim());
     lv_obj_set_width(body_lbl, UI_W - 64);
     lv_obj_set_style_text_align(body_lbl, LV_TEXT_ALIGN_LEFT, 0);
+    lv_label_set_long_mode(body_lbl, LV_LABEL_LONG_WRAP);
     lv_obj_align(body_lbl, LV_ALIGN_TOP_LEFT, 12, 40);
+
+    // 对话框自带按键提示：默认焦点落在"取消"（安全项），用户必须知道按 ↑↓ 才能切到
+    // 确认项。没有这行提示时，很多人直接按 OK 触发的是"取消"，会以为删除失效。
+    lv_obj_t *key_hint = ui_label_create(card, "↑↓ 选择   OK 确认   长按OK 取消",
+                                         ui_font_hint, ui_c_dim());
+    lv_obj_align(key_hint, LV_ALIGN_BOTTOM_LEFT, 12, -10);
 
     // 默认焦点放在安全选项（取消）上。
     s_dialog.options[0] = ui_label_create(card, "取消", ui_font_body, ui_c_text());
-    lv_obj_align(s_dialog.options[0], LV_ALIGN_BOTTOM_RIGHT, -16, -14);
+    lv_obj_align(s_dialog.options[0], LV_ALIGN_BOTTOM_RIGHT, -16, -40);
     s_dialog.options[1] = ui_label_create(card,
         confirm_text ? confirm_text : "确认", ui_font_body, ui_c_warn());
-    lv_obj_align(s_dialog.options[1], LV_ALIGN_BOTTOM_RIGHT, -86, -14);
+    lv_obj_align(s_dialog.options[1], LV_ALIGN_BOTTOM_RIGHT, -86, -40);
 
     s_dialog.overlay = overlay;
     s_dialog.cb = cb;
