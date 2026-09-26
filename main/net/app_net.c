@@ -16,9 +16,11 @@
 #include "logic/app_badge.h"
 #include "logic/app_esports.h"
 #include "logic/app_pomodoro.h"
+#include "logic/app_qr.h"
 #include "logic/app_time.h"
 #include "logic/app_totp.h"
 #include "logic/app_vault.h"
+#include "logic/app_vcard.h"
 
 #include "cJSON.h"
 #include "esp_crt_bundle.h"
@@ -1497,6 +1499,7 @@ static const char PROV_PAGE[] =
     "<div class=\"row\"><div><label>长休息</label><input name=\"long\" id=\"pf_long\" inputmode=\"numeric\"></div>\n"
     "<div><label>几段后长休</label><input name=\"cycles\" id=\"pf_cycles\" inputmode=\"numeric\"></div></div>\n"
     "<label><input type=\"checkbox\" name=\"auto\" id=\"pf_auto\" value=\"1\" style=\"width:auto\"> 阶段结束后自动接续</label>\n"
+    "<label><input type=\"checkbox\" name=\"dnd\" id=\"pf_dnd\" value=\"1\" style=\"width:auto\"> 专注时免打扰（暂缓提醒与提示音）</label>\n"
     "<p class=\"st\" id=\"pf_stats\"></p>\n"
     "<button type=\"submit\">保存番茄钟设置</button>\n"
     "<p class=\"st\">计时进行中无法修改时长与循环次数，请先在设备上停止计时。</p>\n"
@@ -1522,6 +1525,20 @@ static const char PROV_PAGE[] =
     "<label>头像动图槽位（-1 表示不用动图）</label><input name=\"slot\" value=\"-1\" inputmode=\"numeric\">\n"
     "<button type=\"submit\">保存名片</button>\n"
     "<p class=\"st\">二维码内容留空即删除该位；单条内容最多 120 字节（约 40 个汉字或 120 个字母）。</p>\n"
+    "</form>\n"
+
+    "<form method=\"post\" action=\"/vcard\">\n"
+    "<h2>联系人名片（vCard 二维码）</h2>\n"
+    "<label>写进第几张名片（1 起）</label><input name=\"idx\" value=\"1\" inputmode=\"numeric\">\n"
+    "<label>写进第几个二维码位（1-3，会覆盖该位）</label><input name=\"slot\" value=\"3\" inputmode=\"numeric\">\n"
+    "<label>姓名（必填）</label><input name=\"name\" maxlength=\"30\">\n"
+    "<label>单位 / 学校</label><input name=\"org\" maxlength=\"36\">\n"
+    "<label>职务 / 专业</label><input name=\"title\" maxlength=\"24\">\n"
+    "<label>电话</label><input name=\"tel\" maxlength=\"24\">\n"
+    "<label>邮箱</label><input name=\"email\" maxlength=\"40\">\n"
+    "<label>网址</label><input name=\"url\" maxlength=\"40\">\n"
+    "<button type=\"submit\">生成名片二维码</button>\n"
+    "<p class=\"st\">扫码即可存入手机通讯录。二维码容量约 120 字节，放不下时会按“网址 → 职务 → 单位”依次省略，并如实告知。</p>\n"
     "</form>\n"
 
     "<form id=\"af\">\n"
@@ -1563,6 +1580,7 @@ static const char PROV_PAGE[] =
     "    document.getElementById('pf_long').value=p['long'];\n"
     "    document.getElementById('pf_cycles').value=p.cycles;\n"
     "    document.getElementById('pf_auto').checked=!!p.auto;\n"
+    "    document.getElementById('pf_dnd').checked=!!p.dnd;\n"
     "    document.getElementById('pf_stats').innerHTML='当前：'+esc(p.state)+'<br>今日 '+p.today_min+' 分钟 / '+p.today_sessions+' 段<br>累计 '+p.total_sessions+' 段 · '+p.total_min+' 分钟';\n"
     "    var al='',as=d.anim.items||[];\n"
     "    for(var k=0;k<as.length;k++){\n"
@@ -2130,6 +2148,81 @@ static esp_err_t prov_post_badge(httpd_req_t *req)
     return prov_reply(req, msg);
 }
 
+// 取一个表单字段并按目标字段长度截断。中转缓冲按百分号编码后的长度给：一个汉字编码后
+// 变成 3 组 %XX，直接用目标结构体大小接收会把中文误判成超长。
+static void vcard_take(const char *body, const char *key, char *dst, size_t dst_cap)
+{
+    char raw[FORM_RAW_CAP(APP_VCARD_EMAIL_LEN)];
+    if (dst_cap == 0 || dst_cap > sizeof(raw)) return;
+    if (form_field(body, key, raw, sizeof(raw))) {
+        snprintf(dst, dst_cap, "%s", raw);
+    }
+}
+
+// 联系人名片：把结构化字段编成 vCard 3.0 文本，写进某张名片的某个二维码位。设备端已有
+// 二维码渲染与全屏展示，这里只负责"生成内容"，不新增存储格式，也不改设备端交互。
+static esp_err_t prov_post_vcard(httpd_req_t *req)
+{
+    char body[1024];
+    if (!read_form_checked(req, body, sizeof(body))) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        return prov_reply(req, "内容为空或过长");
+    }
+
+    app_badge_list_t *list = app_state_badges();
+    if (!list || list->count <= 0) {
+        return prov_reply(req, "请先在上面的“名片与二维码”里保存一张名片，再生成联系人二维码");
+    }
+
+    char num[12];
+    int index = form_field(body, "idx", num, sizeof(num)) ? atoi(num) - 1 : 0;
+    if (index < 0 || index >= list->count) index = 0;
+    int slot = form_field(body, "slot", num, sizeof(num)) ? atoi(num) - 1 : 0;
+    if (slot < 0) slot = 0;
+    if (slot >= APP_BADGE_QR_MAX) slot = APP_BADGE_QR_MAX - 1;
+
+    app_vcard_t card;
+    memset(&card, 0, sizeof(card));
+    vcard_take(body, "name", card.name, sizeof(card.name));
+    vcard_take(body, "org", card.org, sizeof(card.org));
+    vcard_take(body, "title", card.title, sizeof(card.title));
+    vcard_take(body, "tel", card.tel, sizeof(card.tel));
+    vcard_take(body, "email", card.email, sizeof(card.email));
+    vcard_take(body, "url", card.url, sizeof(card.url));
+
+    if (!card.name[0]) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        return prov_reply(req, "请填写姓名");
+    }
+
+    // 二维码上限 120 字节，多出的长度会被 app_badge_qr_* 拒绝，因此这里就按上限生成。
+    char text[APP_QR_MAX_BYTES + 1];
+    int dropped = 0;
+    if (app_vcard_build(&card, text, sizeof(text), &dropped) < 0) {
+        return prov_reply(req, "名片内容放不下，请精简姓名、电话或邮箱");
+    }
+
+    app_badge_t *b = &list->items[index];
+    int before = b->qr_count;
+    bool ok = (slot < before) ? app_badge_qr_set(b, slot, "名片", text)
+                              : (app_badge_qr_add(b, "名片", text) >= 0);
+    if (!ok) {
+        return prov_reply(req, "二维码写入失败，请检查姓名是否含非法字符");
+    }
+    int actual = (slot < before) ? slot : (b->qr_count - 1);
+    app_state_save_badges();
+
+    char msg[160];
+    if (dropped > 0) {
+        snprintf(msg, sizeof(msg),
+                 "已生成第 %d 张名片第 %d 位二维码；为放下内容省略了 %d 个字段（按网址、职务、单位顺序）",
+                 index + 1, actual + 1, dropped);
+    } else {
+        snprintf(msg, sizeof(msg), "已生成第 %d 张名片第 %d 位二维码", index + 1, actual + 1);
+    }
+    return prov_reply(req, msg);
+}
+
 static esp_err_t prov_post_pomo(httpd_req_t *req)
 {
     char body[256];
@@ -2144,23 +2237,25 @@ static esp_err_t prov_post_pomo(httpd_req_t *req)
     int brk = p->break_minutes;
     int lng = p->long_break_minutes;
     int cycles = p->cycles_per_long_break;
-    bool auto_next = p->auto_next;
 
     if (form_field(body, "focus", tmp, sizeof(tmp))) focus = atoi(tmp);
     if (form_field(body, "brk", tmp, sizeof(tmp))) brk = atoi(tmp);
     if (form_field(body, "long", tmp, sizeof(tmp))) lng = atoi(tmp);
     if (form_field(body, "cycles", tmp, sizeof(tmp))) cycles = atoi(tmp);
-    if (form_field(body, "auto", tmp, sizeof(tmp))) auto_next = atoi(tmp) != 0;
+    // 复选框未勾选时浏览器不会提交该字段，因此"字段缺失"就是"关闭"，不能用旧值兜底。
+    bool auto_next = form_field(body, "auto", tmp, sizeof(tmp)) && atoi(tmp) != 0;
+    bool dnd = form_field(body, "dnd", tmp, sizeof(tmp)) && atoi(tmp) != 0;
 
     bool durations_ok = app_pomodoro_set_durations(p, focus, brk);
     bool long_ok = app_pomodoro_set_long_break(p, lng, cycles);
     app_pomodoro_set_auto_next(p, auto_next);
+    app_pomodoro_set_dnd(p, dnd);
     app_state_save_pomodoro();
 
     if (p->state != APP_POMO_IDLE && !durations_ok && !long_ok) {
-        return prov_reply(req, "番茄钟正在计时：时长与循环次数未修改，请先在设备上停止计时；自动接续已保存");
+        return prov_reply(req, "番茄钟正在计时：时长与循环次数未修改，请先在设备上停止计时；自动接续与免打扰已保存");
     }
-    return prov_reply(req, "番茄钟设置已保存（自动接续已同步）");
+    return prov_reply(req, "番茄钟设置已保存（自动接续与免打扰已同步）");
 }
 
 // 动图上传：手机端解码并缩放，设备只收 RGB565 帧序列。请求体是纯二进制，参数走
@@ -2323,10 +2418,11 @@ static esp_err_t prov_get_info(httpd_req_t *req)
 
     app_pomodoro_t *p = app_state_pomodoro();
     snprintf(tmp, sizeof(tmp),
-             "\"pomodoro\":{\"focus\":%d,\"brk\":%d,\"long\":%d,\"cycles\":%d,\"auto\":%s,"
+             "\"pomodoro\":{\"focus\":%d,\"brk\":%d,\"long\":%d,\"cycles\":%d,\"auto\":%s,\"dnd\":%s,"
              "\"today_min\":%d,\"today_sessions\":%d,\"total_sessions\":%d,\"total_min\":%d,\"state\":",
              p->focus_minutes, p->break_minutes, p->long_break_minutes, p->cycles_per_long_break,
-             p->auto_next ? "true" : "false", p->focus_minutes_today, p->today_sessions,
+             p->auto_next ? "true" : "false", p->do_not_disturb ? "true" : "false",
+             p->focus_minutes_today, p->today_sessions,
              p->total_focus_sessions, p->total_focus_minutes);
     buf_append(buf, cap, &used, tmp);
     json_append_str(buf, cap, &used, app_pomodoro_state_name(p->state));
@@ -2399,6 +2495,7 @@ esp_err_t app_net_prov_start(void)
     httpd_uri_t u_totp_secret = { .uri = "/totp_secret", .method = HTTP_POST, .handler = prov_post_totp_secret, .user_ctx = NULL };
     httpd_uri_t u_totp_del = { .uri = "/totp_del", .method = HTTP_POST, .handler = prov_post_totp_del, .user_ctx = NULL };
     httpd_uri_t u_badge = { .uri = "/badge", .method = HTTP_POST, .handler = prov_post_badge, .user_ctx = NULL };
+    httpd_uri_t u_vcard = { .uri = "/vcard", .method = HTTP_POST, .handler = prov_post_vcard, .user_ctx = NULL };
     httpd_uri_t u_pomo = { .uri = "/pomo", .method = HTTP_POST, .handler = prov_post_pomo, .user_ctx = NULL };
     httpd_uri_t u_anim = { .uri = "/anim", .method = HTTP_POST, .handler = prov_post_anim, .user_ctx = NULL };
     httpd_register_uri_handler(s_httpd, &u_root);
@@ -2413,6 +2510,7 @@ esp_err_t app_net_prov_start(void)
     httpd_register_uri_handler(s_httpd, &u_totp_secret);
     httpd_register_uri_handler(s_httpd, &u_totp_del);
     httpd_register_uri_handler(s_httpd, &u_badge);
+    httpd_register_uri_handler(s_httpd, &u_vcard);
     httpd_register_uri_handler(s_httpd, &u_pomo);
     httpd_register_uri_handler(s_httpd, &u_anim);
 

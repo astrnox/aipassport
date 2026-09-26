@@ -53,9 +53,12 @@ typedef struct {
     int total_focus_sessions;       // 历史累计完成的专注段数（跨开机持久）
     int total_focus_minutes;        // 历史累计专注分钟（跨开机持久）
     int cycles_since_long_break;    // 距上次长休息已完成了几段专注
+    // 免打扰。默认开启：既然在计时专注，就不该被提醒打断。开关放在结构末尾，
+    // 老版本固件存下的前缀因此仍然可读（见 app_state 的载入逻辑）。
+    bool do_not_disturb;
 } app_pomodoro_t;
 
-// 复位为默认值：25 / 5 / 15 分钟、4 段一长休、自动接续，空闲，统计清零。
+// 复位为默认值：25 / 5 / 15 分钟、4 段一长休、自动接续、免打扰开启，空闲，统计清零。
 void app_pomodoro_init(app_pomodoro_t *p);
 
 // 设置专注与短休息时长，分别夹到 1..120、1..60。仅空闲状态允许修改；
@@ -67,6 +70,13 @@ bool app_pomodoro_set_long_break(app_pomodoro_t *p, int long_break_minutes, int 
 
 // 开关自动接续。它不影响当前段的长度，因此任何状态下都允许修改；无变化返回 false。
 bool app_pomodoro_set_auto_next(app_pomodoro_t *p, bool enabled);
+
+// 开关免打扰。同样不影响任何时长，任何状态下都可修改；无变化返回 false。
+bool app_pomodoro_set_dnd(app_pomodoro_t *p, bool enabled);
+
+// 免打扰此刻是否生效：开关打开，且专注段正在计时。暂停不算——用户此刻正在操作设备，
+// 打断他也无妨，等他继续专注时再恢复静默。
+bool app_pomodoro_dnd_active(const app_pomodoro_t *p);
 
 // 从空闲/暂停进入新的专注段。已在运行（专注/短休/长休）时返回 false。
 bool app_pomodoro_start(app_pomodoro_t *p);

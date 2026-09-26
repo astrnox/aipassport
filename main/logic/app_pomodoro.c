@@ -42,6 +42,7 @@ void app_pomodoro_init(app_pomodoro_t *p)
     p->total_focus_sessions = 0;
     p->total_focus_minutes = 0;
     p->cycles_since_long_break = 0;
+    p->do_not_disturb = true;
 }
 
 bool app_pomodoro_set_durations(app_pomodoro_t *p, int focus_minutes, int break_minutes)
@@ -80,6 +81,22 @@ bool app_pomodoro_set_auto_next(app_pomodoro_t *p, bool enabled)
     if (p->auto_next == enabled) return false;
     p->auto_next = enabled;
     return true;
+}
+
+bool app_pomodoro_set_dnd(app_pomodoro_t *p, bool enabled)
+{
+    if (!p) return false;
+    // 免打扰只影响"要不要打断"，与计时长度无关，运行中同样允许切换。
+    if (p->do_not_disturb == enabled) return false;
+    p->do_not_disturb = enabled;
+    return true;
+}
+
+bool app_pomodoro_dnd_active(const app_pomodoro_t *p)
+{
+    if (!p || !p->do_not_disturb) return false;
+    // 只有正在走的专注段才算"请勿打扰"；休息时可以正常提醒。
+    return p->state == APP_POMO_FOCUS;
 }
 
 bool app_pomodoro_start(app_pomodoro_t *p)

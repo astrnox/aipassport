@@ -67,6 +67,28 @@ int main(void)
     assert(p.auto_next == false);
     assert(app_pomodoro_set_auto_next(&p, true));
 
+    // ---- 免打扰开关与生效条件 ----
+    app_pomodoro_init(&p);
+    assert(p.do_not_disturb == true);                 // 默认开启
+    assert(!app_pomodoro_dnd_active(&p));             // 空闲时无所谓免打扰
+    assert(!app_pomodoro_set_dnd(&p, true));          // 无变化
+    assert(!app_pomodoro_dnd_active(NULL));
+    assert(!app_pomodoro_set_dnd(NULL, true));
+    assert(app_pomodoro_set_dnd(&p, false));
+    assert(!p.do_not_disturb);
+    assert(app_pomodoro_start(&p));
+    assert(!app_pomodoro_dnd_active(&p));             // 专注中但开关关闭
+    assert(app_pomodoro_set_dnd(&p, true));           // 运行中允许打开
+    assert(app_pomodoro_dnd_active(&p));
+    assert(app_pomodoro_toggle(&p));                  // 暂停不算免打扰：用户正在操作
+    assert(p.state == APP_POMO_PAUSED);
+    assert(!app_pomodoro_dnd_active(&p));
+    assert(app_pomodoro_toggle(&p));                  // 继续专注即恢复静默
+    assert(app_pomodoro_dnd_active(&p));
+    assert(app_pomodoro_tick(&p, 25 * 60) == APP_POMO_EVENT_FOCUS_DONE);
+    assert(p.state == APP_POMO_BREAK);
+    assert(!app_pomodoro_dnd_active(&p));             // 休息时可以正常提醒
+
     // ---- 开始 / 暂停 / 继续 ----
     app_pomodoro_init(&p);
     assert(app_pomodoro_start(&p));

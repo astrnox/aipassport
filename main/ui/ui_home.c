@@ -35,7 +35,7 @@
 #include <string.h>
 
 #define HOME_CW        (UI_W - 2 * UI_MARGIN_X)   // 224
-#define HOME_QUICK_N   4
+#define HOME_QUICK_N   5
 
 // 个人名片卡几何：头像框是正方形，文字区占右侧剩余宽度。高度压到 64：正好容纳 56
 // 头像与两行文字（16px 行高 31 + 12px 行高 23），把纵向空间尽量留给下面的模块列表。
@@ -43,10 +43,10 @@
 #define HOME_CARD_H    64
 #define HOME_TEXT_W    136
 
-enum { QUIET_MUTE = 0, QUIET_THEME, QUIET_BRIGHT, QUIET_POMO };
+enum { QUIET_MUTE = 0, QUIET_THEME, QUIET_BRIGHT, QUIET_POMO, QUIET_DND };
 
 static const char *const QUIET_NAMES[HOME_QUICK_N] = {
-    "静音", "主题", "亮度", "开始番茄钟"
+    "静音", "主题", "亮度", "开始番茄钟", "免打扰"
 };
 
 static struct {
@@ -420,6 +420,12 @@ static void quick_update_values(void)
                               : app_pomodoro_state_name(p->state);
         lv_label_set_text(s.quick_values[QUIET_POMO], txt);
     }
+    if (s.quick_values[QUIET_DND]) {
+        app_pomodoro_t *p = app_state_pomodoro();
+        lv_label_set_text(s.quick_values[QUIET_DND], p->do_not_disturb ? "开" : "关");
+        lv_obj_set_style_text_color(s.quick_values[QUIET_DND],
+            lv_color_hex(p->do_not_disturb ? ui_c_ok() : ui_c_dim()), 0);
+    }
 }
 
 static void quick_focus(int index)
@@ -507,13 +513,22 @@ static void quick_activate(void)
         app_state_save_settings();
         quick_update_values();
         break;
-    default: {
+    case QUIET_POMO: {
         app_pomodoro_t *p = app_state_pomodoro();
         if (p->state == APP_POMO_IDLE) app_pomodoro_start(p);
         else app_pomodoro_toggle(p);
         app_state_save_pomodoro();
         quick_update_values();
         ui_hint_flash("番茄钟已启动", 1500);
+        break;
+    }
+    default: {   // QUIET_DND：免打扰只改开关，不动计时与时长。
+        app_pomodoro_t *p = app_state_pomodoro();
+        bool on = !p->do_not_disturb;
+        app_pomodoro_set_dnd(p, on);
+        app_state_save_pomodoro();
+        quick_update_values();
+        ui_hint_flash(on ? "专注时免打扰已开启" : "专注时免打扰已关闭", 1500);
         break;
     }
     }

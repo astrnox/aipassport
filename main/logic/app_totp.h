@@ -15,7 +15,9 @@
 #define APP_TOTP_ALGO_SHA1   0
 #define APP_TOTP_ALGO_SHA256 1
 
-// 单个 TOTP 账户。label 用于界面显示，secret 为 Base32 解码后的原始密钥。
+// 单个 TOTP 账户。label 用于界面显示，secret 为 Base32 解码后的原始密钥——它只在内存
+// 里是明文，落盘时由 app_state 用设备绑定密钥逐条密封（见 logic/app_secret.h），
+// NVS 里不留明文。
 typedef struct {
     char    label[24];                                  // 账户名（UTF-8）
     uint8_t secret[APP_TOTP_MAX_SECRET_BYTES];          // Base32 解码后的原始密钥

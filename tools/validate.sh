@@ -62,10 +62,11 @@ run_static_checks() {
         "${test_dir}/test_demo_${demo}_runtime"
     done
     # 工具箱的纯逻辑层（不依赖 ESP-IDF/LVGL）：口令、作息、农历、番茄钟、提醒、赛事排序。
-    for logic in anim badge crypto esports pomodoro qr reminder routine time totp vault; do
+    for logic in anim badge crypto esports pomodoro qr reminder routine secret time totp vault vcard; do
         extra=""
         case "${logic}" in
         reminder) extra="main/logic/app_time.c" ;;
+        secret)   extra="main/logic/app_crypto.c" ;;
         totp)     extra="main/logic/app_crypto.c" ;;
         vault)    extra="main/logic/app_crypto.c" ;;
         esac
