@@ -231,7 +231,12 @@ static void render_focus(void)
     for (int i = 0; i <= list->count; i++) {
         ui_row_set_selected(s.rows[i], i + 1 == s.focus);
     }
-    if (s.focus > 0 && s.focus <= list->count + 1) {
+    if (s.focus == 0) {
+        // 焦点回到番茄钟卡。它直接挂在内容区顶端、不在 s.rows[] 里，所以不能靠
+        // ui_scroll_into_view 找到它；必须显式滚回顶部。否则从提醒列表按 UP 回来时
+        // 内容仍停在下方，高亮的番茄钟卡在屏幕上方看不见，用户以为按键失效。
+        if (s.page.content) lv_obj_scroll_to_y(s.page.content, 0, LV_ANIM_OFF);
+    } else if (s.focus <= list->count + 1) {
         ui_scroll_into_view(s.rows[s.focus - 1].obj);
     }
 }
@@ -239,12 +244,14 @@ static void render_focus(void)
 static void update_hint(void)
 {
     app_reminder_list_t *list = app_state_reminders();
+    // 三条提示都要带"长按OK 返回"：page_focus_key 在最前面就实现了长按OK回主页，
+    // 原先只有提醒行那一支漏了，用户在提醒列表里会找不到出口。
     if (s.focus == 0) {
         ui_page_set_hint("OK 开始/暂停  长按↑↓ 设置/预设  长按OK 返回");
     } else if (s.focus == list->count + 1) {
         ui_page_set_hint("OK 新增提醒  长按OK 返回");
     } else {
-        ui_page_set_hint("OK 开关  ↑↓选  长按↑ 修改  长按↓ 删除");
+        ui_page_set_hint("OK 开关  ↑↓选  长按↑ 修改  长按↓ 删除  长按OK 返回");
     }
 }
 

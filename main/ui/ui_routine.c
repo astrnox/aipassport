@@ -239,6 +239,14 @@ static void today_focus(int index)
     ui_scroll_into_view(s.nodes[index].obj);
 }
 
+// 今日视图没有节点时（空状态）没有可选行，↑↓ 改为滚动内容：空状态说明比可见区高，
+// 不滚的话最后一行"也可以在手机配置页…"会被裁掉，而三键设备没有别的滚动途径。
+static void today_scroll(int direction)
+{
+    if (!s.page.content) return;
+    lv_obj_scroll_by(s.page.content, 0, (direction > 0) ? -40 : 40, LV_ANIM_OFF);
+}
+
 // 结构可能已变：清空后按当前数据重建整个今日标签页。
 static void build_today(void)
 {
@@ -276,7 +284,10 @@ static void build_today(void)
         ui_empty_create(v, "还没有作息表",
                         "到\u201c设置\u201d里一键套用走读或住校模板，"
                         "也可以在手机配置页粘贴自己的作息文本");
-        ui_page_set_hint("长按↓ 到设置套用模板  长按OK 返回");
+        // 提示必须与真实按键一致：长按↑ 才是在本页直接套用走读模板（见
+        // page_routine_key 今日分支），长按↓ 只是切到"设置"标签页。原提示只写了
+        // "长按↓ 到设置套用模板"，和短按 OK 弹出的"长按↑ 套用模板"互相矛盾。
+        ui_page_set_hint("长按↑ 套用模板  长按↓ 到设置  长按OK 返回");
         return;
     }
 
@@ -288,7 +299,7 @@ static void build_today(void)
     if (s.focus < 0) s.focus = current_node_index(day);
     render_today_rows();
     today_focus(s.focus);
-    ui_page_set_hint("↑↓ 滚动  OK 定位当前  长按↓ 换页");
+    ui_page_set_hint("↑↓ 滚动  OK 定位当前  长按↓ 换页  长按OK 返回");
 }
 
 // ---------------------------------------------------------------------------
@@ -343,7 +354,7 @@ static void build_week(void)
 
     int wd = today_weekday();
     week_select(wd == 0 ? 6 : wd - 1);
-    ui_page_set_hint("↑↓ 选择  OK 读出概要  长按↓ 换页");
+    ui_page_set_hint("↑↓ 选择  OK 读出概要  长按↓ 换页  长按OK 返回");
 }
 
 // ---------------------------------------------------------------------------
@@ -388,7 +399,7 @@ static void build_opts(void)
     }
     opt_refresh();
     opt_select(s.opt_sel);
-    ui_page_set_hint("↑↓ 选择  OK 执行  长按↓ 换页");
+    ui_page_set_hint("↑↓ 选择  OK 执行  长按↓ 换页  长按OK 返回");
 }
 
 // ---------------------------------------------------------------------------
@@ -455,7 +466,7 @@ static void build_edit(void)
     }
 
     edit_select(s.edit_sel);
-    ui_page_set_hint("↑↓ 选择  OK 换天/编辑  长按↑ 删除  长按↓ 换页");
+    ui_page_set_hint("↑↓ 选择  OK 换天/编辑  长按↑ 删除  长按↓ 换页  长按OK 返回");
 }
 
 // 第 0 行：按界面顺序"周一..周日"轮换编辑目标日。数据星期用 RT_WEEK_ORDER 反查，
@@ -732,6 +743,15 @@ void page_routine_key(bsp_btn_t btn, bsp_btn_ev_t ev)
             return;
         }
         if (ev != BSP_BTN_CLICK) return;
+        if (s.node_count <= 0) {
+            // 空状态：没有可选行，↑↓ 让给滚动，OK 给出"怎么才有作息"的指引。
+            if (btn == BSP_BTN_UP || btn == BSP_BTN_DOWN) {
+                today_scroll(btn == BSP_BTN_DOWN ? 1 : -1);
+            } else if (btn == BSP_BTN_OK) {
+                ui_hint_flash("今日无作息，长按↑ 套用模板", 1800);
+            }
+            return;
+        }
         if (btn == BSP_BTN_UP) today_focus(s.focus - 1);
         else if (btn == BSP_BTN_DOWN) today_focus(s.focus + 1);
         else if (btn == BSP_BTN_OK) {

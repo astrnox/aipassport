@@ -213,7 +213,9 @@ static void build_unlock(void)
     lv_obj_set_pos(note, 12, 164);
 
     unlock_refresh();
-    ui_page_set_hint("↑↓ 敲击  OK 解锁  长按OK 返回");
+    // 长按↑退格 / 长按↓清空（空着时是恢复码入口）都是 unlock_key 里已实现的动作，
+    // 原先只写在卡内说明里，提示条没提。提示条才是用户随时能看到的按键约定，补齐。
+    ui_page_set_hint("↑↓ 敲击  OK 解锁  长按↑ 退格  长按↓ 清空  长按OK 返回");
 }
 
 static void try_unlock(void)
@@ -294,7 +296,8 @@ static void build_list(void)
     }
     list_select();
     s.built_count = v->count;
-    ui_page_set_hint("↑↓ 选择  OK 查看  长按↑ 删除  长按↓ 模式");
+    // 列表页长按 OK 会退出密码本（见 page_vault_key），原先提示没写，用户以为出不去。
+    ui_page_set_hint("↑↓ 选择  OK 查看  长按↑ 删除  长按↓ 模式  长按OK 返回");
 }
 
 static void remove_confirm(bool confirmed, void *user)
@@ -527,7 +530,7 @@ static void build_gesture(void)
     s.gesture_count = ui_label_create(card, "", ui_font_body, ui_c_accent());
     lv_obj_set_pos(s.gesture_count, 12, 120);
     gesture_refresh();
-    ui_page_set_hint("↑↓ 敲击  OK 确认  长按OK 取消");
+    ui_page_set_hint("↑↓ 敲击  OK 确认  长按↑ 退格  长按↓ 清空  长按OK 取消");
 }
 
 static void confirm_gesture(void)
@@ -586,9 +589,11 @@ static void close_overlay(void)
 static void overlay_hint(lv_obj_t *ov, const char *text)
 {
     lv_obj_t *lbl = ui_label_create(ov, text, ui_font_hint, ui_c_dim());
-    lv_obj_set_width(lbl, UI_W);
+    lv_obj_set_width(lbl, UI_W - 8);
     lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_pos(lbl, 0, UI_H - UI_HINT_H);
+    // 与页面提示条同宽同高：允许折行，长按键说明才不会被裁掉。
+    lv_label_set_long_mode(lbl, LV_LABEL_LONG_WRAP);
+    lv_obj_set_pos(lbl, 4, UI_H - UI_HINT_H);
 }
 
 static void open_overlay(vault_overlay_t kind, vault_view_t back)

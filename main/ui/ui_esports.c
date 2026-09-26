@@ -55,10 +55,11 @@ static const char *const ROLE_NAMES[APP_ROLE_UNKNOWN + 1] = {
 };
 
 // 底部提示条文案。受 240px 宽度限制，尽量压缩空格但保留每个按键含义。
-static const char *const HINT_SCHEDULE  = "↑↓选 OK详情 长按↑刷新 长按OK返回";
-static const char *const HINT_STANDINGS = "↑↓切赛区 长按↑↓切页 长按OK返回";
+// 每一条都必须与 page_esports_key 里真实存在的分支一一对应，不能写没实现的按键。
+static const char *const HINT_SCHEDULE  = "↑↓选 OK详情 长按↑刷新 长按↓切页 长按OK返回";
+static const char *const HINT_STANDINGS = "↑↓滚动 OK换赛区 长按↑↓切页 长按OK返回";
 static const char *const HINT_TEAMS     = "↑↓选 OK关注 长按↑↓切页 长按OK返回";
-static const char *const HINT_DETAIL    = "长按↑↓切页 长按OK返回";
+static const char *const HINT_DETAIL    = "↑↓滚动 长按↑↓切页 长按OK返回";
 
 // 战队列表行：积分榜缓存与赛程去重两种来源统一成同一结构，便于选择与关注。
 typedef struct {
@@ -717,7 +718,10 @@ static void toggle_follow(void)
     ui_hint_flash(on ? "已关注" : "已取消关注", 1200);
 }
 
-// 短按 OK 的主操作：赛程进入详情、战队切换关注、积分榜无主操作。
+// 短按 OK 的主操作：赛程进入详情、战队切换关注、积分榜换赛区。
+// 积分榜原来把 ↑↓ 用来切赛区，而一个赛区最多 32 支战队、屏幕只放得下约 5 行，
+// 结果第 6 名之后既看不到也滚不到。三键设备上长按 ↑↓ 已被"切页"占用，所以把
+// 换赛区挪到本来空着的短按 OK，↑↓ 让给滚动。
 static void activate(void)
 {
     if (s.tab == TAB_SCHEDULE) {
@@ -734,19 +738,29 @@ static void activate(void)
         s.detail_sig_fetched = c->detail.fetched_utc;
     } else if (s.tab == TAB_TEAMS) {
         toggle_follow();
-    }
-}
-
-// 根列表下短按 UP/DOWN：赛程/战队移动选中行，积分榜切换赛区。
-static void move_selection(int delta)
-{
-    if (s.tab == TAB_STANDINGS) {
+    } else if (s.tab == TAB_STANDINGS) {
         int n = app_net_league_count();
         if (n <= 0) return;
-        s.league_idx = (s.league_idx + delta + n) % n;
+        s.league_idx = (s.league_idx + 1) % n;
         const char *slug = app_net_league_slug(s.league_idx);
         app_net_standings_fetch(slug);
         render();
+    }
+}
+
+// 把根列表内容上下滚一格（约一行高）。列表比屏幕长时靠它翻看；不溢出时滚动量
+// 被 LVGL 夹到 0，不会有副作用。
+static void scroll_rows(int direction)
+{
+    if (!s.page.content) return;
+    lv_obj_scroll_by(s.page.content, 0, (direction > 0) ? -40 : 40, LV_ANIM_OFF);
+}
+
+// 根列表下短按 UP/DOWN：赛程/战队移动选中行，积分榜滚动列表。
+static void move_selection(int delta)
+{
+    if (s.tab == TAB_STANDINGS) {
+        scroll_rows(delta);
         return;
     }
     if (s.row_count <= 0) return;
@@ -793,6 +807,8 @@ void page_esports_key(bsp_btn_t btn, bsp_btn_ev_t ev)
 
     if (s.in_detail) {
         // 详情视图：长按 UP/DOWN 切子页，长按 OK 返回赛程列表。
+        // 短按 UP/DOWN 用来滚动正文——阵容与选手子页各有 10 行选手，比一屏高得多，
+        // 原先短按被直接丢掉，用户既看不到 B 队也滚不动，只觉得"按键没反应"。
         if (ev == BSP_BTN_LONG && btn == BSP_BTN_OK) {
             s.in_detail = false;
             render();
@@ -802,6 +818,8 @@ void page_esports_key(bsp_btn_t btn, bsp_btn_ev_t ev)
         } else if (ev == BSP_BTN_LONG && btn == BSP_BTN_DOWN) {
             s.detail_tab = (s.detail_tab + 1) % DETAIL_TAB_COUNT;
             render();
+        } else if (ev == BSP_BTN_CLICK && (btn == BSP_BTN_UP || btn == BSP_BTN_DOWN)) {
+            scroll_rows(btn == BSP_BTN_DOWN ? 1 : -1);
         }
         return;
     }

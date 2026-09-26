@@ -444,6 +444,15 @@ static void quick_focus(int index)
     }
 }
 
+// 快捷面板几何。卡片高度由行数推出来，而不是写死一个数：原先写死 196，五行按
+// 38 + i*36 排到最后一行下沿已到 214，第五项"免打扰"整个落在卡片外被裁掉，
+// 用户怎么按都看不到——行数一多就会复发，所以这里让它随 HOME_QUICK_N 自动长高。
+#define QUICK_TOP      38
+#define QUICK_ROW_H    32
+#define QUICK_STEP     36
+#define QUICK_PAD_B    8
+#define QUICK_CARD_H   (QUICK_TOP + (HOME_QUICK_N - 1) * QUICK_STEP + QUICK_ROW_H + QUICK_PAD_B)
+
 void home_quick_open(void)
 {
     if (s.quick) return;
@@ -458,16 +467,17 @@ void home_quick_open(void)
     lv_obj_set_style_radius(ov, 0, 0);
     lv_obj_set_style_pad_all(ov, 0, 0);
 
-    lv_obj_t *card = ui_card_create(ov, 16, 62, UI_W - 32, 196, ui_c_accent());
+    lv_obj_t *card = ui_card_create(ov, 16, (UI_H - QUICK_CARD_H) / 2, UI_W - 32,
+                                    QUICK_CARD_H, ui_c_accent());
 
     lv_obj_t *title = ui_label_create(card, "快捷面板", ui_font_title, ui_c_text());
     lv_obj_set_pos(title, 12, 8);
 
     for (int i = 0; i < HOME_QUICK_N; i++) {
         ui_row_t row = ui_row_create(card, QUIET_NAMES[i], "");
-        lv_obj_set_pos(row.obj, 8, 38 + i * 36);
+        lv_obj_set_pos(row.obj, 8, QUICK_TOP + i * QUICK_STEP);
         lv_obj_set_width(row.obj, UI_W - 48);
-        lv_obj_set_height(row.obj, 32);
+        lv_obj_set_height(row.obj, QUICK_ROW_H);
         s.quick_rows[i] = row.obj;
         s.quick_values[i] = row.value;
     }
