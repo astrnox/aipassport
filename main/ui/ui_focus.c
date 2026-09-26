@@ -33,11 +33,19 @@
 #include <string.h>
 
 #define FOCUS_CW       (UI_W - 2 * UI_MARGIN_X)     // 224
-#define POMO_CARD_H    84
+#define POMO_CARD_H    94
 #define REMINDER_PRESET_DAILY   0x7F                // bit0=周日 .. bit6=周六
 #define REMINDER_PRESET_WORKDAY 0x3E                // 周一至周五
 
 static const char *const REPEAT_NAMES[3] = { "每天", "工作日", "一次性" };
+
+// 番茄钟预设：专注/短休息分钟对。最后一项"自定义"不套用数值，而是提示改用长按↑ 逐项设置。
+static const int POMO_PRESETS[][2] = { { 25, 5 }, { 45, 10 }, { 50, 10 }, { 90, 20 } };
+#define POMO_PRESET_COUNT ((int)(sizeof(POMO_PRESETS) / sizeof(POMO_PRESETS[0])))
+static const char *const POMO_PRESET_NAMES[POMO_PRESET_COUNT + 1] = {
+    "25/5", "45/10", "50/10", "90/20", "自定义",
+};
+static const char *const POMO_AUTO_NAMES[2] = { "关闭", "开启" };
 
 static struct {
     ui_page_t page;
@@ -47,6 +55,7 @@ static struct {
     lv_obj_t *pomo_state;
     lv_obj_t *pomo_bar;
     lv_obj_t *pomo_info;
+    lv_obj_t *pomo_stats;
 
     lv_obj_t *section;          // "提醒 N/16"
     lv_obj_t *list;
@@ -56,7 +65,7 @@ static struct {
     int       focus;            // 0 = 番茄钟卡，1..count = 提醒行，count+1 = 新增行
     int       sig;              // 提醒列表签名，变化时重建行文本
     int       edit_index;       // 正在编辑的提醒下标
-    int       edit_values[3];
+    int       edit_values[5];   // 提醒用前 3 项，番茄钟设置用全部 5 项
 } s;
 
 // ---------------------------------------------------------------------------
@@ -75,22 +84,33 @@ static void render_pomodoro(void)
     lv_label_set_text_fmt(s.pomo_time, "%02d:%02d", remain / 60, remain % 60);
 
     lv_label_set_text(s.pomo_state, app_pomodoro_state_name(p->state));
-    lv_obj_set_style_text_color(s.pomo_state,
-        lv_color_hex(p->state == APP_POMO_FOCUS ? ui_c_accent()
-                   : p->state == APP_POMO_BREAK ? ui_c_ok()
-                   : p->state == APP_POMO_PAUSED ? ui_c_soon()
-                   : ui_c_dim()), 0);
+    // 沿用主题里的语义色，不新增颜色：专注=强调色，两种休息=正常绿，暂停=即将橙，空闲=灰。
+    uint32_t state_color;
+    switch (p->state) {
+    case APP_POMO_FOCUS:      state_color = ui_c_accent(); break;
+    case APP_POMO_BREAK:      state_color = ui_c_ok();     break;
+    case APP_POMO_LONG_BREAK: state_color = ui_c_ok();     break;
+    case APP_POMO_PAUSED:     state_color = ui_c_soon();   break;
+    default:                  state_color = ui_c_dim();    break;
+    }
+    lv_obj_set_style_text_color(s.pomo_state, lv_color_hex(state_color), 0);
 
     ui_progress_set(s.pomo_bar, app_pomodoro_progress_permille(p));
 
-    int round = p->completed_focus + (p->state == APP_POMO_FOCUS ? 1 : 0);
-    if (p->state == APP_POMO_IDLE && round == 0) {
-        lv_label_set_text_fmt(s.pomo_info, "专注 %d 分钟 · 休息 %d 分钟",
-                              p->focus_minutes, p->break_minutes);
+    // 第一行给长休息周期：还没开始过时改为三段时长摘要，方便一眼确认当前设置。
+    if (p->state == APP_POMO_IDLE && p->completed_focus == 0 &&
+        p->cycles_since_long_break == 0) {
+        lv_label_set_text_fmt(s.pomo_info, "专注 %d · 短休 %d · 长休 %d 分",
+                              p->focus_minutes, p->break_minutes, p->long_break_minutes);
     } else {
-        lv_label_set_text_fmt(s.pomo_info, "第 %d 轮 · 今日 %d 分钟",
-                              round < 1 ? 1 : round, p->focus_minutes_today);
+        lv_label_set_text_fmt(s.pomo_info, "本轮 %d/%d 段后长休",
+                              p->cycles_since_long_break, p->cycles_per_long_break);
     }
+
+    // 第二行统计：今日与历史累计分开写，避免把累计数字误读成今日成绩。
+    lv_label_set_text_fmt(s.pomo_stats, "今日 %d 分 %d 段 · 累计 %d 段 %d 分",
+                          p->focus_minutes_today, p->today_sessions,
+                          p->total_focus_sessions, p->total_focus_minutes);
 }
 
 static void render_pomodoro_focus(void)
@@ -220,7 +240,7 @@ static void update_hint(void)
 {
     app_reminder_list_t *list = app_state_reminders();
     if (s.focus == 0) {
-        ui_page_set_hint("OK 开始/暂停  长按↑ 时长  长按OK 返回");
+        ui_page_set_hint("OK 开始/暂停  长按↑↓ 设置/预设  长按OK 返回");
     } else if (s.focus == list->count + 1) {
         ui_page_set_hint("OK 新增提醒  长按OK 返回");
     } else {
@@ -377,19 +397,36 @@ static void reminder_add(void)
     ui_hint_flash("已新增 08:00 提醒", 1500);
 }
 
+// 番茄钟设置：长按↑ 打开全部时长/循环/接续字段。字段偏多，名字压到 2~3 字以适配 5 列。
 static void pomodoro_edit_done(bool saved, void *user)
 {
     (void)user;
     if (!saved) return;
 
     app_pomodoro_t *p = app_state_pomodoro();
-    if (!app_pomodoro_set_durations(p, s.edit_values[0], s.edit_values[1])) {
-        ui_hint_flash("运行中不可改时长", 1500);
+
+    // 自动接续不影响当前段长度，任何状态下都可改；时长与循环只有空闲时逻辑层才接受。
+    bool changed = app_pomodoro_set_auto_next(p, s.edit_values[4] != 0);
+    if (p->state == APP_POMO_IDLE) {
+        bool dur = app_pomodoro_set_durations(p, s.edit_values[0], s.edit_values[1]);
+        bool lng = app_pomodoro_set_long_break(p, s.edit_values[2], s.edit_values[3]);
+        changed = dur || lng || changed;
+        if (!changed) {
+            ui_hint_flash("设置没有变化", 1500);
+            return;
+        }
+        app_state_save_pomodoro();
+        render_pomodoro();
+        ui_hint_flash("设置已保存", 1500);
         return;
     }
-    app_state_save_pomodoro();
-    render_pomodoro();
-    ui_hint_flash("时长已保存", 1500);
+
+    // 运行中被逻辑层拒绝时如实告知，而不是静默失败让人以为改成功了。
+    if (changed) {
+        app_state_save_pomodoro();
+        render_pomodoro();
+    }
+    ui_hint_flash(changed ? "计时中：仅接续已更新" : "计时中不可改时长与循环", 2000);
 }
 
 static void pomodoro_edit_open(void)
@@ -399,13 +436,69 @@ static void pomodoro_edit_open(void)
 
     s.edit_values[0] = p->focus_minutes;
     s.edit_values[1] = p->break_minutes;
+    s.edit_values[2] = p->long_break_minutes;
+    s.edit_values[3] = p->cycles_per_long_break;
+    s.edit_values[4] = p->auto_next ? 1 : 0;
 
-    static const ui_timeedit_field_t fields[2] = {
-        { "专注分", 1, 120, 5, NULL },
-        { "休息分", 1, 60,  5, NULL },
+    static const ui_timeedit_field_t fields[5] = {
+        { "专注", APP_POMO_FOCUS_MIN_MIN, APP_POMO_FOCUS_MIN_MAX, 5, NULL },
+        { "短休", APP_POMO_BREAK_MIN_MIN, APP_POMO_BREAK_MIN_MAX, 5, NULL },
+        { "长休", APP_POMO_LONG_MIN_MIN,  APP_POMO_LONG_MIN_MAX,  5, NULL },
+        { "循环", APP_POMO_CYCLES_MIN,    APP_POMO_CYCLES_MAX,    1, NULL },
+        { "接续", 0, 1, 1, POMO_AUTO_NAMES },
     };
-    ui_timeedit_open(s.page.scr, "番茄钟时长", fields, s.edit_values, 2,
+    ui_timeedit_open(s.page.scr, "番茄钟设置", fields, s.edit_values, 5,
                      pomodoro_edit_done, NULL);
+}
+
+// 当前专注/短休息时长命中的预设下标；都不命中则返回"自定义"。
+static int preset_index_of(int focus_minutes, int break_minutes)
+{
+    for (int i = 0; i < POMO_PRESET_COUNT; i++) {
+        if (POMO_PRESETS[i][0] == focus_minutes && POMO_PRESETS[i][1] == break_minutes) {
+            return i;
+        }
+    }
+    return POMO_PRESET_COUNT;
+}
+
+static void pomodoro_preset_done(bool saved, void *user)
+{
+    (void)user;
+    if (!saved) return;
+
+    int index = s.edit_values[0];
+    if (index >= POMO_PRESET_COUNT) {
+        ui_hint_flash("自定义请长按↑ 逐项设置", 2000);
+        return;
+    }
+
+    app_pomodoro_t *p = app_state_pomodoro();
+    if (!app_pomodoro_set_durations(p, POMO_PRESETS[index][0], POMO_PRESETS[index][1])) {
+        ui_hint_flash(p->state == APP_POMO_IDLE ? "与当前设置相同" : "计时中不可改时长", 1800);
+        return;
+    }
+    app_state_save_pomodoro();
+    render_pomodoro();
+    ui_hint_flash("已套用预设", 1500);
+}
+
+static void pomodoro_preset_open(void)
+{
+    if (ui_timeedit_active()) return;
+    app_pomodoro_t *p = app_state_pomodoro();
+    if (p->state != APP_POMO_IDLE) {
+        ui_hint_flash("计时中不可改时长", 1800);
+        return;
+    }
+
+    s.edit_values[0] = preset_index_of(p->focus_minutes, p->break_minutes);
+
+    static const ui_timeedit_field_t fields[1] = {
+        { "预设", 0, POMO_PRESET_COUNT, 1, POMO_PRESET_NAMES },
+    };
+    ui_timeedit_open(s.page.scr, "番茄钟预设", fields, s.edit_values, 1,
+                     pomodoro_preset_done, NULL);
 }
 
 static void activate(void)
@@ -446,11 +539,11 @@ static void activate(void)
 void page_focus_enter(void)
 {
     memset(&s, 0, sizeof(s));
-    s.page = ui_page_create("OK 开始/暂停  长按↑ 时长  长按OK 返回");
+    s.page = ui_page_create("OK 开始/暂停  长按↑↓ 设置/预设  长按OK 返回");
 
     ui_header_create(s.page.content, "专注与效率", "", NULL, NULL);
 
-    // 番茄钟卡：大号剩余时间 + 阶段 + 进度条 + 轮次统计。
+    // 番茄钟卡：大号剩余时间 + 阶段 + 进度条 + 长休周期 + 统计。
     s.pomo_card = ui_card_create(s.page.content, 0, 0, FOCUS_CW, POMO_CARD_H,
                                  ui_c_accent());
     s.pomo_time = ui_label_create(s.pomo_card, "25:00", ui_font_display, ui_c_text());
@@ -460,7 +553,9 @@ void page_focus_enter(void)
     s.pomo_bar = ui_progress_create(s.pomo_card, FOCUS_CW - 24, 6, ui_c_accent());
     lv_obj_set_pos(s.pomo_bar, 12, 48);
     s.pomo_info = ui_label_create(s.pomo_card, "", ui_font_hint, ui_c_dim());
-    lv_obj_set_pos(s.pomo_info, 12, 62);
+    lv_obj_set_pos(s.pomo_info, 12, 60);
+    s.pomo_stats = ui_label_create(s.pomo_card, "", ui_font_hint, ui_c_dim());
+    lv_obj_set_pos(s.pomo_stats, 12, 75);
 
     s.section = ui_label_create(s.page.content, "提醒", ui_font_hint, ui_c_dim());
     s.list = ui_list_create(s.page.content);
@@ -501,7 +596,8 @@ void page_focus_key(bsp_btn_t btn, bsp_btn_ev_t ev)
     }
 
     if (ev == BSP_BTN_LONG && btn == BSP_BTN_DOWN) {
-        if (s.focus >= 1 && s.focus <= app_state_reminders()->count) {
+        if (s.focus == 0) pomodoro_preset_open();
+        else if (s.focus >= 1 && s.focus <= app_state_reminders()->count) {
             reminder_delete_open();
         }
         return;

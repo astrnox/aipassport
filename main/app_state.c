@@ -8,15 +8,28 @@
 // 时间约定：设备没有 RTC 电池，重启后时钟会丢失。这里用"单调时钟 + 基准偏移"表达
 // 墙钟：epoch_base 是 uptime 为 0 时对应的 Unix 秒。重启后从 NVS 恢复上次已知时间，
 // 但标记为未同步，直到 NTP 或手机/手动再次校准，避免把过期时间伪装成已同步。
+//
+// 密钥约定：动态口令的密钥必须在开机后自动可用（用户不可能每次开机先解一次锁），
+// 因此不能像密码本那样用口令加密，只能用"设备绑定"：eFuse MAC 与本机随机种子一起喂进
+// KDF 得到主密钥，密钥在 NVS 里以 app_secret 密封容器保存。同一份 NVS 换到另一台设备
+// 会因 MAC 不同而解不开。安全边界详见 logic/app_secret.h——它挡不住能整片读取 Flash
+// 与 eFuse 的攻击者，那种强度需要出厂烧录 Flash 加密密钥并启用安全启动。
 #include "app_state.h"
 
 #include "bsp_battery.h"
 
+#include "logic/app_crypto.h"
+#include "logic/app_secret.h"
+
 #include "esp_log.h"
+#include "esp_mac.h"
+#include "esp_random.h"
 #include "esp_timer.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 
+#include <stddef.h>
+#include <stdlib.h>
 #include <string.h>
 
 static const char *TAG = "app_state";
@@ -25,11 +38,40 @@ static const char *TAG = "app_state";
 #define BLOB_CHUNK    3000
 #define TOTP_STORE_MAX APP_TOTP_MAX_ACCOUNTS
 
-// TOTP 账户表需要整体持久化，用一个定长包装结构承载。
+// TOTP 账户表在内存里的形态（密钥为明文，只在 RAM 中）。
 typedef struct {
     int count;
     app_totp_account_t items[TOTP_STORE_MAX];
 } totp_store_t;
+
+// ---------------------------------------------------------------------------
+// 动态口令的落盘形态
+// ---------------------------------------------------------------------------
+
+// 设备随机种子长度。它本身不是密钥，只是让"只抄走 NVS 有人在别处拿到的一份数据"行不通：
+// 种子与 MAC 一起才派生出主密钥。
+#define TOTP_SEED_LEN 32
+#define TOTP_BLOB_MAGIC   0x544F5450u   // "PTOT"
+#define TOTP_BLOB_VERSION 1
+
+// 单个密钥密封后的最大长度：明文上限 + 容器开销。
+#define TOTP_SEALED_MAX (APP_TOTP_MAX_SECRET_BYTES + APP_SECRET_OVERHEAD)
+
+typedef struct {
+    char     label[sizeof(((app_totp_account_t *)0)->label)];
+    int      digits;
+    int      period;
+    uint8_t  algo;
+    uint16_t sealed_len;                        // 0 表示该账户没有密钥
+    uint8_t  sealed[TOTP_SEALED_MAX];
+} totp_sealed_account_t;
+
+typedef struct {
+    uint32_t magic;
+    uint16_t version;
+    uint16_t count;
+    totp_sealed_account_t items[TOTP_STORE_MAX];
+} totp_blob_t;
 
 // 2026-01-01 00:00:00 +08:00 作为"时间未设定"时的占位基准。
 #define DEFAULT_EPOCH 1767196800LL
@@ -42,6 +84,7 @@ typedef struct {
     app_pomodoro_t      pomodoro;
     app_esport_cache_t  esports;
     totp_store_t        totp;
+    app_vault_t         vault;
 
     app_net_state_t net;
     char            ssid[33];
@@ -52,6 +95,10 @@ typedef struct {
 } app_runtime_t;
 
 static app_runtime_t s;
+
+// 密码本容器序列化缓冲。放静态区而不是栈上：加密本上限约 4.7KB，栈上再叠上
+// 本次调用的其它局部变量容易顶到任务栈上限。
+static uint8_t s_vault_blob[APP_VAULT_CONTAINER_MAX];
 
 // ---------------------------------------------------------------------------
 // 时间换算（公历与 Unix 秒互转，避免依赖 newlib 的时区表）
@@ -198,6 +245,102 @@ static void blob_erase(const char *key)
 }
 
 // ---------------------------------------------------------------------------
+// 动态口令的设备绑定加密
+// ---------------------------------------------------------------------------
+
+// 主密钥 = KDF(eFuse MAC, 本机随机种子)。种子只在首次需要时生成并写入 NVS，之后固定；
+// 换设备或擦掉 NVS 后旧密文都解不开，这是设计意图而不是故障。
+static bool totp_device_key(uint8_t out[APP_SECRET_KEY_LEN])
+{
+    uint8_t mac[6];
+    if (esp_efuse_mac_get_default(mac) != ESP_OK) {
+        ESP_LOGE(TAG, "读取 eFuse MAC 失败，无法派生设备密钥");
+        return false;
+    }
+
+    uint8_t seed[TOTP_SEED_LEN];
+    size_t got = 0;
+    if (blob_load("secseed", seed, sizeof(seed), &got) != ESP_OK || got != sizeof(seed)) {
+        esp_fill_random(seed, sizeof(seed));
+        if (blob_save("secseed", seed, sizeof(seed)) != ESP_OK) {
+            ESP_LOGE(TAG, "设备随机种子写入失败");
+            app_crypto_zero(seed, sizeof(seed));
+            return false;
+        }
+    }
+
+    app_secret_device_key(mac, sizeof(mac), seed, sizeof(seed), out);
+    app_crypto_zero(seed, sizeof(seed));
+    return true;
+}
+
+// 载入密封账户表。单个账户解密失败只跳过它，不整表放弃——同一台设备上其它口令还是
+// 好的，没理由跟着一起丢。
+static bool totp_load_sealed(const totp_blob_t *blob)
+{
+    uint8_t key[APP_SECRET_KEY_LEN];
+    if (!totp_device_key(key)) return false;
+
+    int count = (int)blob->count;
+    if (count > TOTP_STORE_MAX) count = TOTP_STORE_MAX;
+
+    int kept = 0;
+    for (int i = 0; i < count; i++) {
+        const totp_sealed_account_t *src = &blob->items[i];
+        app_totp_account_t acct;
+        memset(&acct, 0, sizeof(acct));
+        memcpy(acct.label, src->label, sizeof(acct.label));
+        acct.digits = src->digits;
+        acct.period = src->period;
+        acct.algo = src->algo;
+
+        if (src->sealed_len > 0 &&
+            !app_secret_open(key, src->sealed, src->sealed_len, acct.secret,
+                             sizeof(acct.secret), &acct.secret_len)) {
+            ESP_LOGW(TAG, "第 %d 个动态口令无法解密，已跳过", i + 1);
+            continue;
+        }
+        s.totp.items[kept++] = acct;
+    }
+
+    s.totp.count = kept;
+    app_crypto_zero(key, sizeof(key));
+    return true;
+}
+
+// 载入动态口令。新格式在 NVS 里只有密文；若读到旧版本固件留下的明文 blob，就照读，
+// 并立刻按新格式重写一次，让 Flash 里不再留明文密钥。
+static void totp_load(void)
+{
+    totp_blob_t *blob = calloc(1, sizeof(*blob));
+    if (!blob) {
+        ESP_LOGE(TAG, "动态口令载入缓冲不足");
+        return;
+    }
+
+    size_t got = 0;
+    esp_err_t err = blob_load("totp", blob, sizeof(*blob), &got);
+    bool migrated = false;
+
+    if (err == ESP_OK && got == sizeof(*blob) &&
+        blob->magic == TOTP_BLOB_MAGIC && blob->version == TOTP_BLOB_VERSION) {
+        if (!totp_load_sealed(blob)) {
+            ESP_LOGW(TAG, "动态口令无法解密，本次以空表运行");
+        }
+    } else if (err == ESP_OK && got == sizeof(s.totp)) {
+        memcpy(&s.totp, blob, sizeof(s.totp));
+        if (s.totp.count < 0 || s.totp.count > TOTP_STORE_MAX) s.totp.count = 0;
+        migrated = true;
+    }
+
+    free(blob);
+    if (migrated) {
+        ESP_LOGI(TAG, "动态口令原为明文存储，已重新加密落盘");
+        app_state_save_totp();
+    }
+}
+
+// ---------------------------------------------------------------------------
 // 默认值
 // ---------------------------------------------------------------------------
 
@@ -228,6 +371,7 @@ static void runtime_defaults(void)
     app_pomodoro_init(&s.pomodoro);
     memset(&s.esports, 0, sizeof(s.esports));
     memset(&s.totp, 0, sizeof(s.totp));
+    app_vault_init(&s.vault);
     s.net = APP_NET_OFF;
     s.ssid[0] = '\0';
     s.battery = -1;
@@ -269,8 +413,13 @@ esp_err_t app_state_init(void)
             got != sizeof(s.reminders)) {
             app_reminder_list_init(&s.reminders);
         }
-        if (blob_load("pomodoro", &s.pomodoro, sizeof(s.pomodoro), &got) != ESP_OK ||
-            got != sizeof(s.pomodoro)) {
+        // 番茄钟结构在迭代中追加过字段（末尾的免打扰开关），因此旧的 blob 只是当前
+        // 结构的前缀。先填默认值再让旧前缀覆盖它，于是新字段拿默认值、旧统计不丢。
+        app_pomodoro_init(&s.pomodoro);
+        size_t pomo_len = 0;
+        if (blob_load("pomodoro", &s.pomodoro, sizeof(s.pomodoro), &pomo_len) != ESP_OK ||
+            pomo_len < offsetof(app_pomodoro_t, do_not_disturb) ||
+            pomo_len > sizeof(s.pomodoro)) {
             app_pomodoro_init(&s.pomodoro);
         }
         if (blob_load("esports", &s.esports, sizeof(s.esports), &got) == ESP_OK &&
@@ -279,9 +428,16 @@ esp_err_t app_state_init(void)
         } else {
             memset(&s.esports, 0, sizeof(s.esports));
         }
-        if (blob_load("totp", &s.totp, sizeof(s.totp), &got) != ESP_OK ||
-            got != sizeof(s.totp)) {
-            memset(&s.totp, 0, sizeof(s.totp));
+        totp_load();
+
+        // 密码本：容器长度可变，按记录的长度读出来再解析。解析失败会被重置成空本，
+        // 因此损坏或旧版本的字节不会留下半个可用的密码本。
+        size_t vault_len = 0;
+        if (blob_load("vault", s_vault_blob, sizeof(s_vault_blob), &vault_len) == ESP_OK &&
+            vault_len > 0) {
+            if (app_vault_deserialize(&s.vault, s_vault_blob, vault_len) != APP_VAULT_OK) {
+                ESP_LOGW(TAG, "密码本容器无法解析，已重置为空本");
+            }
         }
 
         // 恢复上次已知的墙钟。重启后时钟不可信，故标记为未同步。
@@ -297,9 +453,9 @@ esp_err_t app_state_init(void)
     }
 
     s.loaded = true;
-    ESP_LOGI(TAG, "状态载入完成: 主题=%d 工牌=%d 提醒=%d 口令=%d 赛事缓存=%d",
+    ESP_LOGI(TAG, "状态载入完成: 主题=%d 工牌=%d 提醒=%d 口令=%d 密码本=%d(%s) 赛事缓存=%d",
              s.settings.theme, s.badges.count, s.reminders.count, s.totp.count,
-             s.esports.valid);
+             s.vault.count, app_vault_mode_name(s.vault.mode), s.esports.valid);
     return ESP_OK;
 }
 
@@ -393,6 +549,7 @@ app_routine_t      *app_state_routine(void)    { return &s.routine; }
 app_reminder_list_t *app_state_reminders(void) { return &s.reminders; }
 app_pomodoro_t     *app_state_pomodoro(void)   { return &s.pomodoro; }
 app_esport_cache_t *app_state_esports(void)    { return &s.esports; }
+app_vault_t        *app_state_vault(void)      { return &s.vault; }
 
 int app_state_routine_slot(void)
 {
@@ -457,10 +614,84 @@ int app_state_badge_selected(void)
 void app_state_save_settings(void) { blob_save("settings", &s.settings, sizeof(s.settings)); }
 void app_state_save_badges(void)   { blob_save("badges", &s.badges, sizeof(s.badges)); }
 void app_state_save_routine(void)  { blob_save("routine", &s.routine, sizeof(s.routine)); }
-void app_state_save_totp(void)     { blob_save("totp", &s.totp, sizeof(s.totp)); }
 void app_state_save_reminders(void){ blob_save("reminders", &s.reminders, sizeof(s.reminders)); }
 void app_state_save_pomodoro(void) { blob_save("pomodoro", &s.pomodoro, sizeof(s.pomodoro)); }
 void app_state_save_esports(void)  { blob_save("esports", &s.esports, sizeof(s.esports)); }
+
+// 动态口令的落盘必须整体重排（密钥要逐条密封），因此不直接 dump 内存结构，而是先
+// 组装密封容器再写。缓冲从堆上取：容器约 1.8KB，压在任务栈上不划算。
+void app_state_save_totp(void)
+{
+    uint8_t key[APP_SECRET_KEY_LEN];
+    if (!totp_device_key(key)) {
+        // 宁可保持 NVS 原样，也不退化成写明文。密钥此前能读出来时这里几乎不会发生。
+        ESP_LOGE(TAG, "无法派生设备密钥，动态口令未写入");
+        return;
+    }
+
+    totp_blob_t *blob = calloc(1, sizeof(*blob));
+    if (!blob) {
+        app_crypto_zero(key, sizeof(key));
+        ESP_LOGE(TAG, "动态口令序列化缓冲不足");
+        return;
+    }
+
+    blob->magic = TOTP_BLOB_MAGIC;
+    blob->version = TOTP_BLOB_VERSION;
+    int count = s.totp.count;
+    if (count < 0) count = 0;
+    if (count > TOTP_STORE_MAX) count = TOTP_STORE_MAX;
+    blob->count = (uint16_t)count;
+
+    bool ok = true;
+    for (int i = 0; i < count; i++) {
+        const app_totp_account_t *src = &s.totp.items[i];
+        totp_sealed_account_t *dst = &blob->items[i];
+        memcpy(dst->label, src->label, sizeof(dst->label));
+        dst->digits = src->digits;
+        dst->period = src->period;
+        dst->algo = src->algo;
+
+        if (src->secret_len == 0 || src->secret_len > sizeof(src->secret)) {
+            dst->sealed_len = 0;   // 没有密钥的账户照原样留空，不让它拖垮整次写入
+            continue;
+        }
+
+        // 每次加密都用新的随机 IV：同一密钥重复使用固定 IV 会泄漏明文差异。
+        uint8_t iv[APP_SECRET_IV_LEN];
+        esp_fill_random(iv, sizeof(iv));
+        size_t n = app_secret_seal(key, iv, src->secret, src->secret_len,
+                                   dst->sealed, sizeof(dst->sealed));
+        if (n == 0 || n > UINT16_MAX) {
+            ok = false;
+            break;
+        }
+        dst->sealed_len = (uint16_t)n;
+    }
+    app_crypto_zero(key, sizeof(key));
+
+    if (!ok) {
+        free(blob);
+        ESP_LOGE(TAG, "动态口令加密失败，未写入（原数据保留）");
+        return;
+    }
+    esp_err_t err = blob_save("totp", blob, sizeof(*blob));
+    free(blob);
+    if (err != ESP_OK) ESP_LOGE(TAG, "动态口令写入失败: %s", esp_err_to_name(err));
+}
+
+void app_state_save_vault(void)
+{
+    size_t len = app_vault_serialize(&s.vault, s_vault_blob, sizeof(s_vault_blob));
+    if (len == 0) {
+        // 序列化失败通常意味着"加密但未解锁且没有原文"。这种情况直接不落盘，
+        // 保留 NVS 里已有的容器，好过用空容器覆盖掉用户还没解开的密码。
+        ESP_LOGW(TAG, "密码本序列化失败，保留原有存储");
+        return;
+    }
+    esp_err_t err = blob_save("vault", s_vault_blob, len);
+    if (err != ESP_OK) ESP_LOGE(TAG, "密码本写入失败: %s", esp_err_to_name(err));
+}
 
 void app_state_save_all(void)
 {
@@ -471,6 +702,7 @@ void app_state_save_all(void)
     app_state_save_reminders();
     app_state_save_pomodoro();
     app_state_save_esports();
+    app_state_save_vault();
 }
 
 void app_state_clear(app_data_kind_t kind)
@@ -496,6 +728,10 @@ void app_state_clear(app_data_kind_t kind)
         memset(&s.esports, 0, sizeof(s.esports));
         blob_erase("esports");
         break;
+    case APP_DATA_VAULT:
+        app_vault_init(&s.vault);
+        blob_erase("vault");
+        break;
     case APP_DATA_SETTINGS:
         settings_defaults(&s.settings);
         app_pomodoro_init(&s.pomodoro);
@@ -514,6 +750,7 @@ void app_state_clear(app_data_kind_t kind)
         blob_erase("reminders");
         blob_erase("pomodoro");
         blob_erase("esports");
+        blob_erase("vault");
         blob_erase("clock");
         break;
     }

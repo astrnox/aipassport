@@ -5,16 +5,22 @@
 # 再把 demo 源码链入固件（见 AGENTS.md 的强制 UI 重新设计规则）。
 idf_component_register(
     SRCS "main.c"
+         "app_assets.c"
          "app_state.c"
+         "logic/app_anim.c"
          "logic/app_badge.c"
+         "logic/app_crypto.c"
          "logic/app_esports.c"
          "logic/app_pomodoro.c"
          "logic/app_qr.c"
          "logic/app_reminder.c"
          "logic/app_routine.c"
+         "logic/app_secret.c"
          "logic/app_text.c"
          "logic/app_time.c"
          "logic/app_totp.c"
+         "logic/app_vault.c"
+         "logic/app_vcard.c"
          "net/app_blufi.c"
          "net/app_net.c"
          "ui/ui_app.c"
@@ -28,9 +34,10 @@ idf_component_register(
          "ui/ui_theme.c"
          "ui/ui_time.c"
          "ui/ui_timeedit.c"
+         "ui/ui_vault.c"
     INCLUDE_DIRS "."
-    REQUIRES bsp bt esp_event esp_hw_support esp_netif esp_timer esp_wifi nvs_flash
-             lvgl esp_http_client esp_http_server json mbedtls
+    REQUIRES bsp bt esp_event esp_hw_support esp_netif esp_partition esp_timer esp_wifi
+             nvs_flash lvgl esp_http_client esp_http_server json mbedtls
 )
 
 # 中文字形：由 tools/gen_fonts.py 生成，覆盖常用汉字集。生成的是普通 C 源文件，

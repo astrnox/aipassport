@@ -4,22 +4,51 @@
 
 # Firmware Layout
 
-This repository is a minimal base for user-defined firmware targeting an
-ESP32-C3 with 8 MB Flash. Its default does not reserve product-specific
-identity, OTA, or unused data partitions.
+This repository targets an ESP32-C3 with 8 MB Flash. The upstream template ships
+a minimal three-partition table; this product has expanded it to hold persisted
+user data and animation resources. The layout below is the current, authoritative
+one - it does not reserve OTA slots.
 
-## Default layout
+## Current layout
 
-The default partition table contains exactly:
+The upstream template defaults to a minimal table (24 KB NVS, 4 KB PHY data,
+and one factory application covering the rest of Flash). This product
+deliberately replaces that layout because the tool box persists far more
+per-device data and stores animation frames outside NVS:
 
 | Partition | Type/subtype | Offset | Size | Purpose |
 | --- | --- | ---: | ---: | --- |
-| `nvs` | data/NVS | `0x9000` | `0x6000` | ESP-IDF and application key-value storage |
-| `phy_init` | data/PHY | `0xF000` | `0x1000` | PHY initialization data |
-| `factory` | app/factory | `0x10000` | `0x7F0000` | The single application image; all remaining Flash |
+| `nvs` | data/NVS | `0x9000` | `0x16000` | ESP-IDF and application key-value storage (88 KB) |
+| `phy_init` | data/PHY | `0x1F000` | `0x1000` | PHY initialization data |
+| `factory` | app/factory | `0x20000` | `0x540000` | The single application image (5.25 MB) |
+| `assets` | `0x40`/`0x00` | `0x560000` | `0x2A0000` | Personal-card animation frames (6 slots, 2.625 MB) |
 
-The default has no OTA slots. This is a starting point, not a restriction on
-user firmware.
+Why each choice:
+
+- **88 KB NVS.** Badge nicknames with up to three QR codes each, vault entries,
+  up to ten TOTP accounts, reminders, the routine table, and settings all live
+  in NVS. 24 KB left no room for wear levelling headroom and would have started
+  failing writes once the vault grew.
+- **5.25 MB application.** The three generated Chinese fonts plus LVGL, Wi-Fi, and
+  BLE need roughly 2.5-3 MB. 5.25 MB keeps a comfortable margin for growth while
+  still leaving room for resources.
+- **`assets` is a custom partition type, not `spiffs`/`fat`.** ESP-IDF reserves
+  types `0x40`-`0xFE` for application-defined formats; the bootloader ignores
+  them. This firmware runs no file system on the partition - the on-flash layout
+  is a fixed slot table implemented in `main/app_assets.c` and validated by the
+  host tests for `main/logic/app_anim.c`. Borrowing a `spiffs` subtype without a
+  file system would have been misleading.
+- **Six 448 KB slots, and the partition ends exactly at 8 MB.** A slot must hold
+  the largest permitted animation, 96 x 96 RGB565 x 24 frames, which is 442,368
+  bytes plus a 48-byte header. Slot offsets are fixed multiples of the slot size
+  because a personal card stores only a slot number: if slot size floated with
+  the partition size, a different partition table would silently repoint already
+  stored animations. The last slot therefore ends on the 8 MB boundary, and the
+  application partition absorbs the remainder.
+
+The layout still has no OTA slots. Changing it again is allowed; then re-verify
+with `./tools/validate.sh --firmware`, which regenerates the merged image and
+re-reads the real offsets from `flash_args`.
 
 ## Custom layouts
 

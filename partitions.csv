@@ -1,4 +1,12 @@
 # Name,   Type, SubType, Offset,   Size,     Flags
-nvs,      data, nvs,     0x9000,   0x6000,
-phy_init, data, phy,     0xf000,   0x1000,
-factory,  app,  factory, 0x10000,  0x7f0000,
+# 本产品刻意偏离模板默认布局，原因见 docs/development/engineering/firmware-layout.md：
+#   nvs     扩到 88KB：名片二维码、密码本、口令账户等都需要持久化，24KB 不够且没有
+#           余量做磨损均衡。
+#   factory 让出尾部空间给 assets；5.25MB 对当前固件（含三套中文字形）有充足余量。
+#   assets  存动图帧。用 ESP-IDF 保留给应用自定义格式的 type 0x40/0x00，而不是借用
+#           spiffs/fat 子类型——我们不用任何文件系统，格式由 app_assets 自己定义。
+#           分成 6 个定长槽位，每槽 448KB，正好放下上限 96x96 的最长 24 帧动图。
+nvs,      data, nvs,     0x9000,   0x16000,
+phy_init, data, phy,     0x1f000,  0x1000,
+factory,  app,  factory, 0x20000,  0x540000,
+assets,   0x40, 0x00,    0x560000, 0x2a0000,

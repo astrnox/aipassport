@@ -192,12 +192,18 @@ void ui_app_show_onboarding(void)  { onboarding_open(); }
 static void advance_pomodoro(void)
 {
     app_pomodoro_t *p = app_state_pomodoro();
-    if (p->state == APP_POMO_FOCUS || p->state == APP_POMO_BREAK) {
-        if (app_pomodoro_tick(p, 1)) {
-            // 阶段切换：写入一次持久化，让重启后能回到正确的段；同时给出提示音。
-            app_state_save_pomodoro();
-            ui_sound_beep();
-        }
+
+    // 本地日期按 year*10000+month*100+day 每拍喂一次：跨零点时今日统计归零，永久累计不动。
+    // 调用很廉价，无需额外缓存日期。
+    app_datetime_t now = app_state_now();
+    app_pomodoro_roll_day(p, (uint32_t)(now.year * 10000 + now.month * 100 + now.day));
+
+    // 长休息也要推进，因此用 tick 的返回值判断阶段切换，而不是先看状态。
+    app_pomo_event_t ev = app_pomodoro_tick(p, 1);
+    if (ev != APP_POMO_EVENT_NONE) {
+        // 阶段切换：写入一次持久化，让重启后能回到正确的段；同时给出提示音。
+        app_state_save_pomodoro();
+        ui_sound_beep();
     }
 }
 
@@ -205,6 +211,46 @@ static void advance_pomodoro(void)
 //
 // 提示形式：提示音 + 一层"知道了"弹层。熄屏时先唤醒屏幕，否则闹钟响了用户看不到。
 // 若此刻正在引导或快捷面板上，只保留提示音——不叠第三层浮层，避免按键归属混乱。
+//
+// 免打扰（番茄钟专注段）期间不响也不弹，改为记下来，等这一段专注结束再一次性告知：
+// 静音不等于把消息丢掉。
+static bool dnd_active(void)
+{
+    return app_pomodoro_dnd_active(app_state_pomodoro());
+}
+
+// 免打扰期间被压下的提醒。只记条数与最近一条，够说明情况又不必开一个队列。
+static int  s_dnd_held;
+static char s_dnd_held_last[40];
+
+static void dnd_hold_reminder(const app_reminder_t *r)
+{
+    if (s_dnd_held == 0) {
+        snprintf(s_dnd_held_last, sizeof(s_dnd_held_last), "%02d:%02d %s",
+                 r->hour, r->minute, r->label[0] ? r->label : "未命名");
+    }
+    s_dnd_held++;
+}
+
+// 专注结束后把压下的提醒说清楚。界面正忙（弹层/编辑中）就先不说，下一拍再试，
+// 免得把用户正在做的操作顶掉、又让消息悄悄消失。
+static void dnd_report_held(void)
+{
+    if (s_dnd_held <= 0) return;
+    if (ui_timeedit_active() || ui_dialog_is_open() || ui_alert_is_open()) return;
+    if (onboarding_active() || home_quick_active()) return;
+
+    char body[96];
+    snprintf(body, sizeof(body), "专注期间静音了 %d 条提醒，最近一条 %s",
+             s_dnd_held, s_dnd_held_last);
+    s_dnd_held = 0;
+    ESP_LOGI(TAG, "%s", body);
+
+    if (s_asleep) wake_now();
+    ui_sound_beep();
+    ui_alert_open(lv_screen_active(), "免打扰结束", body);
+}
+
 static void check_reminders(void)
 {
     app_reminder_list_t *list = app_state_reminders();
@@ -225,6 +271,12 @@ static void check_reminders(void)
     int minute = (int)(app_state_now_unix() / 60);
     if (s_reminder_minute == minute) return;
     s_reminder_minute = minute;
+
+    if (dnd_active()) {
+        dnd_hold_reminder(due);
+        ESP_LOGI(TAG, "免打扰：暂缓提醒 %s", due->label[0] ? due->label : "未命名");
+        return;
+    }
 
     ESP_LOGI(TAG, "提醒到点: %s", due->label[0] ? due->label : "未命名");
     ui_sound_beep();
@@ -298,6 +350,8 @@ static void tick_missed_reminders(void)
     // 用户正在编辑或确认其它内容时不打断，下一拍再汇总。
     if (ui_timeedit_active() || ui_dialog_is_open() || ui_alert_is_open()) return;
     if (onboarding_active() || home_quick_active()) return;
+    // 免打扰期间连"错过的提醒"也不弹：它同样是一种打断，等专注结束再说。
+    if (dnd_active()) return;
 
     s_missed_reported = true;
     report_missed_reminders();
@@ -329,8 +383,8 @@ static void check_routine_node(void)
     if (index == s_routine_node) return;
 
     s_routine_node = index;
-    // 进入空档不提示，只有真正开始一个新节点才响。
-    if (index >= 0) ui_sound_beep();
+    // 进入空档不提示，只有真正开始一个新节点才响；免打扰时不打断专注。
+    if (index >= 0 && !dnd_active()) ui_sound_beep();
 }
 
 static void app_tick(lv_timer_t *timer)
@@ -343,6 +397,9 @@ static void app_tick(lv_timer_t *timer)
     check_reminders();
     check_routine_node();
     tick_missed_reminders();
+    // 免打扰结束后补报期间压下的提醒。放在这里而不是阶段切换的分支里，是因为弹层
+    // 冲突时它需要等界面空下来再报。
+    if (!dnd_active()) dnd_report_held();
 
     if (!s_asleep) {
         int limit = timeout_seconds();

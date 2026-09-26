@@ -477,8 +477,12 @@ python -m esptool --chip esp32c3 -p <port> -b 460800 \
 idf.py -p <port> monitor
 ```
 
+Writing the merged image from `0x0` rewrites the partition table, so a device
+flashed from an older layout also loses its stored NVS data. Warn the user
+before flashing and let them export what they need first.
+
 The ordinary `build/FoloToy-AI-Passport.bin` is application-only and belongs at
-`0x10000`; it must not be written to `0x0`. Use `idf.py flash` only for an
+`0x20000`; it must not be written to `0x0`. Use `idf.py flash` only for an
 intentional incremental development flash, not as the default delivery or
 acceptance path.
 

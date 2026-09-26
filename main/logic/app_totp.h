@@ -9,11 +9,15 @@
 #include <stdint.h>
 
 #define APP_TOTP_MAX_SECRET_BYTES 64
-#define APP_TOTP_MAX_ACCOUNTS     5
+// 账户上限 10：设备端按列表翻页展示，10 个正好覆盖"校园邮箱 + 若干平台"的常见组合，
+// 再多的条目在只有三键的设备上翻找反而更慢。
+#define APP_TOTP_MAX_ACCOUNTS     10
 #define APP_TOTP_ALGO_SHA1   0
 #define APP_TOTP_ALGO_SHA256 1
 
-// 单个 TOTP 账户。label 用于界面显示，secret 为 Base32 解码后的原始密钥。
+// 单个 TOTP 账户。label 用于界面显示，secret 为 Base32 解码后的原始密钥——它只在内存
+// 里是明文，落盘时由 app_state 用设备绑定密钥逐条密封（见 logic/app_secret.h），
+// NVS 里不留明文。
 typedef struct {
     char    label[24];                                  // 账户名（UTF-8）
     uint8_t secret[APP_TOTP_MAX_SECRET_BYTES];          // Base32 解码后的原始密钥

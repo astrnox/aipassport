@@ -19,7 +19,7 @@
 
 1. **ccache 缓存恢复**：使用 `actions/cache` 缓存编译中间产物（`.ccache`），二次编译大幅提速。缓存 key 含 ref 与 commit SHA；缓存保留时间以仓库的 GitHub Actions 设置为准。
 2. **编译与验证**（ESP-IDF 5.5.3 / esp32c3）：运行与本地相同的 `./tools/validate.sh --firmware`。脚本使用 `sdkconfig.defaults` 和 `partitions.csv` 构建固件，再执行 `idf.py merge-bin`。
-3. **验证完整固件**：脚本按 `flash_args` 生成的实际偏移逐字节确认 bootloader、partition-table 和 app，确认使用 8 MB Flash，并检查当前配置的分区布局，最后输出 `build/FoloToy-AI-Passport-full.bin`。仓库默认偏移为 `0x0`、`0x8000` 和 `0x10000`；用户自定义分区表时可以改变 app 偏移。
+3. **验证完整固件**：脚本按 `flash_args` 生成的实际偏移逐字节确认 bootloader、partition-table 和 app，确认使用 8 MB Flash，并检查当前配置的分区布局，最后输出 `build/FoloToy-AI-Passport-full.bin`。本仓库当前把这三类镜像放在 `0x0`、`0x8000` 和 `0x20000`；自定义分区表时可以改变 app 偏移。
 4. **上传 artifact**：每次成功构建都上传 `FoloToy-AI-Passport-full.bin`。普通分支只有从该分支手动运行 `workflow_dispatch` 才会构建；普通 push 不触发。
 5. **发布 tag**：tag 构建完成后，独立 release job 下载上述 artifact，并创建 GitHub Release。
 

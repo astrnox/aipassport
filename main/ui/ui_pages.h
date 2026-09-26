@@ -26,11 +26,19 @@ void page_routine_exit(void);
 void page_routine_key(bsp_btn_t btn, bsp_btn_ev_t ev);
 void page_routine_tick(void);
 
-// 4 身份与工具：电子工牌 / 动态口令 / 硬件自检
+// 4 身份与工具：电子工牌 / 动态口令 / 密码本 / 硬件自检
 void page_identity_enter(void);
 void page_identity_exit(void);
 void page_identity_key(bsp_btn_t btn, bsp_btn_ev_t ev);
 void page_identity_tick(void);
+
+// 4.1 密码本（从身份页进入，是全屏子页面而非独立模块）
+void page_vault_enter(void);
+void page_vault_exit(void);
+void page_vault_key(bsp_btn_t btn, bsp_btn_ev_t ev);
+void page_vault_tick(void);
+// 身份页返回时用：密码本当前是否占用着屏幕。
+bool page_vault_active(void);
 
 // 5 英雄联盟赛事中心
 void page_esports_enter(void);
