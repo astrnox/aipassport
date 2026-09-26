@@ -40,16 +40,21 @@ CONFIG_LV_USE_ANIMIMG=y
 CONFIG_FREERTOS_HZ=1000
 
 # --- Bluetooth LE / NimBLE ---
-# ESP32-C3 仅支持 BLE；示例只启用单连接 peripheral 所需的最小 host 配置。
+# ESP32-C3 仅支持 BLE。角色按实际功能开：
+#   * PERIPHERAL / BROADCASTER —— BLE 配网与"万能遥控"（HID 外设）都要对外广播并被连接。
+#   * OBSERVER —— "找设备"要主动扫描附近广播，没有 observer 角色就无法发起扫描。
+#   * CENTRAL 仍然关闭：本机不需要主动连别人。
 CONFIG_BT_ENABLED=y
 CONFIG_BT_NIMBLE_ENABLED=y
 CONFIG_BT_NIMBLE_ROLE_CENTRAL=n
 CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=y
 CONFIG_BT_NIMBLE_ROLE_BROADCASTER=y
-CONFIG_BT_NIMBLE_ROLE_OBSERVER=n
+CONFIG_BT_NIMBLE_ROLE_OBSERVER=y
 CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
 CONFIG_BT_NIMBLE_HOST_BASED_PRIVACY=n
-CONFIG_BT_NIMBLE_NVS_PERSIST=n
+# HID 遥控需要把配对（bond）落盘：否则每次重启主机都认不出本机，用户得先"忽略设备"
+# 再重新配对一次，对只有三个键的遥控器来说不可接受。
+CONFIG_BT_NIMBLE_NVS_PERSIST=y
 # BLE 配网走 BLUFI 协议，需要 NimBLE 侧的 BLUFI 支持。
 CONFIG_BT_NIMBLE_BLUFI_ENABLE=y
 # BLUFI 用 DH 协商共享密钥，mbedTLS 的 DH 模块默认关闭，这里显式打开。

@@ -103,6 +103,13 @@ static bool s_time_running;
 static app_fetch_state_t s_time_state = APP_FETCH_IDLE;
 static char s_time_error[64];
 
+// 信道体检（一次性扫描）
+static bool s_channel_running;
+static app_fetch_state_t s_channel_state = APP_FETCH_IDLE;
+static char s_channel_error[64];
+static app_channel_report_t s_channel_report;
+static bool s_channel_valid;
+
 // 配网
 static httpd_handle_t s_httpd;
 static bool s_prov_active;
@@ -631,6 +638,138 @@ const char *app_net_time_error(void)
     net_lock();
     if (s_time_state == APP_FETCH_FAILED && s_time_error[0]) {
         copy_trunc(buf, sizeof(buf), s_time_error);
+    } else {
+        buf[0] = '\0';
+    }
+    net_unlock();
+    return buf;
+}
+
+// ---------------------------------------------------------------------------
+// 信道体检 worker
+// ---------------------------------------------------------------------------
+
+// 一次扫描最多统计这么多 AP。典型宿舍/办公楼 2.4G 也就十几个，48 足够，
+// 再多只是把同一批 AP 的重复记录算两次。
+#define CHANNEL_SCAN_MAX_AP 48
+
+static void channel_worker(void *arg)
+{
+    (void)arg;
+
+    app_channel_report_t report;
+    app_channel_reset(&report);
+    app_fetch_state_t final = APP_FETCH_FAILED;
+    char err[64] = { 0 };
+
+    // 记下"射频是不是本来就已经开着"：本来没开的话，扫完要还回去，不能因为一次
+    // 信道体检验就让 Wi-Fi 常驻。
+    net_lock();
+    bool was_started = s_wifi_started;
+    net_unlock();
+
+    if (wifi_ensure_started() != ESP_OK) {
+        copy_trunc(err, sizeof(err), "Wi-Fi 启动失败");
+        goto done;
+    }
+
+    wifi_scan_config_t cfg = { 0 };
+    cfg.show_hidden = true;      // 隐藏 SSID 的 AP 同样占信道，要算进来
+    if (esp_wifi_scan_start(&cfg, true) != ESP_OK) {
+        copy_trunc(err, sizeof(err), "扫描失败");
+        goto cleanup;
+    }
+
+    uint16_t ap_num = 0;
+    if (esp_wifi_scan_get_ap_num(&ap_num) != ESP_OK) {
+        copy_trunc(err, sizeof(err), "读取扫描结果失败");
+        goto cleanup;
+    }
+
+    uint16_t n = ap_num;
+    if (n > CHANNEL_SCAN_MAX_AP) n = CHANNEL_SCAN_MAX_AP;
+    wifi_ap_record_t *recs = calloc(n ? n : 1, sizeof(*recs));
+    if (!recs) {
+        copy_trunc(err, sizeof(err), "内存不足");
+        goto cleanup;
+    }
+    if (n > 0 && esp_wifi_scan_get_ap_records(&n, recs) == ESP_OK) {
+        for (uint16_t i = 0; i < n; i++) {
+            app_channel_add_ap(&report, recs[i].primary, recs[i].rssi);
+        }
+    }
+    free(recs);
+    app_channel_finish(&report);
+    final = APP_FETCH_OK;
+
+cleanup:
+    // 只还回去"自己借来的"射频；配网热点期间更不能关。
+    if (!was_started && !s_prov_active) app_net_wifi_stop();
+
+done:
+    net_lock();
+    s_channel_state = final;
+    if (final == APP_FETCH_OK) {
+        s_channel_report = report;
+        s_channel_valid = true;
+        s_channel_error[0] = '\0';
+    } else {
+        copy_trunc(s_channel_error, sizeof(s_channel_error),
+                   err[0] ? err : "扫描失败");
+    }
+    s_channel_running = false;
+    net_unlock();
+    vTaskDelete(NULL);
+}
+
+void app_net_channel_scan_request(void)
+{
+    if (!s_inited) return;
+
+    net_lock();
+    if (s_channel_running) {
+        net_unlock();
+        return;   // 运行中重复调用忽略
+    }
+    s_channel_running = true;
+    s_channel_state = APP_FETCH_RUNNING;
+    s_channel_error[0] = '\0';
+    net_unlock();
+
+    if (xTaskCreate(channel_worker, "net_channel", 4096, NULL, 4, NULL) != pdPASS) {
+        net_lock();
+        s_channel_running = false;
+        s_channel_state = APP_FETCH_FAILED;
+        copy_trunc(s_channel_error, sizeof(s_channel_error), "任务创建失败");
+        net_unlock();
+        ESP_LOGE(TAG, "信道体检任务创建失败");
+    }
+}
+
+app_fetch_state_t app_net_channel_scan_state(void)
+{
+    net_lock();
+    app_fetch_state_t st = s_channel_state;
+    net_unlock();
+    return st;
+}
+
+const app_channel_report_t *app_net_channel_report(void)
+{
+    static app_channel_report_t buf;
+    net_lock();
+    if (s_channel_valid) buf = s_channel_report;
+    app_channel_report_t *out = s_channel_valid ? &buf : NULL;
+    net_unlock();
+    return out;
+}
+
+const char *app_net_channel_error(void)
+{
+    static char buf[64];
+    net_lock();
+    if (s_channel_state == APP_FETCH_FAILED && s_channel_error[0]) {
+        copy_trunc(buf, sizeof(buf), s_channel_error);
     } else {
         buf[0] = '\0';
     }

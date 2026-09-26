@@ -44,7 +44,7 @@
 
 // 模块轮播卡：中间是大号模块名，上方左右箭头，下方页码与圆点。
 #define HOME_CAROUSEL_H  120
-#define HOME_MODULE_MAX  6
+#define HOME_MODULE_MAX  8
 
 enum { QUIET_MUTE = 0, QUIET_THEME, QUIET_BRIGHT, QUIET_POMO, QUIET_DND };
 

@@ -12,6 +12,7 @@
 // 读写本文件的短状态，不做界面操作。
 #include "app_blufi.h"
 
+#include "app_ble.h"
 #include "app_net.h"
 
 #include "esp_bt.h"
@@ -565,6 +566,14 @@ esp_err_t app_ble_prov_start(void)
     if (s_state == APP_BLE_PROV_ADVERTISING || s_state == APP_BLE_PROV_CONNECTED ||
         s_state == APP_BLE_PROV_APPLYING || s_state == APP_BLE_PROV_DONE) {
         return ESP_OK;
+    }
+
+    // 找设备 / 万能遥控各自持有一份 BLE 协议栈，本机同一时刻只能有一份。
+    if (app_ble_active()) {
+        ESP_LOGW(TAG, "找设备或遥控正在使用蓝牙，配网暂不能开启");
+        s_state = APP_BLE_PROV_FAILED;
+        snprintf(s_error, sizeof(s_error), "请先退出找设备或万能遥控");
+        return ESP_ERR_INVALID_STATE;
     }
 
     reset_transient();
