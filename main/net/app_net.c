@@ -25,11 +25,13 @@
 #include "cJSON.h"
 #include "esp_crt_bundle.h"
 #include "esp_event.h"
+#include "esp_heap_caps.h"
 #include "esp_http_client.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_netif_sntp.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
 #include "nvs.h"
@@ -2452,25 +2454,88 @@ static void fill_ap_config(wifi_config_t *ap)
     ap->ap.pmf_cfg.required = false;
 }
 
+// 热点配网是整块固件里最吃连续内存的一步：httpd 要一块 6144 字节的任务栈，外加
+// socket 与 lwIP 缓冲。无 PSRAM 的板子上碎片化比"空闲总量"更致命，所以失败时必须
+// 打出"最大连续块"，否则日志里只剩一句"起不来"。
+static void log_prov_heap(const char *stage)
+{
+    ESP_LOGI(TAG, "配网[%s] 空闲堆 %u 字节，最大连续块 %u 字节", stage,
+             (unsigned)esp_get_free_heap_size(),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+}
+
+// 本次 app_net_prov_start() 是否由它自己打开了射频。回滚时只有这一种情况才允许关
+// Wi-Fi：否则会把 STA 连接或赛事中心正在用的射频一起关掉。
+static bool s_prov_opened_wifi;
+
+// 配网启动失败后的回滚。原实现每个失败点都直接 return，把 APSTA 模式、AP 配置和
+// s_wifi_started=true 全留在原地，形成"射频已开但配网未激活"的脏状态；下一次
+// wifi_ensure_started() 又因 s_wifi_started 短路成成功，于是重试跳过配置直接进
+// httpd_start，而堆比上次更差——结果就是"每次都开不起来"，重试永远无效。
+static void prov_rollback(esp_err_t err)
+{
+    if (s_httpd) {
+        httpd_stop(s_httpd);
+        s_httpd = NULL;
+    }
+
+    if (s_wifi_started) {
+        if (s_prov_opened_wifi && !s_sta_wanted) {
+            // 射频正是本次为配网拉起来的，且没人在用：完整释放，让重试从干净状态开始。
+            esp_wifi_disconnect();
+            esp_wifi_stop();
+            s_wifi_started = false;
+            if (s_wifi_inited) {
+                esp_wifi_deinit();
+                s_wifi_inited = false;
+            }
+            app_state_set_net(APP_NET_OFF, NULL);
+        } else {
+            // 射频本来就开着：只退回纯 STA，不关它。
+            esp_wifi_set_mode(WIFI_MODE_STA);
+        }
+    }
+    s_prov_opened_wifi = false;
+    s_prov_note[0] = '\0';
+    ESP_LOGE(TAG, "配网启动失败已回滚: %s", esp_err_to_name(err));
+}
+
 esp_err_t app_net_prov_start(void)
 {
     if (!s_inited) return ESP_ERR_INVALID_STATE;
+    // 已经在配网直接算成功。注意不能只信 s_prov_active：失败路径会把它留成 false，
+    // 而射频与 AP 配置可能已经被本函数改过（见 prov_rollback）。
     if (s_prov_active) return ESP_OK;
     if (!s_ap_netif) return ESP_ERR_INVALID_STATE;
+
+    log_prov_heap("开启前");
+
+    // 记录进来时射频是否已经开着：决定失败时能不能把射频整个关掉。
+    s_prov_opened_wifi = !s_wifi_started;
 
     esp_err_t err = wifi_ensure_started();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "配网 Wi-Fi 启动失败: %s", esp_err_to_name(err));
+        // wifi_ensure_started 内部没有留下半启动状态，这里只需清标志。
+        s_prov_opened_wifi = false;
         return err;
     }
+    log_prov_heap("射频启动后");
 
+    // 依次切 APSTA、配 AP 参数、起配置网页。任一步失败都走统一回滚，不把半配置状态
+    // 留给下一次重试。
     err = esp_wifi_set_mode(WIFI_MODE_APSTA);
-    if (err != ESP_OK) return err;
-
-    wifi_config_t ap_cfg;
-    fill_ap_config(&ap_cfg);
-    err = esp_wifi_set_config(WIFI_IF_AP, &ap_cfg);
-    if (err != ESP_OK) return err;
+    if (err == ESP_OK) {
+        wifi_config_t ap_cfg;
+        fill_ap_config(&ap_cfg);
+        err = esp_wifi_set_config(WIFI_IF_AP, &ap_cfg);
+    }
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "配网 AP 配置失败: %s", esp_err_to_name(err));
+        prov_rollback(err);
+        return err;
+    }
+    log_prov_heap("AP 配置后");
 
     httpd_config_t hc = HTTPD_DEFAULT_CONFIG();
     hc.max_uri_handlers = 16;
@@ -2479,41 +2544,48 @@ esp_err_t app_net_prov_start(void)
     err = httpd_start(&s_httpd, &hc);
     if (err != ESP_OK) {
         s_httpd = NULL;
-        ESP_LOGE(TAG, "配网网页启动失败: %s", esp_err_to_name(err));
+        // 把错误码和最大连续块一起打出来：内存不足是这里最常见的失败原因，而日志只
+        // 写"启动失败"时无法判断到底该减功能还是该查内存。
+        ESP_LOGE(TAG, "配网网页启动失败: %s（最大连续块 %u 字节）",
+                 esp_err_to_name(err),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+        prov_rollback(err);
         return err;
     }
+    log_prov_heap("配置网页启动后");
 
-    httpd_uri_t u_root = { .uri = "/", .method = HTTP_GET, .handler = prov_get_root, .user_ctx = NULL };
-    httpd_uri_t u_wifi = { .uri = "/wifi", .method = HTTP_POST, .handler = prov_post_wifi, .user_ctx = NULL };
-    httpd_uri_t u_time = { .uri = "/time", .method = HTTP_POST, .handler = prov_post_time, .user_ctx = NULL };
-    httpd_uri_t u_totp = { .uri = "/totp", .method = HTTP_POST, .handler = prov_post_totp, .user_ctx = NULL };
-    httpd_uri_t u_routine = { .uri = "/routine", .method = HTTP_POST, .handler = prov_post_routine, .user_ctx = NULL };
-    httpd_uri_t u_info = { .uri = "/info", .method = HTTP_GET, .handler = prov_get_info, .user_ctx = NULL };
-    httpd_uri_t u_vault = { .uri = "/vault", .method = HTTP_POST, .handler = prov_post_vault, .user_ctx = NULL };
-    httpd_uri_t u_vault_del = { .uri = "/vault_del", .method = HTTP_POST, .handler = prov_post_vault_del, .user_ctx = NULL };
-    httpd_uri_t u_vault_unlock = { .uri = "/vault_unlock", .method = HTTP_POST, .handler = prov_post_vault_unlock, .user_ctx = NULL };
-    httpd_uri_t u_totp_secret = { .uri = "/totp_secret", .method = HTTP_POST, .handler = prov_post_totp_secret, .user_ctx = NULL };
-    httpd_uri_t u_totp_del = { .uri = "/totp_del", .method = HTTP_POST, .handler = prov_post_totp_del, .user_ctx = NULL };
-    httpd_uri_t u_badge = { .uri = "/badge", .method = HTTP_POST, .handler = prov_post_badge, .user_ctx = NULL };
-    httpd_uri_t u_vcard = { .uri = "/vcard", .method = HTTP_POST, .handler = prov_post_vcard, .user_ctx = NULL };
-    httpd_uri_t u_pomo = { .uri = "/pomo", .method = HTTP_POST, .handler = prov_post_pomo, .user_ctx = NULL };
-    httpd_uri_t u_anim = { .uri = "/anim", .method = HTTP_POST, .handler = prov_post_anim, .user_ctx = NULL };
-    httpd_register_uri_handler(s_httpd, &u_root);
-    httpd_register_uri_handler(s_httpd, &u_wifi);
-    httpd_register_uri_handler(s_httpd, &u_time);
-    httpd_register_uri_handler(s_httpd, &u_totp);
-    httpd_register_uri_handler(s_httpd, &u_routine);
-    httpd_register_uri_handler(s_httpd, &u_info);
-    httpd_register_uri_handler(s_httpd, &u_vault);
-    httpd_register_uri_handler(s_httpd, &u_vault_del);
-    httpd_register_uri_handler(s_httpd, &u_vault_unlock);
-    httpd_register_uri_handler(s_httpd, &u_totp_secret);
-    httpd_register_uri_handler(s_httpd, &u_totp_del);
-    httpd_register_uri_handler(s_httpd, &u_badge);
-    httpd_register_uri_handler(s_httpd, &u_vcard);
-    httpd_register_uri_handler(s_httpd, &u_pomo);
-    httpd_register_uri_handler(s_httpd, &u_anim);
+    const httpd_uri_t uris[] = {
+        { .uri = "/",           .method = HTTP_GET,  .handler = prov_get_root,        .user_ctx = NULL },
+        { .uri = "/wifi",       .method = HTTP_POST, .handler = prov_post_wifi,       .user_ctx = NULL },
+        { .uri = "/time",       .method = HTTP_POST, .handler = prov_post_time,       .user_ctx = NULL },
+        { .uri = "/totp",       .method = HTTP_POST, .handler = prov_post_totp,       .user_ctx = NULL },
+        { .uri = "/routine",    .method = HTTP_POST, .handler = prov_post_routine,    .user_ctx = NULL },
+        { .uri = "/info",       .method = HTTP_GET,  .handler = prov_get_info,        .user_ctx = NULL },
+        { .uri = "/vault",      .method = HTTP_POST, .handler = prov_post_vault,      .user_ctx = NULL },
+        { .uri = "/vault_del",  .method = HTTP_POST, .handler = prov_post_vault_del,  .user_ctx = NULL },
+        { .uri = "/vault_unlock",.method = HTTP_POST,.handler = prov_post_vault_unlock,.user_ctx = NULL },
+        { .uri = "/totp_secret",.method = HTTP_POST, .handler = prov_post_totp_secret,.user_ctx = NULL },
+        { .uri = "/totp_del",   .method = HTTP_POST, .handler = prov_post_totp_del,   .user_ctx = NULL },
+        { .uri = "/badge",      .method = HTTP_POST, .handler = prov_post_badge,      .user_ctx = NULL },
+        { .uri = "/vcard",      .method = HTTP_POST, .handler = prov_post_vcard,      .user_ctx = NULL },
+        { .uri = "/pomo",       .method = HTTP_POST, .handler = prov_post_pomo,       .user_ctx = NULL },
+        { .uri = "/anim",       .method = HTTP_POST, .handler = prov_post_anim,       .user_ctx = NULL },
+    };
+    const size_t uri_n = sizeof(uris) / sizeof(uris[0]);
+    // max_uri_handlers 必须真的够用：注册失败的 URI 在手机上就是 404，而 UI 不会报错。
+    if (uri_n > (size_t)hc.max_uri_handlers) {
+        ESP_LOGE(TAG, "配网页 URI %u 个超过 max_uri_handlers %u",
+                 (unsigned)uri_n, (unsigned)hc.max_uri_handlers);
+    }
+    for (size_t i = 0; i < uri_n; i++) {
+        esp_err_t rerr = httpd_register_uri_handler(s_httpd, &uris[i]);
+        if (rerr != ESP_OK) {
+            ESP_LOGE(TAG, "注册 %s 失败: %s", uris[i].uri, esp_err_to_name(rerr));
+        }
+    }
 
+    // 到这里才算真正开起来了：此时才把 s_prov_opened_wifi 的意义确定为"本次配网
+    // 持有射频"，供 app_net_prov_stop() 与回滚判断。
     net_lock();
     s_prov_active = true;
     s_prov_note[0] = '\0';
@@ -2525,6 +2597,10 @@ esp_err_t app_net_prov_start(void)
 
 void app_net_prov_stop(void)
 {
+    // 显式停止也要清掉"射频由配网拉起"的标记，否则下一次启动会误判射频已经是热的，
+    // 失败回滚时就不会去关它，脏状态继续累积。
+    s_prov_opened_wifi = false;
+
     if (!s_prov_active && !s_httpd) return;
 
     if (s_httpd) {

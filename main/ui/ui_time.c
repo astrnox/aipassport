@@ -35,11 +35,13 @@ static const char *const VIEW_NAMES[VIEW_COUNT] = {
     "万年历", "时间进度", "秒表", "计时器"
 };
 
+// 提示条只有 240px 宽、单行不换行，所以这里用紧凑写法：按键符号紧跟动词，
+// 分隔用单空格。"换页"统一指长按↓切到下一个视图（与其它页的约定一致）。
 static const char *const VIEW_HINTS[VIEW_COUNT] = {
-    "↑↓ 翻月  长按↑ 农历  OK 进度  长按↓ 切视图  长按OK 返回",
-    "↑↓ 精度  OK 尺度  长按↑ 设生日  长按↓ 切视图  长按OK 返回",
-    "OK 开始  ↑ 记圈  长按↑ 清零  长按↓ 切视图  长按OK 返回",
-    "OK 开始  ↑ 重置  长按↑ 设时长  长按↓ 切视图  长按OK 返回",
+    "↑↓翻月 OK进度 长按↑农历 长按↓换页 长按OK返回",
+    "↑↓精度 OK尺度 长按↑生日 长按↓换页 长按OK返回",
+    "OK开始 ↑记圈 长按↑清零 长按↓换页 长按OK返回",
+    "OK开始 ↑重置 长按↑设时长 长按↓换页 长按OK返回",
 };
 
 static struct {
@@ -614,7 +616,12 @@ void page_time_key(bsp_btn_t btn, bsp_btn_ev_t ev)
         }
         if (ev != BSP_BTN_CLICK) return;
         if (btn == BSP_BTN_OK) stop_toggle();
-        else if (btn == BSP_BTN_UP) stop_lap();
+        else if (btn == BSP_BTN_UP) {
+            // 没在计时时 stop_lap() 会直接返回。原实现什么都不提示，用户以为记圈失败；
+            // 这里给一句话说明为什么没反应，以及该先按什么。
+            if (!s.running) ui_hint_flash("先按 OK 开始计时，再按 ↑ 记圈", 1800);
+            else stop_lap();
+        }
         break;
 
     default:

@@ -66,8 +66,11 @@ uint32_t ui_c_border(void);
 #define UI_W           240
 #define UI_H           320
 #define UI_STATUS_H    26
-#define UI_HINT_H      24
-#define UI_CONTENT_H   (UI_H - UI_STATUS_H - UI_HINT_H)   // 270
+// 提示条高 34（两道 12px 行）。按键约定在 240px 宽里一行写不完：单行只放得下约
+// 19 个全宽字，而"↑↓翻月 OK进度 长按↑农历 长按↓换页 长按OK返回"这类完整说明最长
+// 可达 330px。压到一行只能靠删信息，所以这里给两行，让提示条始终能把按键讲清楚。
+#define UI_HINT_H      34
+#define UI_CONTENT_H   (UI_H - UI_STATUS_H - UI_HINT_H)   // 260
 #define UI_MARGIN_X    8
 #define UI_ROW_H       40
 #define UI_CARD_GAP    8

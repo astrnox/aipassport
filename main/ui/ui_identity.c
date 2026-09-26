@@ -572,8 +572,10 @@ static void build_badge(void)
         lv_obj_align(empty, LV_ALIGN_CENTER, 0, 0);
     }
 
-    if (qn > 1) ui_page_set_hint("↑↓ 换牌  OK 选码  长按↑ 全屏  长按↓ 换页");
-    else        ui_page_set_hint("↑↓ 切换工牌  长按↑ 全屏  长按↓ 换页");
+    // 每条提示都要写出"长按OK 返回"：page_identity_key 在最前面就实现了长按OK回主页，
+    // 但原先四条提示都没提，用户切到某个标签后不知道还能出去，容易被"困"在页里。
+    if (qn > 1) ui_page_set_hint("↑↓ 换牌  OK 选码  长按↑ 全屏  长按↓ 换页  长按OK 返回");
+    else        ui_page_set_hint("↑↓ 切换工牌  长按↑ 全屏  长按↓ 换页  长按OK 返回");
 }
 
 static void build_totp(void)
@@ -591,7 +593,7 @@ static void build_totp(void)
     if (n <= 0) {
         ui_empty_create(v, "还没有动态口令",
                         "请在手机配置页粘贴 otpauth 链接导入，或到设置中开启配网后导入密钥");
-        ui_page_set_hint("长按↓ 换页");
+        ui_page_set_hint("长按↓ 换页  长按OK 返回");
         return;
     }
     if (s.totp_index >= n) s.totp_index = 0;
@@ -637,7 +639,7 @@ static void build_totp(void)
     lv_obj_set_pos(s.totp_next, 74, 26);
 
     totp_show();
-    ui_page_set_hint("↑↓ 切换账户  长按↑ 恢复码  长按↓ 换页");
+    ui_page_set_hint("↑↓ 切换账户  长按↑ 恢复码  长按↓ 换页  长按OK 返回");
 }
 
 static void build_check(void)
@@ -653,7 +655,7 @@ static void build_check(void)
         check_apply(i);
     }
     check_select(s.check_sel);
-    ui_page_set_hint("↑↓ 选择  OK 单项  长按↑ 全部  长按↓ 换页");
+    ui_page_set_hint("↑↓ 选择  OK 单项  长按↑ 全部  长按↓ 换页  长按OK 返回");
 }
 
 // 密码本入口：只给状态摘要与一句操作提示，真正的条目页在 ui_vault.c 里全屏打开。
@@ -687,7 +689,7 @@ static void build_vault(void)
     lv_obj_set_width(tip, IDV_CW);
     lv_label_set_long_mode(tip, LV_LABEL_LONG_WRAP);
 
-    ui_page_set_hint("OK 打开密码本  长按↓ 换页");
+    ui_page_set_hint("OK 打开密码本  长按↓ 换页  长按OK 返回");
 }
 
 static void show_tab(int index)
@@ -743,9 +745,11 @@ static lv_obj_t *overlay_begin(void)
 static lv_obj_t *overlay_hint(lv_obj_t *ov, const char *text)
 {
     lv_obj_t *lbl = ui_label_create(ov, text, ui_font_hint, ui_c_dim());
-    lv_obj_set_width(lbl, UI_W);
+    lv_obj_set_width(lbl, UI_W - 8);
     lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_pos(lbl, 0, UI_H - UI_HINT_H);
+    // 与页面提示条同宽同高：允许折行，长按键说明才不会被裁掉。
+    lv_label_set_long_mode(lbl, LV_LABEL_LONG_WRAP);
+    lv_obj_set_pos(lbl, 4, UI_H - UI_HINT_H);
     return lbl;
 }
 
@@ -827,9 +831,11 @@ static void open_recovery_overlay(void)
     lv_obj_set_width(banner, 220);
 
     // 密钥最长 64 字节，Base32 分组后可达 128 字符，用提示字号并允许换行，避免顶到提示条。
+    // 折行模式显式写出：与 ui_vault.c 的恢复码标签保持一致，不依赖 LVGL 的默认值。
     lv_obj_t *code = ui_label_create(ov, grouped, ui_font_hint, ui_c_text());
     lv_obj_set_pos(code, 10, 132);
     lv_obj_set_width(code, 220);
+    lv_label_set_long_mode(code, LV_LABEL_LONG_WRAP);
 
     overlay_hint(ov, "长按 OK 关闭");
 }

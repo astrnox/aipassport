@@ -226,8 +226,10 @@ static void refresh_banner(void)
     if (s_prov_busy) {
         snprintf(text, sizeof(text), "正在开启热点…");
     } else if (app_net_prov_active()) {
-        snprintf(text, sizeof(text), "热点已开启：连上 %s 后打开 %s",
-                 app_net_prov_ssid(), app_net_prov_url());
+        // 密码必须出现在这里：横幅是关掉浮层之后唯一还留在屏幕上的热点信息。
+        // 原先只报 SSID 和网址，用户看得到热点名却找不到密码，只能连猜。
+        snprintf(text, sizeof(text), "热点密码：%s\n热点名称：%s　网址：%s",
+                 app_net_prov_pass(), app_net_prov_ssid(), app_net_prov_url());
     } else if (!st->time_synced) {
         snprintf(text, sizeof(text), "时间未校准，口令与提醒可能不准；开启热点配网可用手机时间校准。");
     } else if (app_net_time_state() == APP_FETCH_FAILED) {
@@ -357,59 +359,108 @@ static void prov_start_task(void *arg)
 {
     (void)arg;
     esp_err_t err = app_net_prov_start();
+    // 任务启动期间用户关了浮层：把刚开起来的热点收掉。取消优先，覆盖启动结果。
     if (s_prov_cancel) {
         app_net_prov_stop();
         err = ESP_ERR_INVALID_STATE;
-        s_prov_cancel = false;
     }
+    // 先写结果再清忙标志。界面靠"忙=false 且 err=0"判定成功，顺序反了会闪出一帧
+    // "已成功"的假象。
     s_prov_err = (int)err;
     s_prov_busy = false;
+    s_prov_cancel = false;
+    // 热点的 SSID / 密码 / 网址固定不变，但"是否已开启"由网络层决定，回滚后要同步。
     vTaskDelete(NULL);
+}
+
+// 把启动失败的错误码翻成用户能看懂的中文。热点起不来最常见的原因是内存不足
+// （无 PSRAM 板上 httpd 要一块连续栈），所以单独说明，而不是笼统的"请重试"。
+// 只用确定存在的错误码常量，其余按 esp_err_t 的通用含义归类。
+static const char *prov_err_text(int err)
+{
+    switch ((esp_err_t)err) {
+    case ESP_OK:                return NULL;
+    case ESP_ERR_NO_MEM:        return "设备内存不足，请先关闭其他功能后重试。";
+    case ESP_ERR_INVALID_STATE: return "无线模块状态异常，请返回设置页后重试。";
+    case ESP_ERR_INVALID_ARG:   return "无线参数有误，请重启设备后重试。";
+    case ESP_ERR_NOT_FOUND:     return "未找到无线模块，请重启设备后重试。";
+    case ESP_ERR_TIMEOUT:       return "无线模块响应超时，请重试。";
+    default:                    return "热点开启失败，请重试。";
+    }
 }
 
 static void prov_refresh(void)
 {
     if (!s.prov || !s.prov_note) return;
 
-    char text[160];
+    char text[220];
     if (s_prov_busy) {
         snprintf(text, sizeof(text), "正在开启热点，请稍候…");
     } else if (s_prov_err != 0) {
-        snprintf(text, sizeof(text), "热点开启失败，请重试。");
+        // 失败时把具体原因和下一步动作都写清楚，用户不必退出去猜。
+        const char *why = prov_err_text(s_prov_err);
+        snprintf(text, sizeof(text), "%s\n\n再按一次 OK 可重试。",
+                 why ? why : "热点开启失败，请重试。");
+    } else if (!app_net_prov_active()) {
+        // 既没在忙、也没报错、热点又没起来（例如上一次被取消）。原实现在这一支直接
+        // 落到 else，结果卡片留着空标签——用户看到的就是那个"蓝边空框"。这里给一句
+        // 明确的空状态，并提示可以就地重开。
+        snprintf(text, sizeof(text), "热点未开启。\n按 OK 重新开启。");
     } else {
+        // 密码放在第一行：卡片放不下时被裁掉的是尾部，第一行一定看得见。
         const char *note = app_net_prov_note();
         snprintf(text, sizeof(text),
-                 "热点：%s\n密码：%s\n网址：%s\n%s",
-                 app_net_prov_ssid(), app_net_prov_pass(), app_net_prov_url(),
+                 "密码：%s\n热点：%s\n网址：%s\n%s",
+                 app_net_prov_pass(), app_net_prov_ssid(), app_net_prov_url(),
                  note ? note : "手机连上热点后打开网址填写 Wi-Fi、校准时间或导入口令密钥。");
     }
     lv_label_set_text(s.prov_note, text);
 }
 
+// 拉起热点启动任务。已置忙或已在配网时直接返回，避免并发两次 esp_wifi_set_mode。
+static void prov_kick_off(void)
+{
+    if (app_net_prov_active() || s_prov_busy) return;
+
+    s_prov_busy = true;
+    s_prov_cancel = false;
+    s_prov_err = 0;
+    if (xTaskCreate(prov_start_task, "prov_start", 4096, NULL, 5, NULL) != pdPASS) {
+        s_prov_busy = false;
+        s_prov_err = (int)ESP_ERR_NO_MEM;
+    }
+}
+
 static void prov_open(void)
 {
-    if (s.prov) return;
+    // 浮层已经开着就当作"重试"：失败后卡片留在屏幕上，用户再按 OK 必须能重新拉起
+    // 热点，而不是撞上 if (s.prov) return 这条死路。
+    if (s.prov) {
+        prov_kick_off();
+        prov_refresh();
+        refresh_values();
+        return;
+    }
 
     lv_obj_t *card = NULL;
-    s.prov = overlay_create(200, &card, "热点配网");
+    // 卡片取 250 高：标题 + 密码/热点/网址/说明共约 7 行正文，200 高会把尾部（密码
+    // 之后的说明行）裁掉，用户就以为设备根本没给密码。
+    s.prov = overlay_create(250, &card, "热点配网");
 
     // 信息标签：多行文本，宽度受卡片约束，超出自动换行。
     s.prov_note = ui_label_create(card, "", ui_font_body, ui_c_text());
     lv_obj_set_width(s.prov_note, UI_W - 24 - 24);
     lv_label_set_long_mode(s.prov_note, LV_LABEL_LONG_WRAP);
 
-    if (!app_net_prov_active() && !s_prov_busy) {
-        s_prov_busy = true;
-        s_prov_cancel = false;
-        s_prov_err = 0;
-        if (xTaskCreate(prov_start_task, "prov_start", 4096, NULL, 5, NULL) != pdPASS) {
-            s_prov_busy = false;
-            s_prov_err = (int)ESP_ERR_NO_MEM;
-        }
-    }
+    // 兜底：字号或文案变化导致仍放不下时，向上/下键可以滚动查看，而不是被裁掉。
+    lv_obj_add_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(card, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(card, LV_SCROLLBAR_MODE_AUTO);
+
+    prov_kick_off();
 
     prov_refresh();
-    set_hint("手机连上热点后打开 192.168.4.1  长按OK 关闭");
+    set_hint("↑↓ 滚动  按OK 重试  长按OK 关闭");
     refresh_values();
 }
 
@@ -427,6 +478,8 @@ static void prov_close(void)
         s.prov = NULL;
         s.prov_note = NULL;
     }
+    // 清掉上一次的结果，避免下次打开浮层先闪一帧旧错误。
+    if (!s_prov_busy) s_prov_err = 0;
     s.hint[0] = '\0';
     refresh_values();
     update_hint();
@@ -583,6 +636,9 @@ static void data_panel_focus(int index)
     for (int i = 0; i < CLR_ROW_N; i++) {
         ui_row_set_selected(s.data_rows[i], i == index);
     }
+    // 六行选择项放不进卡片高度，必须把选中行滚进可视区，否则焦点移到"恢复出厂设置"
+    // 时光标在卡片外，用户看不到自己在选哪一项。
+    if (s.data_rows[index].obj) ui_scroll_into_view(s.data_rows[index].obj);
 }
 
 static void clear_confirmed(bool confirmed, void *user)
@@ -626,16 +682,26 @@ static void data_panel_open(void)
     if (s.data_panel) return;
 
     lv_obj_t *card = NULL;
-    s.data_panel = overlay_create(280, &card, "数据备份与清除");
+    // 卡片取 300 高：标题 + 一行说明 + 六行选择项大约需要 263px，留出余量。
+    s.data_panel = overlay_create(300, &card, "数据备份与清除");
 
-    lv_obj_t *tip = ui_label_create(card, "清除前会二次确认。工牌、作息、口令与恢复码可在手机配置页导出备份。",
+    // 说明压缩成一行：六行选择项本身已经占满卡片，说明再折三行就会把最后一两项
+    // 顶出卡片外。导出备份的说明在手机配置页里还有，这里只保留"不可恢复"的警告。
+    lv_obj_t *tip = ui_label_create(card, "清除前会二次确认，且无法恢复。",
                                     ui_font_hint, ui_c_dim());
     lv_obj_set_width(tip, UI_W - 24 - 20);
     lv_label_set_long_mode(tip, LV_LABEL_LONG_WRAP);
 
     for (int i = 0; i < CLR_ROW_N; i++) {
         s.data_rows[i] = overlay_row_create(card, CLR_TITLES[i], "");
+        lv_obj_set_height(s.data_rows[i].obj, 30);
     }
+
+    // 兜底：即使将来再加一行，也可以滚动到，而不是被卡片裁掉。
+    lv_obj_add_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(card, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(card, LV_SCROLLBAR_MODE_AUTO);
+
     data_panel_refresh();
     data_panel_focus(0);
     set_hint("↑↓ 选择  OK 清除  长按OK 返回");
@@ -672,7 +738,11 @@ static void activate(void)
         break;
 
     case SET_WIFI:
-        prov_open();
+        // 这一行只读展示已保存的 SSID，本身不承载"改 Wi-Fi"。原先按 OK 直接弹"热点配
+        // 网"，用户按的是"Wi-Fi 网络"却看到"热点配网"的卡片，会以为按错了键。设备没有
+        // 键盘，改 Wi-Fi 只能走两条配网路径，所以这里改成明确引导并把焦点移过去。
+        ui_hint_flash("改 Wi-Fi 请用下方\"热点配网\"或\"蓝牙配网\"", 2200);
+        settings_focus(SET_PROV);
         break;
 
     case SET_PROV:
@@ -770,7 +840,9 @@ void page_settings_enter(void)
     s.page = ui_page_create(HINT_SETTINGS);
 
     // 顶部提示横幅：时间未校准、校时失败、热点开启、纯离线各有不同文案。
-    s.banner = ui_card_create(s.page.content, 0, 0, SET_CW, 42, ui_c_warn());
+    // 高度 58：热点开启时横幅要写全"密码 / 名称 / 网址"三项，204px 宽下最长约三行，
+    // 42 高会把最后一行裁掉——密码正好在那一行上。
+    s.banner = ui_card_create(s.page.content, 0, 0, SET_CW, 58, ui_c_warn());
     s.banner_lbl = ui_label_create(s.banner, "", ui_font_hint, ui_c_text());
     lv_obj_set_pos(s.banner_lbl, 10, 4);
     lv_obj_set_width(s.banner_lbl, SET_CW - 20);
@@ -826,12 +898,58 @@ void page_settings_key(bsp_btn_t btn, bsp_btn_ev_t ev)
     }
 
     if (s.prov) {
-        if (ev == BSP_BTN_LONG && btn == BSP_BTN_OK) prov_close();
+        // 热点浮层原先只认长按 OK，UP/DOWN 与短按 OK 全被吞掉：卡片放不下时既滚不
+        // 动，失败后也重试不了，用户的感觉就是"按键没反应"。现在三种键都有明确动作。
+        if (ev == BSP_BTN_LONG && btn == BSP_BTN_OK) {
+            prov_close();
+        } else if (ev == BSP_BTN_CLICK && (btn == BSP_BTN_UP || btn == BSP_BTN_DOWN)) {
+            // 内容超出卡片时靠这里翻看；内容放得下时滚动量为 0，不会有副作用。
+            lv_obj_t *card = s.prov_note ? lv_obj_get_parent(s.prov_note) : NULL;
+            if (card) {
+                int step = (btn == BSP_BTN_UP) ? -24 : 24;
+                lv_obj_scroll_by(card, 0, -step, LV_ANIM_OFF);
+            }
+        } else if (ev == BSP_BTN_CLICK && btn == BSP_BTN_OK) {
+            // 短按 OK 即重试：未开启且不在忙时才有意义，其余情况给一句反馈。
+            if (app_net_prov_active()) {
+                ui_hint_flash("热点已开启，长按 OK 可关闭", 1800);
+            } else if (s_prov_busy) {
+                ui_hint_flash("正在开启热点，请稍候…", 1500);
+            } else {
+                prov_kick_off();
+                prov_refresh();
+                ui_hint_flash("正在重试开启热点…", 1500);
+            }
+        }
         return;
     }
 
     if (s.ble) {
-        if (ev == BSP_BTN_LONG && btn == BSP_BTN_OK) ble_close();
+        // 与热点浮层同构：长按 OK 关闭，短按 OK 在未开启时重试，↑↓ 翻看超长说明。
+        if (ev == BSP_BTN_LONG && btn == BSP_BTN_OK) {
+            ble_close();
+        } else if (ev == BSP_BTN_CLICK && (btn == BSP_BTN_UP || btn == BSP_BTN_DOWN)) {
+            lv_obj_t *card = s.ble_note ? lv_obj_get_parent(s.ble_note) : NULL;
+            if (card) {
+                int step = (btn == BSP_BTN_UP) ? -24 : 24;
+                lv_obj_scroll_by(card, 0, -step, LV_ANIM_OFF);
+            }
+        } else if (ev == BSP_BTN_CLICK && btn == BSP_BTN_OK) {
+            if (app_ble_prov_active()) {
+                ui_hint_flash("蓝牙配网已开启，长按 OK 可关闭", 1800);
+            } else if (s_ble_busy) {
+                ui_hint_flash("正在开启蓝牙，请稍候…", 1500);
+            } else {
+                s_ble_busy = true;
+                s_ble_cancel = false;
+                s_ble_err = 0;
+                if (xTaskCreate(ble_start_task, "ble_start", 4096, NULL, 5, NULL) != pdPASS) {
+                    s_ble_busy = false;
+                    s_ble_err = (int)ESP_ERR_NO_MEM;
+                }
+                ble_refresh();
+            }
+        }
         return;
     }
 
@@ -1049,9 +1167,16 @@ static void onboarding_render(void)
         } else if (app_net_prov_active()) {
             s_ob.rows[0] = overlay_row_create(card, "完成后继续", "");
             // 说明位置改放连接信息：这一步用户要照着输入的只有这几个字符串。
-            lv_label_set_text_fmt(s_ob.note, "热点：%s\n密码：%s\n网址：%s",
-                                  app_net_prov_ssid(), app_net_prov_pass(),
+            // 密码放第一行——卡片放不下时被裁掉的是尾部，第一行必然可见。
+            lv_label_set_text_fmt(s_ob.note, "密码：%s\n热点：%s\n网址：%s",
+                                  app_net_prov_pass(), app_net_prov_ssid(),
                                   app_net_prov_url());
+        } else if (s_prov_err != 0) {
+            // 失败时把原因写出来，并把首行改成"重试"，用户不必退出引导再重进。
+            const char *why = prov_err_text(s_prov_err);
+            s_ob.rows[0] = overlay_row_create(card, "重试开启热点", "");
+            lv_label_set_text_fmt(s_ob.note, "%s\n\n按 OK 重试，或选下一行跳过。",
+                                  why ? why : "热点开启失败，请重试。");
         } else {
             s_ob.rows[0] = overlay_row_create(card, "开启热点配网导入", "");
         }
@@ -1087,13 +1212,13 @@ static void onboarding_activate(void)
     } else if (s_prov_busy) {
         ui_hint_flash("热点正在开启，请稍候…", 1500);
     } else {
-        // 先置忙再建任务，避免任务跑完把忙标志清掉后才被这里重新置上。
-        s_prov_busy = true;
-        s_prov_cancel = false;
-        s_prov_err = 0;
-        if (xTaskCreate(prov_start_task, "ob_prov", 4096, NULL, 5, NULL) != pdPASS) {
-            s_prov_busy = false;
-            ui_hint_flash("无法开启热点，请稍后重试", 1800);
+        // 复用同一条拉起逻辑：它自带"已置忙则不重复建任务"的判断，失败时也会把
+        // ESP_ERR_NO_MEM 之类的错误码写进 s_prov_err，下面据此给出具体原因。
+        if (s_prov_err != 0) ui_hint_flash("正在重试开启热点…", 1500);
+        prov_kick_off();
+        if (s_prov_err != 0) {
+            const char *why = prov_err_text(s_prov_err);
+            ui_hint_flash(why ? why : "无法开启热点，请稍后重试", 2200);
         }
         onboarding_render();
     }

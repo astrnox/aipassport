@@ -223,9 +223,14 @@ ui_page_t ui_page_create(const char *hint_text)
     lv_obj_set_style_pad_all(hint, 0, 0);
     page.hint = hint;
 
+    // 提示条文字：允许折行。按键约定常常超过 240px 一行能容纳的宽度，不给宽度就会
+    // 溢出到条外被裁掉；这里钉死宽度并居中，让它最多占两行、始终落在条内。
     s_hint_label = lv_label_create(hint);
     lv_obj_set_style_text_font(s_hint_label, ui_font_hint, 0);
     lv_obj_set_style_text_color(s_hint_label, lv_color_hex(ui_c_dim()), 0);
+    lv_obj_set_width(s_hint_label, UI_W - 8);
+    lv_obj_set_style_text_align(s_hint_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(s_hint_label, LV_LABEL_LONG_WRAP);
     lv_obj_center(s_hint_label);
 
     if (s_hint_timer) {
