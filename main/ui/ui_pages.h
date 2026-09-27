@@ -26,21 +26,62 @@ void page_routine_exit(void);
 void page_routine_key(bsp_btn_t btn, bsp_btn_ev_t ev);
 void page_routine_tick(void);
 
-// 4 身份与工具：电子工牌 / 动态口令 / 密码本
+// 4 身份：电子工牌
 void page_identity_enter(void);
 void page_identity_exit(void);
 void page_identity_key(bsp_btn_t btn, bsp_btn_ev_t ev);
 void page_identity_tick(void);
 
-// 4.1 密码本（从身份页进入，是全屏子页面而非独立模块）
+// 5 工具：工具列表（动态口令 / 密码本 / 找设备 / 万能遥控 / 信道体检 / 节拍器）。
+// 工具页只负责选择与转发，具体功能都在各自的全屏子页面里。
+void page_tools_enter(void);
+void page_tools_exit(void);
+void page_tools_key(bsp_btn_t btn, bsp_btn_ev_t ev);
+void page_tools_tick(void);
+
+// 5.1 动态口令（工具页子页）
+void page_totp_enter(void);
+void page_totp_exit(void);
+void page_totp_key(bsp_btn_t btn, bsp_btn_ev_t ev);
+void page_totp_tick(void);
+bool page_totp_active(void);
+
+// 5.2 密码本（工具页子页）
 void page_vault_enter(void);
 void page_vault_exit(void);
 void page_vault_key(bsp_btn_t btn, bsp_btn_ev_t ev);
 void page_vault_tick(void);
-// 身份页返回时用：密码本当前是否占用着屏幕。
 bool page_vault_active(void);
 
-// 5 英雄联盟赛事中心
+// 5.3 找设备（蓝牙查找器，工具页子页）
+void page_finder_enter(void);
+void page_finder_exit(void);
+void page_finder_key(bsp_btn_t btn, bsp_btn_ev_t ev);
+void page_finder_tick(void);
+bool page_finder_active(void);
+
+// 5.4 万能遥控（蓝牙 HID，工具页子页）
+void page_remote_enter(void);
+void page_remote_exit(void);
+void page_remote_key(bsp_btn_t btn, bsp_btn_ev_t ev);
+void page_remote_tick(void);
+bool page_remote_active(void);
+
+// 5.5 信道体检（工具页子页）
+void page_channel_enter(void);
+void page_channel_exit(void);
+void page_channel_key(bsp_btn_t btn, bsp_btn_ev_t ev);
+void page_channel_tick(void);
+bool page_channel_active(void);
+
+// 5.6 节拍器（工具页子页）
+void page_metronome_enter(void);
+void page_metronome_exit(void);
+void page_metronome_key(bsp_btn_t btn, bsp_btn_ev_t ev);
+void page_metronome_tick(void);
+bool page_metronome_active(void);
+
+// 6 英雄联盟赛事中心
 void page_esports_enter(void);
 void page_esports_exit(void);
 void page_esports_key(bsp_btn_t btn, bsp_btn_ev_t ev);

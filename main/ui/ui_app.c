@@ -28,7 +28,8 @@ static const ui_module_t MODULES[] = {
     { "时间与日历", page_time_enter, page_time_exit, page_time_key, page_time_tick },
     { "专注与效率", page_focus_enter, page_focus_exit, page_focus_key, page_focus_tick },
     { "作息与倒计时", page_routine_enter, page_routine_exit, page_routine_key, page_routine_tick },
-    { "身份与工具", page_identity_enter, page_identity_exit, page_identity_key, page_identity_tick },
+    { "身份", page_identity_enter, page_identity_exit, page_identity_key, page_identity_tick },
+    { "工具", page_tools_enter, page_tools_exit, page_tools_key, page_tools_tick },
     { "英雄联盟赛事中心", page_esports_enter, page_esports_exit, page_esports_key, page_esports_tick },
     { "系统设置", page_settings_enter, page_settings_exit, page_settings_key, page_settings_tick },
 };
