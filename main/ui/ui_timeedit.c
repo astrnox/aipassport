@@ -53,13 +53,26 @@ static void te_apply(int index, int delta, bool wrap)
     te_clamp(index);
 }
 
-// 提示条写出当前字段真实的长按步长：数值字段来自 step，选项字段固定为 1。这样提示
-// 不会承诺一个实际不会发生的步长（"按钮与说的不一样"）。
+// 长按步长：数值字段至少"长按加十"，选项字段固定 1。
+// 原先直接取字段的 step，而调用方给"时/分"等字段传了 1 或 5，长按实际只走一两格，
+// 与"长按大步调整"的说明不符——这正是用户反馈的"长按上下键无法十个十个地输入"。
+// 这里给数值字段兜底到 10；调用方显式给了更大的步长则沿用。区间不足步长时退到区间
+// 跨度，保证一次长按至少能挪到另一端，不会原地不动。
+static int te_long_step(int index)
+{
+    const ui_timeedit_field_t *f = &s.fields[index];
+    if (f->names) return 1;
+    int step = f->step < 10 ? 10 : f->step;
+    int span = f->max - f->min;
+    if (span > 0 && step > span) step = span;
+    if (step < 1) step = 1;
+    return step;
+}
+
+// 提示条写出当前字段真实的长按步长：这样提示不会承诺一个实际不会发生的步长。
 static void te_hint(void)
 {
-    int step = s.fields[s.cursor].step;
-    if (s.fields[s.cursor].names) step = 1;
-    if (step < 1) step = 1;
+    int step = te_long_step(s.cursor);
     char buf[64];
     snprintf(buf, sizeof(buf), "短按 ±1  长按 ±%d  OK 下一项  长按OK 保存", step);
     ui_page_set_hint(buf);
@@ -189,11 +202,10 @@ bool ui_timeedit_handle(bsp_btn_t btn, bsp_btn_ev_t ev)
             return true;
         }
         if (btn == BSP_BTN_UP || btn == BSP_BTN_DOWN) {
-            // 选项字段按 1 步循环；数值字段按字段自己的 step（默认 10，即"长按加十"）
-            // 大步调整，并在 min..max 内夹紧。
+            // 选项字段按 1 步循环；数值字段固定走 10 的步长（见 te_long_step），并在
+            // min..max 内夹紧。长按一定产生肉眼可见的大步变化。
             bool option = s.fields[s.cursor].names != NULL;
-            int step = option ? 1 : s.fields[s.cursor].step;
-            if (step < 1) step = 1;
+            int step = te_long_step(s.cursor);
             te_apply(s.cursor, (btn == BSP_BTN_UP) ? -step : step, option);
             te_render();
             return true;

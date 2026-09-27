@@ -445,3 +445,80 @@ bool app_totp_parse_uri(const char *uri, app_totp_account_t *out)
     out->secret_len = secret_len;
     return true;
 }
+
+// 统计忽略分隔符后的有效字符数，并顺带判断整体是否都是合法 Base32 / 16 进制字符。
+// 这样"自动识别编码"不需要先尝试解码再回退，也不会把带空格粘贴的密钥判成非法。
+static size_t secret_effective_len(const char *text, bool *base32_ok, bool *hex_ok)
+{
+    size_t count = 0;
+    bool b32 = true;
+    bool hx = true;
+    for (const char *c = text; *c; c++) {
+        if (*c == ' ' || *c == '-' || *c == '=') continue;
+        count++;
+        if (base32_value(*c) < 0) b32 = false;
+        if (hex_value(*c) < 0) hx = false;
+    }
+    if (base32_ok) *base32_ok = b32;
+    if (hex_ok) *hex_ok = hx;
+    return count;
+}
+
+// 16 进制解码：两位一字节，忽略同样的分隔符，奇数个有效字符判为非法。
+static bool secret_decode_hex(const char *text, uint8_t *out, size_t out_cap, size_t *out_len)
+{
+    size_t written = 0;
+    int high = -1;
+    for (const char *c = text; *c; c++) {
+        if (*c == ' ' || *c == '-' || *c == '=') continue;
+        int value = hex_value(*c);
+        if (value < 0) return false;
+        if (high < 0) {
+            high = value;
+            continue;
+        }
+        if (written >= out_cap) return false;
+        out[written++] = (uint8_t)((high << 4) | value);
+        high = -1;
+    }
+    if (high >= 0 || written == 0) return false;
+    *out_len = written;
+    return true;
+}
+
+bool app_totp_parse_secret(const char *label, const char *key,
+                           int digits, int period, uint8_t algo,
+                           app_totp_account_t *out)
+{
+    if (!key || !out) return false;
+
+    bool base32_ok = false;
+    bool hex_ok = false;
+    size_t effective = secret_effective_len(key, &base32_ok, &hex_ok);
+    // 10-64 位：更短熵不足，更长则超出单条口令的存储与显示预期。
+    if (effective < 10 || effective > 64) return false;
+
+    memset(out, 0, sizeof(*out));
+    out->digits = (digits == 8) ? 8 : 6;
+    if (period <= 0) period = 30;
+    if (period < 10) period = 10;
+    if (period > 300) period = 300;
+    out->period = period;
+    out->algo = (algo == APP_TOTP_ALGO_SHA256) ? APP_TOTP_ALGO_SHA256 : APP_TOTP_ALGO_SHA1;
+    if (label && label[0]) copy_utf8_prefix(label, out->label, sizeof(out->label));
+
+    size_t secret_len = 0;
+    // 优先 Base32（标准口令编码）；当密钥含 0/1/8/9 等 Base32 不接受的字符、却全是
+    // 16 进制字符时，自动改按 16 进制解析。
+    if (base32_ok &&
+        app_totp_base32_decode(key, out->secret, sizeof(out->secret), &secret_len) &&
+        secret_len > 0) {
+        out->secret_len = secret_len;
+        return true;
+    }
+    if (hex_ok && secret_decode_hex(key, out->secret, sizeof(out->secret), &secret_len)) {
+        out->secret_len = secret_len;
+        return true;
+    }
+    return false;
+}

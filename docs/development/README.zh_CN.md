@@ -28,6 +28,8 @@
 - [coding-conventions.zh_CN.md](engineering/coding-conventions.zh_CN.md)：代码约定（语言风格、复用、注释、测试同步、资源约束等），包含中文字体接入、空白/方框排查与显示验收。
 - [lvgl-chinese-fonts.zh_CN.md](engineering/lvgl-chinese-fonts.zh_CN.md)：CJK 配置、字体生成/链接、fallback 示例、缺字检查和故障排查的分步指南。
 - [wifi-provisioning.zh_CN.md](engineering/wifi-provisioning.zh_CN.md)：参考 BLUFI 分支实现蓝牙 Wi-Fi 配网，包含配套小程序名称及接入检查。
+- [ui-ins-visual-refresh.zh_CN.md](engineering/ui-ins-visual-refresh.zh_CN.md)：仅策划的 ins 风视觉改版——暖调中性色加单一强调色，禁用渐变与蓝紫色系，含迁移步骤。
+- [memory-and-power-optimization.zh_CN.md](engineering/memory-and-power-optimization.zh_CN.md)：仅策划的内存与节电梳理——LVGL 对象峰值、池定容、空闲重绘浪费与分阶段优化路径。
 
 ## CI（ci）
 

@@ -87,6 +87,10 @@ esp_err_t app_state_init(void);
 app_datetime_t app_state_now(void);
 uint64_t       app_state_now_unix(void);
 void           app_state_set_time(const app_datetime_t *dt, const char *source);
+// 设备是否"曾经知道过时间"：NVS 里恢复过时钟或手动/NTP 设置过。false 表示从未校准，
+// app_state_now() 给出的只是占位基准（2026-01-01 00:00），不能当作"现在几点"来定位。
+// time_synced 用于判断"是否权威"，本函数用于区分"完全没设过"与"设过但重启后未同步"。
+bool           app_state_time_known(void);
 
 // ---- 电量与网络 ----
 int  app_state_battery_soc(void);                 // 0..100；读取失败返回 -1

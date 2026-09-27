@@ -28,6 +28,7 @@
 
 #include "ui_theme.h"
 #include "ui_app.h"
+#include "ui_sound.h"
 
 #include "app_state.h"
 #include "logic/app_metronome.h"
@@ -134,17 +135,17 @@ static void click_build(void)
 static bool audio_prepare(void)
 {
     if (bsp_audio_set_format(MT_RATE, 16, 1) != ESP_OK) return false;
-    int vol = app_state_settings()->volume;
-    if (vol < 10) vol = 10;
-    if (vol > 100) vol = 100;
-    bsp_audio_set_volume((uint8_t)vol);
+    // 音量/静音统一由设置决定：静音时由 ui_sound_apply_volume 落到 0。
+    // 以前这里把音量强行抬到 ≥10，导致"音量调到 0 仍然有声"。
+    ui_sound_apply_volume();
     return true;
 }
 
 static void click_play(bool accent)
 {
+    // 每次都读实时设置，而不是进入页面时的旧快照：否则运行中静音后会继续响。
     // 静音是用户的明确选择，这里不绕开它；页面会用横幅说明"不会出声以及怎么打开"。
-    if (!s.audio_ok || s.muted || !s_click_ready) return;
+    if (!s.audio_ok || app_state_settings()->sound_muted || !s_click_ready) return;
     const int16_t *buf = accent ? s_click_accent : s_click_normal;
     if (bsp_audio_write(buf, MT_CLICK_SAMPLES * sizeof(int16_t)) != ESP_OK) {
         ESP_LOGD("metronome", "发声失败，忽略");
@@ -430,7 +431,10 @@ void page_metronome_key(bsp_btn_t btn, bsp_btn_ev_t ev)
     }
 
     if (s.view == MT_TAP) {
-        if (ev != BSP_BTN_CLICK) return;
+        // 用"按下"而不是"单击"：单击要等去抖 + 双击判定窗口结束才产生，两次敲击会被
+        // 强行拉开数百毫秒，速度上限就卡在 ~180 BPM。按下事件在接触瞬间到达，才够快。
+        // 代价是长按 OK 返回时会先记下一下敲击；反正马上离开本视图，影响可忽略。
+        if (ev != BSP_BTN_PRESS) return;
         if (btn == BSP_BTN_OK) {
             app_metronome_tap(&s.m, now_ms());
             render_bpm();

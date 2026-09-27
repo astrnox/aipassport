@@ -28,10 +28,12 @@ CONFIG_LV_FONT_MONTSERRAT_20=y
 # 展示级数字(时钟、验证码、比分、倒计时)用 Montserrat 32/40,不额外带中文大字号。
 CONFIG_LV_FONT_MONTSERRAT_32=y
 CONFIG_LV_FONT_MONTSERRAT_40=y
-# LVGL 内置 malloc 池大小(KB)。它是独立静态区、不与系统堆共享,配大了会白白占用 RAM。
-# 工具箱界面比原 demo 复杂(滚动列表、环形进度、日历网格),24KB 偏紧,这里留足余量;
-# 若出现绘制卡死/看门狗,再向上调。
-CONFIG_LV_MEM_SIZE_KILOBYTES=48
+# LVGL 内置 malloc 池大小(KB)。它是独立静态区、不与系统堆共享——池越大，留给 Wi-Fi、
+# TLS、配网等需要"大块连续内存"的就越少，这正是"内存不足"提示反复出现的原因之一。
+# 工具箱界面比原 demo 复杂(滚动列表、环形进度、日历网格)，但经削减 LVGL 对象峰值
+# (作息页切标签即释放非当前页、列表行去掉独立指示条、赛程列表分页每页 10 条)后，
+# 40KB 已有合理余量，把省下的 8KB 还给系统堆。若出现绘制卡死/看门狗，再向上调。
+CONFIG_LV_MEM_SIZE_KILOBYTES=40
 # 名片动图用 animimg 逐帧播放。手机端已把 GIF 解码成 RGB565 帧,设备端不需要 GIF
 # 解码器,所以这里不开 LV_USE_GIF——它对无 PSRAM 的 C3 来说内存代价过大。
 CONFIG_LV_USE_ANIMIMG=y

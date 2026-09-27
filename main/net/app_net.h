@@ -121,3 +121,9 @@ const char *app_net_prov_pass(void);
 const char *app_net_prov_url(void);
 // 配网网页最近一次成功保存的提示（供页面展示），无则返回 NULL。
 const char *app_net_prov_note(void);
+
+// 手动清理内存后再重试热点配网的辅助（"内存不足"时给用户一个按键出口）。
+// 只释放可再生的缓存与后台请求（赛区缓存、正在跑的扫描、蓝牙角色），不触碰用户数据
+// 与正在使用的射频，也不阻塞（蓝牙停止只是异步入队）。返回清理前后空闲堆增量，供
+// 界面显示；即使增量为 0 也值得重试——碎片化场景下"释放后重分配"本身就可能成功。
+size_t app_net_prov_reclaim_memory(void);

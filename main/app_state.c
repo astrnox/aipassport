@@ -469,6 +469,12 @@ uint64_t app_state_now_unix(void)
     return now > 0 ? (uint64_t)now : 0;
 }
 
+bool app_state_time_known(void)
+{
+    // epoch 仍是占位基准 → 从未校准过（出厂/清数据），此时读到的是 2026-01-01 00:00。
+    return s.epoch_base > DEFAULT_EPOCH;
+}
+
 app_datetime_t app_state_now(void)
 {
     int64_t local = (int64_t)app_state_now_unix() + (int64_t)s.settings.utc_offset_minutes * 60;

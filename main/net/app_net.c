@@ -522,7 +522,18 @@ static esp_err_t http_get_json(const char *url, char **out, int *out_len)
         return ESP_ERR_INVALID_RESPONSE;
     }
 
-    char *buf = (char *)malloc(NET_HTTP_MAX_BODY + 1);
+    // 不要再一次性 malloc(NET_HTTP_MAX_BODY)（64 KB）：无 PSRAM 的 C3 上，应用常驻
+    // 状态 + LVGL 池 + Wi-Fi 栈已经吃掉大半内部 RAM，64 KB 连续块时有时无，失败时就是
+    // 界面上那句"内存不足"。改为按需增长：已知长度就按长度精确分配，未知（分块传输）
+    // 从 4 KB 起按倍翻倍，峰值只到实际正文大小——正常响应通常几 KB 到十几 KB。
+    int hint = esp_http_client_get_content_length(client);
+    if (hint > NET_HTTP_MAX_BODY) {
+        esp_http_client_close(client);
+        esp_http_client_cleanup(client);
+        return ESP_ERR_INVALID_SIZE;
+    }
+    int cap = (hint > 0) ? hint : 4096;
+    char *buf = (char *)malloc((size_t)cap + 1);
     if (!buf) {
         esp_http_client_close(client);
         esp_http_client_cleanup(client);
@@ -531,13 +542,21 @@ static esp_err_t http_get_json(const char *url, char **out, int *out_len)
 
     int total = 0;
     bool too_big = false;
-    while (total < NET_HTTP_MAX_BODY) {
-        int r = esp_http_client_read(client, buf + total, NET_HTTP_MAX_BODY - total);
+    for (;;) {
+        if (total == cap) {
+            if (cap >= NET_HTTP_MAX_BODY) { too_big = true; break; }
+            int ncap = cap * 2;
+            if (ncap > NET_HTTP_MAX_BODY) ncap = NET_HTTP_MAX_BODY;
+            char *nb = (char *)realloc(buf, (size_t)ncap + 1);
+            if (!nb) { err = ESP_ERR_NO_MEM; break; }
+            buf = nb;
+            cap = ncap;
+        }
+        int r = esp_http_client_read(client, buf + total, cap - total);
         if (r < 0) { err = ESP_FAIL; break; }
         if (r == 0) break;
         total += r;
     }
-    if (total >= NET_HTTP_MAX_BODY) too_big = true;
 
     esp_http_client_close(client);
     esp_http_client_cleanup(client);
@@ -658,7 +677,10 @@ static void channel_worker(void *arg)
 {
     (void)arg;
 
-    app_channel_report_t report;
+    // 报告含 48 条热点明细（每条约 42 字节），放栈上会吃掉 2KB 以上；任务栈只有几千
+    // 字节，还要留给 esp_wifi 调用链。放静态区，并用 s_channel_running 保证同一时刻
+    // 只有一个 worker 在写它。
+    static app_channel_report_t report;
     app_channel_reset(&report);
     app_fetch_state_t final = APP_FETCH_FAILED;
     char err[64] = { 0 };
@@ -696,7 +718,13 @@ static void channel_worker(void *arg)
     }
     if (n > 0 && esp_wifi_scan_get_ap_records(&n, recs) == ESP_OK) {
         for (uint16_t i = 0; i < n; i++) {
-            app_channel_add_ap(&report, recs[i].primary, recs[i].rssi);
+            // 隐藏 SSID 时驱动给出的 ssid 为空串，这里按长度 0 处理，明细页会显示
+            // "隐藏网络"。BSSID 一并带上，方便同一 SSID 的多个 AP 区分开。
+            const char *ssid = (const char *)recs[i].ssid;
+            int ssid_len = 0;
+            while (ssid_len < 32 && ssid[ssid_len] != '\0') ssid_len++;
+            app_channel_add_ap(&report, recs[i].primary, recs[i].rssi,
+                               ssid, ssid_len, recs[i].bssid);
         }
     }
     free(recs);
@@ -750,7 +778,9 @@ void app_net_channel_scan_request(void)
     s_channel_error[0] = '\0';
     net_unlock();
 
-    if (xTaskCreate(channel_worker, "net_channel", 4096, NULL, 4, NULL) != pdPASS) {
+    // 6144：报告本身已挪到静态区，但 esp_wifi_scan_* 的调用链在无 PSRAM 的目标上
+    // 仍需可观栈空间，4096 在密集环境里偏紧。
+    if (xTaskCreate(channel_worker, "net_channel", 6144, NULL, 4, NULL) != pdPASS) {
         net_lock();
         s_channel_running = false;
         s_channel_state = APP_FETCH_FAILED;
@@ -1636,9 +1666,15 @@ static const char PROV_PAGE[] =
     "<form method=\"post\" action=\"/totp_secret\">\n"
     "<h2>动态口令</h2>\n"
     "<label>备注名</label><input name=\"label\" maxlength=\"8\" placeholder=\"校园邮箱\">\n"
-    "<label>密钥 (Base32)</label><input name=\"secret\" maxlength=\"80\" placeholder=\"JBSWY3DPEHPK3PXP\">\n"
+    "<label>密钥（Base32 或 16 进制，10-64 位，可含空格/横线）</label>\n"
+    "<input name=\"secret\" maxlength=\"80\" placeholder=\"JBSWY3DPEHPK3PXP\">\n"
+    "<label>验证码位数</label><select name=\"digits\">"
+    "<option value=\"6\">6 位</option><option value=\"8\">8 位</option></select>\n"
+    "<label>刷新周期（秒）</label><input name=\"period\" type=\"number\" min=\"10\" max=\"300\" value=\"30\">\n"
+    "<label>算法</label><select name=\"algorithm\">"
+    "<option value=\"SHA1\">SHA1</option><option value=\"SHA256\">SHA256</option></select>\n"
     "<button type=\"submit\">添加口令</button>\n"
-    "<p class=\"st\">只填密钥即可，算法/位数/周期按常见的 SHA1 / 6 位 / 30 秒处理。</p>\n"
+    "<p class=\"st\">只填密钥即可，编码形式自动识别；位数/周期/算法可留默认（6 位 / 30 秒 / SHA1）。</p>\n"
     "</form>\n"
     "<form method=\"post\" action=\"/totp\">\n"
     "<label>或粘贴 otpauth:// 链接</label>\n"
@@ -2176,8 +2212,8 @@ static esp_err_t prov_post_vault_unlock(httpd_req_t *req)
     return prov_reply(req, "恢复码正确，密码本已解锁，可以继续添加条目了");
 }
 
-// 动态口令：只让用户填备注名与 Base32 密钥，算法/位数/周期用最常见的默认值，避免
-// 在手机上多填三格还填错。
+// 动态口令：可只填密钥，也可粘贴 otpauth 链接（走 /totp）。位数、刷新周期与算法允许
+// 用户自定义，不填则用最常见的 6 位 / 30 秒 / SHA1；密钥编码形式由逻辑层自动识别。
 static esp_err_t prov_post_totp_secret(httpd_req_t *req)
 {
     char body[256];
@@ -2188,22 +2224,27 @@ static esp_err_t prov_post_totp_secret(httpd_req_t *req)
 
     char label[24];
     char secret[128];
+    char digits_text[8];
+    char period_text[8];
+    char algo_text[16];
     form_field(body, "label", label, sizeof(label));
     if (!form_field(body, "secret", secret, sizeof(secret)) || secret[0] == '\0') {
         httpd_resp_set_status(req, "400 Bad Request");
         return prov_reply(req, "请填写密钥");
     }
+    form_field(body, "digits", digits_text, sizeof(digits_text));
+    form_field(body, "period", period_text, sizeof(period_text));
+    form_field(body, "algorithm", algo_text, sizeof(algo_text));
+
+    int digits = (atoi(digits_text) == 8) ? 8 : 6;
+    int period = period_text[0] ? atoi(period_text) : 0;   // 0 交给逻辑层取默认 30
+    uint8_t algo = strstr(algo_text, "256") ? APP_TOTP_ALGO_SHA256 : APP_TOTP_ALGO_SHA1;
 
     app_totp_account_t acct;
-    memset(&acct, 0, sizeof(acct));
-    acct.digits = 6;
-    acct.period = 30;
-    acct.algo = APP_TOTP_ALGO_SHA1;
-    if (!app_totp_base32_decode(secret, acct.secret, sizeof(acct.secret), &acct.secret_len) ||
-        acct.secret_len == 0) {
-        return prov_reply(req, "密钥不是合法的 Base32：请确认只包含 A-Z 与 2-7，不要带空格或数字 0/1");
+    if (!app_totp_parse_secret(label, secret, digits, period, algo, &acct)) {
+        return prov_reply(req, "密钥需为 10-64 位的 Base32 或 16 进制，可含空格与横线；"
+                               "请确认长度与字符集是否匹配");
     }
-    if (label[0]) copy_trunc(acct.label, sizeof(acct.label), label);
 
     int idx = app_state_totp_add(&acct);
     if (idx < 0) {
@@ -2625,6 +2666,27 @@ static void log_prov_heap(const char *stage)
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
 }
 
+// "内存不足"时给用户一个明确出口：长按下键触发一次清理再重试。这里只放掉可再生的
+// 东西——赛区/积分榜缓存重新联网即可再取，蓝牙角色与热点抢同一路射频且各占一份
+// 可观的协议栈，用异步请求停掉（协议栈在它自己的 worker 里释放，不阻塞界面）。
+size_t app_net_prov_reclaim_memory(void)
+{
+    uint32_t before = esp_get_free_heap_size();
+
+    net_lock();
+    s_league_count = 0;
+    s_leagues_running = false;
+    s_standings_running = false;
+    net_unlock();
+
+    app_ble_finder_request_stop();
+    app_ble_remote_request_stop();
+
+    uint32_t after = esp_get_free_heap_size();
+    log_prov_heap("手动清理后");
+    return (size_t)(after > before ? after - before : 0);
+}
+
 // 本次 app_net_prov_start() 是否由它自己打开了射频。回滚时只有这一种情况才允许关
 // Wi-Fi：否则会把 STA 连接或赛事中心正在用的射频一起关掉。
 static bool s_prov_opened_wifi;
@@ -2702,6 +2764,11 @@ esp_err_t app_net_prov_start(void)
     hc.max_uri_handlers = 16;
     hc.lru_purge_enable = true;
     hc.stack_size = 6144;
+    // 默认 7 个并发 socket，每个都要 lwIP 收发缓冲，在无 PSRAM 的板子上是配网启动
+    // 失败的主因之一。手机配置页正常只需 1-2 条连接，留 4 条并配合 lru_purge 足够；
+    // 旧连接会被自动回收，不会出现"网页打不开"。
+    hc.max_open_sockets = 4;
+    hc.backlog_conn = 2;
     err = httpd_start(&s_httpd, &hc);
     if (err != ESP_OK) {
         s_httpd = NULL;

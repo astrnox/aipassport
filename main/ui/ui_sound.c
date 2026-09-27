@@ -63,11 +63,7 @@ static void beep_task(void *arg)
 
     // 音频未初始化时 set_format 返回 INVALID_STATE，此时静默跳过，不影响其他功能。
     if (bsp_audio_set_format(SND_RATE, 16, 1) == ESP_OK) {
-        app_settings_t *st = app_state_settings();
-        int vol = st->volume;
-        if (vol < 10) vol = 10;
-        if (vol > 100) vol = 100;
-        bsp_audio_set_volume((uint8_t)vol);
+        ui_sound_apply_volume();
         if (bsp_audio_write(buf, (size_t)total * sizeof(int16_t)) != ESP_OK) {
             ESP_LOGD("ui_sound", "提示音写入失败，忽略");
         }
@@ -89,4 +85,11 @@ void ui_sound_beep(void)
     if (xTaskCreate(beep_task, "ui_beep", 3072, NULL, 4, NULL) != pdPASS) {
         s_busy = false;
     }
+}
+
+void ui_sound_apply_volume(void)
+{
+    const app_settings_t *st = app_state_settings();
+    // 静音直接落到 0，让"静音"在 codec 层面成立，而不是靠每条发声路径各自判断。
+    bsp_audio_set_volume(st->sound_muted ? 0 : st->volume);
 }

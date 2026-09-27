@@ -1,8 +1,10 @@
 // main/ui/ui_channel.c —— 工具页子页：信道体检（Wi-Fi 信道扫描）。
 //
 // 普通用户看不懂"信道 6 上有 7 个 AP、RSSI -52"，只想知道"我家 Wi-Fi 为什么卡、要不要
-// 动路由器"。所以默认这一屏只给结论：拥挤度、一句人话、建议改到哪个信道；想看细节的人
-// 再按 OK 进第二屏，逐信道列出数量与最强信号。这正是"普通结论 + 可选明细"两级。
+// 动路由器"。所以默认这一屏只给结论：拥挤度、一句人话、建议改到哪个信道。想看细节的人
+// 按 OK 进第二屏，按拥挤度从低到高列出 13 条信道（最空的排最前）；在某条信道上再按 OK
+// 进第三屏，列出这条信道上的热点（SSID、信号强度），按强度从强到弱排。这正是
+// "普通结论 + 逐信道 + 逐热点" 三级。
 //
 // 扫描由 net/app_net 在内部 worker 完成，本页只读状态与报告，绝不在按键回调里等。
 //
@@ -28,8 +30,9 @@
 #define CH_CW (UI_W - 2 * UI_MARGIN_X)
 
 typedef enum {
-    CH_MAIN = 0,
-    CH_DETAIL,
+    CH_MAIN = 0,   // 结论
+    CH_DETAIL,     // 逐信道（按拥挤度排序）
+    CH_APS,        // 某信道上的热点明细
 } ch_view_t;
 
 static struct {
@@ -41,8 +44,12 @@ static struct {
     bool                 have_report;
     app_fetch_state_t    last_state;
     bool                 retry_pending;   // 被"蓝牙拆栈中"顶掉，等射频空出后自动补扫
-    int                  focus;
-    ui_row_t             rows[APP_CHANNEL_COUNT];
+
+    int                  focus;           // DETAIL：order 中的位置；APS：热点下标
+    int                  aps_channel;     // APS 视图对应的信道
+    int                  ap_idx[APP_CHANNEL_MAX_APS];
+    int                  ap_count;
+    ui_row_t             rows[APP_CHANNEL_MAX_APS];   // 明细最多 13、热点最多 48，取大者
 } s;
 
 static const char *state_text(void)
@@ -69,6 +76,15 @@ static uint32_t score_color(int score)
     if (score < 30) return ui_c_ok();
     if (score < 70) return ui_c_warn();
     return ui_c_live();
+}
+
+// RSSI 强弱配色：越强越"好"（绿），越弱越"远"（灰）。
+static uint32_t rssi_color(int rssi)
+{
+    if (rssi >= -55) return ui_c_ok();
+    if (rssi >= -70) return ui_c_accent();
+    if (rssi >= -85) return ui_c_warn();
+    return ui_c_dim();
 }
 
 static void refresh_report(void)
@@ -138,11 +154,11 @@ static void build_main(void)
     ui_row_set_value(rec, val);
     if (rec.value) lv_obj_set_style_text_color(rec.value, lv_color_hex(ui_c_accent()), 0);
 
-    ui_page_set_hint("OK 看每信道明细  长按↑ 重扫   长按OK 返回");
+    ui_page_set_hint("OK 看每信道明细   长按↑ 重扫   长按OK 返回");
 }
 
 // ---------------------------------------------------------------------------
-// 明细视图：逐信道
+// 明细视图：逐信道（按拥挤度从低到高，即"最空的排最前"）
 // ---------------------------------------------------------------------------
 
 static void detail_render_focus(void)
@@ -160,30 +176,88 @@ static void build_detail(void)
     char right[24];
     snprintf(right, sizeof(right), "共 %d 个热点", s.report.ap_total);
     ui_header_create(c, "每信道明细", right, NULL, NULL);
-    ui_banner_create(c, "拥挤度按信号强度加权：一个贴墙的强路由器比十个远处弱信号更占信道",
+    ui_banner_create(c, "已按拥挤度排序，最空的排最前；某条信道里有哪些热点，按 OK 进去看",
                      ui_c_accent());
 
     lv_obj_t *list = ui_list_create(c);
-    for (int i = 0; i < APP_CHANNEL_COUNT; i++) {
-        int ch = APP_CHANNEL_MIN + i;
-        const app_channel_slot_t *slot = &s.report.ch[i];
+    for (int pos = 0; pos < APP_CHANNEL_COUNT; pos++) {
+        int ch = app_channel_order_channel(&s.report, pos);
+        const app_channel_slot_t *slot = &s.report.ch[ch - APP_CHANNEL_MIN];
 
         char title[16];
         snprintf(title, sizeof(title), "信道 %d", ch);
         char val[28];
         if (slot->aps <= 0) {
-            snprintf(val, sizeof(val), "无热点");
+            snprintf(val, sizeof(val), "空闲");
         } else {
-            snprintf(val, sizeof(val), "%d 个 · %d dBm", slot->aps, (int)slot->strongest);
+            snprintf(val, sizeof(val), "%d 个 · %d%%", slot->aps, slot->score);
         }
-        s.rows[i] = ui_row_create(list, title, val);
-        ui_row_set_title_color(s.rows[i], score_color(slot->score));
+        s.rows[pos] = ui_row_create(list, title, val);
+        ui_row_set_title_color(s.rows[pos], score_color(slot->score));
     }
 
     if (s.focus < 0) s.focus = 0;
     if (s.focus >= APP_CHANNEL_COUNT) s.focus = APP_CHANNEL_COUNT - 1;
     detail_render_focus();
-    ui_page_set_hint("↑↓ 查看   OK 返回结论   长按OK 返回结论");
+    ui_page_set_hint("↑↓ 选信道   OK 看该信道热点   长按OK 返回结论");
+}
+
+// ---------------------------------------------------------------------------
+// 热点视图：某条信道上有哪些热点
+// ---------------------------------------------------------------------------
+
+static void aps_render_focus(void)
+{
+    for (int i = 0; i < s.ap_count; i++) ui_row_set_selected(s.rows[i], i == s.focus);
+    if (s.focus >= 0 && s.focus < s.ap_count) ui_scroll_into_view(s.rows[s.focus].obj);
+}
+
+static void build_aps(void)
+{
+    lv_obj_t *c = s.page.content;
+    lv_obj_clean(c);
+    memset(s.rows, 0, sizeof(s.rows));
+
+    s.ap_count = app_channel_aps_on(&s.report, s.aps_channel, s.ap_idx,
+                                    APP_CHANNEL_MAX_APS);
+
+    char title[24];
+    snprintf(title, sizeof(title), "信道 %d 的热点", s.aps_channel);
+    char right[24];
+    snprintf(right, sizeof(right), "共 %d 个", s.ap_count);
+    ui_header_create(c, title, right, NULL, NULL);
+
+    if (s.ap_count <= 0) {
+        ui_empty_create(c, "这条信道上没有热点",
+                        "说明它很空，适合把路由器改到这里。按 OK 返回信道列表。");
+        ui_page_set_hint("OK/长按OK 返回");
+        return;
+    }
+
+    ui_banner_create(c, "按信号从强到弱排列；越靠上说明离你越近", ui_c_accent());
+
+    lv_obj_t *list = ui_list_create(c);
+    for (int i = 0; i < s.ap_count; i++) {
+        const app_channel_ap_t *ap = &s.report.aps[s.ap_idx[i]];
+        const char *name = ap->ssid[0] ? ap->ssid : "隐藏网络";
+        char val[20];
+        snprintf(val, sizeof(val), "%d dBm", (int)ap->rssi);
+        s.rows[i] = ui_row_create(list, name, val);
+        ui_row_set_title_color(s.rows[i], rssi_color(ap->rssi));
+    }
+
+    if (s.focus < 0) s.focus = 0;
+    if (s.focus >= s.ap_count) s.focus = s.ap_count - 1;
+    aps_render_focus();
+    ui_page_set_hint("↑↓ 查看热点   OK/长按OK 返回信道列表");
+}
+
+static void aps_open(int channel)
+{
+    s.aps_channel = channel;
+    s.view = CH_APS;
+    s.focus = 0;
+    build_aps();
 }
 
 // ---------------------------------------------------------------------------
@@ -226,6 +300,30 @@ void page_channel_key(bsp_btn_t btn, bsp_btn_ev_t ev)
 {
     if (!s.active || !s.page.scr) return;
 
+    if (s.view == CH_APS) {
+        if (ev == BSP_BTN_LONG && btn == BSP_BTN_OK) {
+            s.view = CH_DETAIL;
+            build_detail();
+            return;
+        }
+        if (ev != BSP_BTN_CLICK) return;
+        if (btn == BSP_BTN_UP) {
+            if (s.ap_count > 0) {
+                s.focus = (s.focus + s.ap_count - 1) % s.ap_count;
+                aps_render_focus();
+            }
+        } else if (btn == BSP_BTN_DOWN) {
+            if (s.ap_count > 0) {
+                s.focus = (s.focus + 1) % s.ap_count;
+                aps_render_focus();
+            }
+        } else if (btn == BSP_BTN_OK) {
+            s.view = CH_DETAIL;
+            build_detail();
+        }
+        return;
+    }
+
     if (s.view == CH_DETAIL) {
         if (ev == BSP_BTN_LONG && btn == BSP_BTN_OK) {
             s.view = CH_MAIN;
@@ -240,8 +338,7 @@ void page_channel_key(bsp_btn_t btn, bsp_btn_ev_t ev)
             s.focus = (s.focus + 1) % APP_CHANNEL_COUNT;
             detail_render_focus();
         } else if (btn == BSP_BTN_OK) {
-            s.view = CH_MAIN;
-            build_main();
+            aps_open(app_channel_order_channel(&s.report, s.focus));
         }
         return;
     }
@@ -292,7 +389,7 @@ void page_channel_tick(void)
     s.last_state = st;
 
     if (st == APP_FETCH_OK) refresh_report();
-    // 只重画结论屏；明细屏是静态快照，等用户返回时再看新结果。
+    // 只重画结论屏；明细/热点屏是静态快照，等用户返回时再看新结果。
     if (s.view == CH_MAIN) build_main();
 }
 

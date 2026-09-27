@@ -5,7 +5,8 @@
 // 按键含义。焦点在番茄钟卡与提醒行之间连续移动，底部提示条随焦点改变当前可用按键。
 //
 // 焦点与按键（提示条如实写出）：
-//   焦点在番茄钟  短按 OK 开始/暂停/继续，长按 UP 改专注与休息时长
+//   焦点在番茄钟  短按 OK 开始/暂停/继续，长按 UP 改专注与休息时长，
+//                 长按 DOWN 空闲时选预设、计时中重置本次计时（二次确认）
 //   焦点在提醒行  短按 OK 开关，长按 UP 改钟点与重复，长按 DOWN 删除（二次确认）
 //   焦点在新增行  短按 OK 或长按 UP 新增一条 08:00 每天
 //   任意位置      长按 OK 返回主页
@@ -171,10 +172,12 @@ static void reminder_row_text(int index)
     snprintf(title, sizeof(title), "%02d:%02d %s", r->hour, r->minute, when);
 
     ui_row_t row = s.rows[index];
-    lv_obj_t *title_lbl = lv_obj_get_child(row.obj, 1);
-    if (title_lbl) lv_label_set_text(title_lbl, title);
-    lv_obj_set_style_text_color(title_lbl,
-        lv_color_hex(r->enabled ? ui_c_text() : ui_c_dim()), 0);
+    lv_obj_t *title_lbl = row.title;
+    if (title_lbl) {
+        lv_label_set_text(title_lbl, title);
+        lv_obj_set_style_text_color(title_lbl,
+            lv_color_hex(r->enabled ? ui_c_text() : ui_c_dim()), 0);
+    }
     ui_row_set_value(row, r->enabled ? "开" : "关");
     if (row.value) {
         lv_obj_set_style_text_color(row.value,
@@ -247,7 +250,7 @@ static void update_hint(void)
     // 三条提示都要带"长按OK 返回"：page_focus_key 在最前面就实现了长按OK回主页，
     // 原先只有提醒行那一支漏了，用户在提醒列表里会找不到出口。
     if (s.focus == 0) {
-        ui_page_set_hint("OK 开始/暂停  长按↑↓ 设置/预设  长按OK 返回");
+        ui_page_set_hint("OK 开始/暂停  长按↑ 设时长  长按↓ 预设/重置  长按OK 返回");
     } else if (s.focus == list->count + 1) {
         ui_page_set_hint("OK 新增提醒  长按OK 返回");
     } else {
@@ -509,6 +512,28 @@ static void pomodoro_preset_open(void)
                      pomodoro_preset_done, NULL);
 }
 
+// 重置番茄钟：停止当前段并回到空闲，剩余时间恢复为整段时长。今日与历史累计统计保留
+// （它们记录的是"已完成"的事实，不属于本次计时状态），免打扰只在专注段生效因此自然解除。
+static void pomodoro_reset_confirm(bool confirmed, void *user)
+{
+    (void)user;
+    if (!confirmed) return;
+
+    app_pomodoro_t *p = app_state_pomodoro();
+    app_pomodoro_stop(p);
+    app_state_save_pomodoro();
+    render_pomodoro();
+    ui_hint_flash("计时已重置", 1400);
+}
+
+static void pomodoro_reset_open(void)
+{
+    if (ui_timeedit_active()) return;
+    ui_dialog_open(s.page.scr, "重置番茄钟？",
+                   "当前计时与进度将清零并回到空闲。今日与累计统计保留。",
+                   "重置", pomodoro_reset_confirm, NULL);
+}
+
 static void activate(void)
 {
     app_reminder_list_t *list = app_state_reminders();
@@ -547,7 +572,7 @@ static void activate(void)
 void page_focus_enter(void)
 {
     memset(&s, 0, sizeof(s));
-    s.page = ui_page_create("OK 开始/暂停  长按↑↓ 设置/预设  长按OK 返回");
+    s.page = ui_page_create("OK 开始/暂停  长按↑ 设时长  长按↓ 预设/重置  长按OK 返回");
 
     ui_header_create(s.page.content, "专注与效率", "", NULL, NULL);
 
@@ -604,8 +629,13 @@ void page_focus_key(bsp_btn_t btn, bsp_btn_ev_t ev)
     }
 
     if (ev == BSP_BTN_LONG && btn == BSP_BTN_DOWN) {
-        if (s.focus == 0) pomodoro_preset_open();
-        else if (s.focus >= 1 && s.focus <= app_state_reminders()->count) {
+        if (s.focus == 0) {
+            // 番茄钟卡上：空闲时长按↓ 选预设；一旦在计时（含暂停），长按↓ 变为"重置"，
+            // 给它一个明确的退出当前计时的出口，而不是只提示"计时中不可改时长"。
+            app_pomodoro_t *p = app_state_pomodoro();
+            if (p->state == APP_POMO_IDLE) pomodoro_preset_open();
+            else pomodoro_reset_open();
+        } else if (s.focus >= 1 && s.focus <= app_state_reminders()->count) {
             reminder_delete_open();
         }
         return;

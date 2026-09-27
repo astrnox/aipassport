@@ -280,10 +280,16 @@ static void check_reminders(void)
     }
 
     ESP_LOGI(TAG, "提醒到点: %s", due->label[0] ? due->label : "未命名");
-    ui_sound_beep();
 
+    // 提醒是"必须让用户看到"的信息：先唤醒屏幕，再发声、弹层。
+    // 静音或音量为 0 时 ui_sound_beep() 自身不会出声，但弹层照旧——提示音只是辅助，
+    // 不能因为静音就把整条提醒吞掉。以前这里还会因为快捷面板/引导浮层打开而直接
+    // return，连弹层都不给；现在只让开引导时不打断（用户就在屏前），其余情况都把
+    // 会遮住提醒的临时浮层收掉后弹出。
     if (s_asleep) wake_now();
-    if (onboarding_active() || home_quick_active() || ui_alert_is_open()) return;
+    ui_sound_beep();
+    if (onboarding_active()) return;
+    if (home_quick_active()) home_quick_close();
 
     char body[64];
     if (due->label[0]) {
@@ -456,6 +462,14 @@ void ui_app_handle_key(bsp_btn_t btn, bsp_btn_ev_t ev)
     }
     ui_app_note_activity();
 
+    // 通知弹层（提醒到点等）要能被任何浮层之上的按键关掉：它可能是在快捷面板或
+    // 某个对话框打开时弹出来的，所以优先于它们处理。以前它排在最后，一旦在快捷
+    // 面板上弹了提醒，按键会被面板吃掉、提醒关不掉。
+    if (ui_alert_is_open()) {
+        ui_alert_handle(btn, ev);
+        bsp_lvgl_unlock();
+        return;
+    }
     if (onboarding_active()) {
         onboarding_key(btn, ev);
         bsp_lvgl_unlock();
@@ -463,11 +477,6 @@ void ui_app_handle_key(bsp_btn_t btn, bsp_btn_ev_t ev)
     }
     if (home_quick_active()) {
         home_quick_key(btn, ev);
-        bsp_lvgl_unlock();
-        return;
-    }
-    if (ui_alert_is_open()) {
-        ui_alert_handle(btn, ev);
         bsp_lvgl_unlock();
         return;
     }

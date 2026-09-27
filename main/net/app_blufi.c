@@ -54,6 +54,7 @@ static char s_error[48];
 
 static volatile bool s_ble_connected;   // 手机是否已连上，决定要不要回报状态
 static bool s_bt_up;                    // BT 控制器与 NimBLE 主机是否已就绪
+static bool s_ctrl_up;                  // BT 控制器已 init+enable（失败回滚要用，见 app_ble_prov_start）
 static bool s_events_on;                // Wi-Fi 事件回调是否已注册
 
 // 手机下发的凭证先存这里，等对方发出"请求连接"再一次性交给 app_net，
@@ -587,16 +588,14 @@ esp_err_t app_ble_prov_start(void)
     err = esp_bt_controller_enable(ESP_BT_MODE_BLE);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "BT 控制器启用失败: %s", esp_err_to_name(err));
-        esp_bt_controller_deinit();
         goto fail;
     }
+    s_ctrl_up = true;
 
     // BLUFI 需要在收到凭证的当下就能连 Wi-Fi，所以先把射频拉起来（不连接）。
     err = app_net_wifi_radio_up();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Wi-Fi 射频启动失败: %s", esp_err_to_name(err));
-        esp_bt_controller_disable();
-        esp_bt_controller_deinit();
         goto fail;
     }
 
@@ -618,11 +617,24 @@ esp_err_t app_ble_prov_start(void)
     return ESP_OK;
 
 fail:
+    // 回滚必须"从后往前拆干净"。原实现只在个别分支里 deinit 控制器：一旦在注册回调或
+    // 起主机这一步失败（无 PSRAM 板上内存最紧张的就是这里），BT 控制器会以"已 init 已
+    // enable"的状态被留下。下一次重试的 esp_bt_controller_init() 于是直接返回
+    // ESP_ERR_INVALID_STATE，再按 OK 也永远起不来——用户看到的就是"一直失败、重试无用"。
     if (s_events_on) {
         esp_event_handler_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, on_wifi_event);
         esp_event_handler_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP, on_ip_event);
         s_events_on = false;
     }
+    if (s_ctrl_up) {
+        esp_bt_controller_disable();
+        esp_bt_controller_deinit();
+        s_ctrl_up = false;
+    }
+    // 配网没成、STA 也没连上时，把刚为配网拉起的射频一并释放，避免空转占着 2.4G，
+    // 让后续的热点配网 / 找设备 / 遥控能拿到干净的射频状态。
+    if (!app_net_wifi_connected()) app_net_wifi_stop();
+
     s_state = APP_BLE_PROV_FAILED;
     snprintf(s_error, sizeof(s_error), "蓝牙配网开启失败");
     return err == ESP_OK ? ESP_FAIL : err;
@@ -633,9 +645,13 @@ void app_ble_prov_stop(void)
     if (s_bt_up) {
         esp_blufi_adv_stop();
         host_deinit();
+        s_bt_up = false;
+    }
+    // 主机没起来、控制器却已 enable 的中间态也要拆掉（见 app_ble_prov_start 的 fail 分支）。
+    if (s_ctrl_up) {
         esp_bt_controller_disable();
         esp_bt_controller_deinit();
-        s_bt_up = false;
+        s_ctrl_up = false;
     }
 
     if (s_events_on) {
@@ -651,7 +667,10 @@ void app_ble_prov_stop(void)
 
 bool app_ble_prov_active(void)
 {
-    return s_state != APP_BLE_PROV_OFF;
+    // 只有"协议栈真的起来了"才算进行中。开启失败（FAILED）时 s_bt_up 为 false，不能算
+    // active：否则界面会拿它当"已开启"而拒绝重试，找设备 / 遥控也会被永久挡住——这正是
+    // 用户反馈的"一直失败、重试好几次没用"。
+    return s_bt_up;
 }
 
 app_ble_prov_state_t app_ble_prov_state(void)

@@ -49,18 +49,23 @@ typedef struct {
 
 // panel 是卡片内部的嵌套容器底色：深色主题比 card 亮一档，浅色主题比 card 暗一档，
 // 只靠明度差分层，不引入阴影（单缓冲屏重绘阴影会掉帧）。
+//
+// 配色取向（见 docs/development/engineering/ui-ins-visual-refresh.md）：暖调中性纸色 +
+// 单一赤陶强调色，取代原先的藏青底 + 电光青。禁用渐变，也禁用青到紫（约 200°–280°）
+// 区间的强调色——那正是"AI 味"的来源。live/warn/soon 刻意与 accent 拉开色相，避免
+// 状态语义和强调色混在一起。数值需在真机 RGB565 屏上复核对比度。
 static const palette_t PALETTE_DARK = {
-    .bg = 0x0B0E13, .card = 0x151A22, .panel = 0x1F2833, .text = 0xE8EDF4,
-    .dim = 0x93A0B4, .accent = 0x22D3EE, .live = 0xFF4757, .soon = 0xFFB020,
-    .done = 0x6B7280, .ok = 0x34D399, .warn = 0xF59E0B, .sel = 0x1E2632,
-    .border = 0x262E3A,
+    .bg = 0x100E0C, .card = 0x1B1815, .panel = 0x25201B, .text = 0xF3EEE8,
+    .dim = 0xA79E95, .accent = 0xE08B5A, .live = 0xE2604A, .soon = 0xD6A24C,
+    .done = 0x6F6862, .ok = 0x7FA37A, .warn = 0xD98E3F, .sel = 0x2A231E,
+    .border = 0x2E2822,
 };
 
 static const palette_t PALETTE_LIGHT = {
-    .bg = 0xF5F7FA, .card = 0xFFFFFF, .panel = 0xEDF1F6, .text = 0x10141A,
-    .dim = 0x5B6577, .accent = 0x0891B2, .live = 0xE11D48, .soon = 0xB45309,
-    .done = 0x9AA3B2, .ok = 0x059669, .warn = 0xB45309, .sel = 0xE6EEF6,
-    .border = 0xD8DFE8,
+    .bg = 0xF7F4F0, .card = 0xFFFFFF, .panel = 0xEFEAE3, .text = 0x1B1714,
+    .dim = 0x6E655C, .accent = 0xC0623A, .live = 0xB93A2A, .soon = 0x9A6B1E,
+    .done = 0xA69E95, .ok = 0x567B50, .warn = 0x9A6B1E, .sel = 0xE9E2D9,
+    .border = 0xDDD5CB,
 };
 
 static ui_theme_mode_t s_mode = UI_THEME_DARK;
@@ -337,6 +342,9 @@ lv_obj_t *ui_label_create(lv_obj_t *parent, const char *text,
                           const lv_font_t *font, uint32_t color)
 {
     lv_obj_t *label = lv_label_create(parent);
+    // LVGL 内部池/堆耗尽时 create 会返回 NULL；不拦的话紧随其后的样式调用就会解引用
+    // 空指针，表现正是"背光已亮的白屏重启"。这里与下面各 create 统一做防御。
+    if (!label) return NULL;
     lv_obj_set_style_text_font(label, font, 0);
     lv_obj_set_style_text_color(label, lv_color_hex(color), 0);
     lv_label_set_text(label, text ? text : "");
@@ -346,6 +354,7 @@ lv_obj_t *ui_label_create(lv_obj_t *parent, const char *text,
 lv_obj_t *ui_card_create(lv_obj_t *parent, int x, int y, int w, int h, uint32_t accent)
 {
     lv_obj_t *card = lv_obj_create(parent);
+    if (!card) return NULL;
     lv_obj_remove_flag(card, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_pos(card, x, y);
     lv_obj_set_size(card, w, h);
@@ -360,19 +369,21 @@ lv_obj_t *ui_card_create(lv_obj_t *parent, int x, int y, int w, int h, uint32_t 
 
     if (accent != 0) {
         lv_obj_t *bar = lv_obj_create(card);
-        lv_obj_remove_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
-        // LVGL 9 的 flex/grid 布局会覆盖 lv_obj_set_pos 设置的坐标；accent bar
-        // 是纯装饰条，必须钉在 (0,0)，所以用 FLOATING 把它排除在布局之外。
-        lv_obj_add_flag(bar, LV_OBJ_FLAG_FLOATING);
-        // 通高的方条会从圆角处戳出来。把它缩进成一段圆头竖条：上下各留出圆角的高度，
-        // 落点正好在卡片侧边变直的位置，看起来是有意留白而不是画歪了。
-        int inset = (h > 40) ? 8 : 0;
-        lv_obj_set_pos(bar, 0, inset);
-        lv_obj_set_size(bar, 3, h - inset * 2);
-        lv_obj_set_style_bg_color(bar, lv_color_hex(accent), 0);
-        lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
-        lv_obj_set_style_border_width(bar, 0, 0);
-        lv_obj_set_style_radius(bar, 2, 0);
+        if (bar) {
+            lv_obj_remove_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
+            // LVGL 9 的 flex/grid 布局会覆盖 lv_obj_set_pos 设置的坐标；accent bar
+            // 是纯装饰条，必须钉在 (0,0)，所以用 FLOATING 把它排除在布局之外。
+            lv_obj_add_flag(bar, LV_OBJ_FLAG_FLOATING);
+            // 通高的方条会从圆角处戳出来。把它缩进成一段圆头竖条：上下各留出圆角的高度，
+            // 落点正好在卡片侧边变直的位置，看起来是有意留白而不是画歪了。
+            int inset = (h > 40) ? 8 : 0;
+            lv_obj_set_pos(bar, 0, inset);
+            lv_obj_set_size(bar, 3, h - inset * 2);
+            lv_obj_set_style_bg_color(bar, lv_color_hex(accent), 0);
+            lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
+            lv_obj_set_style_border_width(bar, 0, 0);
+            lv_obj_set_style_radius(bar, 2, 0);
+        }
     }
     return card;
 }
@@ -388,6 +399,7 @@ ui_digit_row_t ui_digit_row_create(lv_obj_t *parent, int digits,
     row.count = digits;
     for (int i = 0; i < digits; i++) {
         lv_obj_t *label = lv_label_create(parent);
+        if (!label) break;
         lv_obj_set_style_text_font(label, font, 0);
         lv_obj_set_style_text_color(label, lv_color_hex(color), 0);
         lv_obj_set_width(label, digit_w);
@@ -413,6 +425,7 @@ void ui_digit_row_set(ui_digit_row_t *row, const char *text, uint32_t color)
 lv_obj_t *ui_list_create(lv_obj_t *parent)
 {
     lv_obj_t *list = lv_obj_create(parent);
+    if (!list) return NULL;
     lv_obj_remove_flag(list, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_width(list, LV_PCT(100));
     lv_obj_set_height(list, LV_SIZE_CONTENT);
@@ -429,6 +442,7 @@ ui_row_t ui_row_create(lv_obj_t *parent, const char *title, const char *value)
 {
     ui_row_t row = {0};
     lv_obj_t *obj = lv_obj_create(parent);
+    if (!obj) return row;   // 池/堆耗尽：返回空行，调用方按 !row.obj 跳过，不再崩溃
     lv_obj_remove_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_width(obj, LV_PCT(100));
     lv_obj_set_height(obj, UI_ROW_H);
@@ -437,28 +451,21 @@ ui_row_t ui_row_create(lv_obj_t *parent, const char *title, const char *value)
     // 圆角按 4 / 6 / 8 三档走：小药丸 4、列表行 6、卡片 8。同一类控件在任何页面都是
     // 同一个圆角，不再出现"这页的按钮是圆的、那页是方的"。
     lv_obj_set_style_radius(obj, 6, 0);
-    lv_obj_set_style_border_width(obj, 0, 0);
+    // 选中指示条改由行自身的 3px 左边框表达，不再建独立的子对象：每个列表行少一个
+    // LVGL 对象（作息页单页就有几十行，累加起来可观）。默认用透明度隐藏，未选中时
+    // 与原来的无边框外观完全一致。
+    lv_obj_set_style_border_side(obj, LV_BORDER_SIDE_LEFT, 0);
+    lv_obj_set_style_border_width(obj, 3, 0);
+    lv_obj_set_style_border_color(obj, lv_color_hex(ui_c_accent()), 0);
+    lv_obj_set_style_border_opa(obj, LV_OPA_TRANSP, 0);
     lv_obj_set_style_pad_all(obj, 0, 0);
     row.obj = obj;
 
-    row.indicator = lv_obj_create(obj);
-    lv_obj_remove_flag(row.indicator, LV_OBJ_FLAG_SCROLLABLE);
-    // 选中指示条是装饰元素，钉在行左侧；若行将来被设为 flex 容器，
-    // 需要 FLOATING 才能不被布局重新排列。
-    lv_obj_add_flag(row.indicator, LV_OBJ_FLAG_FLOATING);
-    lv_obj_set_pos(row.indicator, 0, 4);
-    lv_obj_set_size(row.indicator, 3, UI_ROW_H - 8);
-    lv_obj_set_style_bg_color(row.indicator, lv_color_hex(ui_c_accent()), 0);
-    lv_obj_set_style_bg_opa(row.indicator, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(row.indicator, 0, 0);
-    lv_obj_set_style_radius(row.indicator, 0, 0);
-    lv_obj_add_flag(row.indicator, LV_OBJ_FLAG_HIDDEN);
-
-    lv_obj_t *title_lbl = ui_label_create(obj, title, ui_font_body, ui_c_text());
-    lv_obj_align(title_lbl, LV_ALIGN_LEFT_MID, 12, 0);
+    row.title = ui_label_create(obj, title, ui_font_body, ui_c_text());
+    if (row.title) lv_obj_align(row.title, LV_ALIGN_LEFT_MID, 12, 0);
 
     row.value = ui_label_create(obj, value ? value : "", ui_font_hint, ui_c_dim());
-    lv_obj_align(row.value, LV_ALIGN_RIGHT_MID, -10, 0);
+    if (row.value) lv_obj_align(row.value, LV_ALIGN_RIGHT_MID, -10, 0);
     return row;
 }
 
@@ -470,19 +477,15 @@ void ui_row_set_value(ui_row_t row, const char *value)
 void ui_row_set_selected(ui_row_t row, bool selected)
 {
     if (!row.obj) return;
-    if (row.indicator) {
-        if (selected) lv_obj_remove_flag(row.indicator, LV_OBJ_FLAG_HIDDEN);
-        else lv_obj_add_flag(row.indicator, LV_OBJ_FLAG_HIDDEN);
-    }
+    lv_obj_set_style_border_opa(row.obj,
+        selected ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
     lv_obj_set_style_bg_color(row.obj,
         lv_color_hex(selected ? ui_c_sel() : ui_c_card()), 0);
 }
 
 void ui_row_set_title_color(ui_row_t row, uint32_t color)
 {
-    if (!row.obj) return;
-    lv_obj_t *title = lv_obj_get_child(row.obj, 1);
-    if (title) lv_obj_set_style_text_color(title, lv_color_hex(color), 0);
+    if (row.title) lv_obj_set_style_text_color(row.title, lv_color_hex(color), 0);
 }
 
 lv_obj_t *ui_tabs_create(lv_obj_t *parent, const char *const *names, int count)
@@ -642,11 +645,15 @@ void ui_progress_set(lv_obj_t *bar, int permille)
 void ui_scroll_into_view(lv_obj_t *obj)
 {
     if (!obj) return;
-    // 先强制结算一次布局：刚创建的控件其父容器还没排好子控件坐标，此时
-    // lv_obj_scroll_to_view 会按陈旧坐标（常常是 0）计算滚动量，表现为"光标往下走了
-    // 屏幕却不跟着滑"。结算后再滚，坐标才是真实的。
+    // 先强制结算一次布局：刚创建的控件其父容器还没排好子控件坐标，此时滚动会按陈旧
+    // 坐标（常常是 0）计算滚动量，表现为"光标往下走了屏幕却不跟着滑"。
     lv_obj_update_layout(obj);
-    lv_obj_scroll_to_view(obj, LV_ANIM_OFF);
+    // 用 recursive 版本逐级向上滚，而不是 lv_obj_scroll_to_view：列表行挂在
+    // ui_list_create() 返回的容器里，而那个容器是不可滚动的（真正能滚的是再上一层的
+    // 页面内容区）。lv_obj_scroll_to_view 只看直接父级，父级不可滚动时它什么都不做，
+    // 于是所有"行在列表里"的子界面都出现了"光标移动但屏幕不动"的问题——看起来就像
+    // 卡住或没定位到。recursive 会对每一层祖先都尝试滚动，可滚动的那一层才会真正滚动。
+    lv_obj_scroll_to_view_recursive(obj, LV_ANIM_OFF);
 }
 
 // ---------------------------------------------------------------------------
