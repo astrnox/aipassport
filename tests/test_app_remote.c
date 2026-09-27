@@ -130,6 +130,34 @@ int main(void)
                                       APP_REMOTE_LONG) == NULL);
     }
 
+    // ---- 界面文案与真实报文必须一一对应 ----
+    // 按键页的每一行都来自 app_remote_action_text()，实际发送走 app_remote_press()。
+    // 两者一旦不一致，就会出现"界面写着有这个功能、按下去却什么都不发"（或反过来按了
+    // 却不显示）。这里对每个模式 × 每个键 × 短按/长按穷举断言二者同真同假。
+    for (int m = 0; m < APP_REMOTE_MODE_COUNT; m++) {
+        int reachable = 0;
+        for (int b = APP_REMOTE_BTN_UP; b <= APP_REMOTE_BTN_OK; b++) {
+            for (int p = APP_REMOTE_CLICK; p <= APP_REMOTE_LONG; p++) {
+                const char *txt = app_remote_action_text((app_remote_mode_t)m,
+                                                         (app_remote_btn_t)b,
+                                                         (app_remote_press_t)p);
+                bool ok = press((app_remote_mode_t)m, (app_remote_btn_t)b,
+                                (app_remote_press_t)p, &down, &up);
+                assert((txt != NULL) == ok);
+                if (!ok) continue;
+
+                reachable++;
+                assert(down.length > 0 && down.length <= APP_REMOTE_KB_LEN);
+                assert(up.length == down.length);          // 松开报文与按下同规格
+                assert(up.report_id == down.report_id);
+                assert(up.map_index == down.map_index);
+                for (int i = 0; i < up.length; i++) assert(up.data[i] == 0);
+            }
+        }
+        // 每个模式都得有足够多的真功能：否则用户进了一个模式，大半按钮按下去没反应。
+        assert(reachable >= 3);
+    }
+
     // ---- 非法参数 ----
     assert(app_remote_press((app_remote_mode_t)99, APP_REMOTE_BTN_OK, APP_REMOTE_CLICK,
                             &down, &up) == false);
