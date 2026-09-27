@@ -10,6 +10,9 @@
 //  - 只有三个键、没有输入法：收藏就是把当前选中项存起来，用长按 ↑ 一键完成（再长按一次
 //    取消）。存错可以再存，代价远小于弹一个需要选"是/否"的对话框来打断找东西。
 //  - 长按 OK 恒为本项目统一的"返回工具页"；长按 ↑ 才是本页的"存/取消"，两者不混用。
+//    唯一的例外是蓝牙压根没打开（配网占用、或信道体检正在扫 Wi-Fi）：此时扫描没在跑、
+//    没有可收藏的项，页内直接给出具体原因，长按 ↑ 改为"重试打开蓝牙"，用户不必退出
+//    再进来。提示行与长按↑ 的实际行为永远一致，不会写着"重试"结果去存收藏。
 //
 // 蓝牙协议栈的拉起/拆除要几百毫秒，直接在按键回调里做会卡住界面，所以开启与停止都走
 // net/app_ble 的异步请求；本页只读快照，绝不直接触碰 NimBLE。
@@ -187,58 +190,66 @@ static void build_list(void)
     ui_header_create(c, "找设备", NULL, NULL, &s.hdr_right);
     if (s.hdr_right) lv_label_set_text(s.hdr_right, scan_state_text());
 
-    if (app_ble_finder_last_error() != ESP_OK) {
-        ui_banner_create(c, "蓝牙没能打开：可能正在配网或已被占用，请退出配网后再进本页。",
-                         ui_c_warn());
+    bool failed = app_ble_finder_last_error() != ESP_OK;
+    if (failed) {
+        const char *why = app_ble_finder_error_text();
+        ui_banner_create(c, why ? why : "蓝牙没能打开，请稍后重试", ui_c_warn());
     }
 
-    if (s.count <= 0) {
+    if (s.count > 0) {
+        lv_obj_t *list = ui_list_create(c);
+        bool section_saved = false;
+        bool section_near = false;
+        for (int i = 0; i < s.count; i++) {
+            if (s.entries[i].saved && !section_saved) {
+                ui_label_create(list, "我的设备", ui_font_hint, ui_c_dim());
+                section_saved = true;
+            }
+            if (!s.entries[i].saved && !section_near) {
+                ui_label_create(list, section_saved ? "附近的其他设备" : "附近设备",
+                                ui_font_hint, ui_c_dim());
+                section_near = true;
+            }
+
+            char title[40];
+            display_name(s.entries[i].addr, s.entries[i].name, title, sizeof(title));
+            char val[32];
+            entry_text(&s.entries[i], val, sizeof(val));
+            s.rows[i] = ui_row_create(list, title, val);
+
+            uint32_t col = s.entries[i].present ? closeness_color(s.entries[i].closeness)
+                                                : ui_c_dim();
+            if (s.rows[i].value) lv_obj_set_style_text_color(s.rows[i].value, lv_color_hex(col), 0);
+            if (s.entries[i].saved) ui_row_set_title_color(s.rows[i], ui_c_accent());
+        }
+
+        // 选中项：能按地址找到就跟着走，找不到（设备走了/被取消收藏）才退回同下标。
+        if (s.sel_valid) {
+            int fi = focus_of_addr(s.sel_addr);
+            if (fi >= 0) s.focus = fi;
+        }
+        if (s.focus < 0) s.focus = 0;
+        if (s.focus >= s.count) s.focus = s.count - 1;
+        memcpy(s.sel_addr, s.entries[s.focus].addr, 6);
+        s.sel_valid = true;
+        render_focus();
+    } else {
         ui_empty_create(c, "正在搜索蓝牙设备",
                         "打开耳机盒盖，或让要寻找的设备进入广播状态。"
                         "本页只显示正在发出蓝牙信号的设备。");
         s.focus = -1;
         s.sel_valid = false;
+    }
+
+    // 提示与长按↑ 的实际行为严格对应：蓝牙没打开时它是"重试"（此状态下扫描没跑，
+    // 收藏 / 取消收藏都无从谈起）；否则才是本页正常的"存/取消"。
+    if (failed) {
+        ui_page_set_hint("长按↑ 重试打开蓝牙   长按OK 返回工具页");
+    } else if (s.count <= 0) {
         ui_page_set_hint("长按OK 返回工具页");
-        return;
+    } else {
+        ui_page_set_hint("↑↓ 选择  OK 追踪  长按↑ 存/取消  长按OK 返回");
     }
-
-    lv_obj_t *list = ui_list_create(c);
-    bool section_saved = false;
-    bool section_near = false;
-    for (int i = 0; i < s.count; i++) {
-        if (s.entries[i].saved && !section_saved) {
-            ui_label_create(list, "我的设备", ui_font_hint, ui_c_dim());
-            section_saved = true;
-        }
-        if (!s.entries[i].saved && !section_near) {
-            ui_label_create(list, section_saved ? "附近的其他设备" : "附近设备",
-                            ui_font_hint, ui_c_dim());
-            section_near = true;
-        }
-
-        char title[40];
-        display_name(s.entries[i].addr, s.entries[i].name, title, sizeof(title));
-        char val[32];
-        entry_text(&s.entries[i], val, sizeof(val));
-        s.rows[i] = ui_row_create(list, title, val);
-
-        uint32_t col = s.entries[i].present ? closeness_color(s.entries[i].closeness)
-                                            : ui_c_dim();
-        if (s.rows[i].value) lv_obj_set_style_text_color(s.rows[i].value, lv_color_hex(col), 0);
-        if (s.entries[i].saved) ui_row_set_title_color(s.rows[i], ui_c_accent());
-    }
-
-    // 选中项：能按地址找到就跟着走，找不到（设备走了/被取消收藏）才退回同下标。
-    if (s.sel_valid) {
-        int fi = focus_of_addr(s.sel_addr);
-        if (fi >= 0) s.focus = fi;
-    }
-    if (s.focus < 0) s.focus = 0;
-    if (s.focus >= s.count) s.focus = s.count - 1;
-    memcpy(s.sel_addr, s.entries[s.focus].addr, 6);
-    s.sel_valid = true;
-    render_focus();
-    ui_page_set_hint("↑↓ 选择  OK 追踪  长按↑ 存/取消  长按OK 返回");
 }
 
 // ---------------------------------------------------------------------------
@@ -409,6 +420,13 @@ void page_finder_key(bsp_btn_t btn, bsp_btn_ev_t ev)
 
     // ---- 列表视图 ----
     if (ev == BSP_BTN_LONG && btn == BSP_BTN_UP) {
+        // 与提示一致：蓝牙没打开时长按↑ 是"重试"（此时扫描没跑，没有可收藏的项）；
+        // 否则才是本页正常的"存/取消收藏"。
+        if (app_ble_finder_last_error() != ESP_OK) {
+            app_ble_finder_request_start();
+            ui_hint_flash("正在重试打开蓝牙…", 1400);
+            return;
+        }
         if (s.focus < 0) {
             ui_hint_flash("还没有设备可收藏", 1500);
             return;

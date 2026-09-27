@@ -15,6 +15,7 @@
 #include "app_ble.h"
 
 #include "app_blufi.h"
+#include "app_net.h"
 
 #include "esp_bt.h"
 #include "esp_log.h"
@@ -40,6 +41,7 @@
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -102,6 +104,16 @@ static QueueHandle_t s_req_q;
 static TaskHandle_t s_req_task;
 static volatile esp_err_t s_finder_err = ESP_OK;
 static volatile esp_err_t s_remote_err = ESP_OK;
+
+// 失败时给普通用户看的一句话原因。只在 worker（唯一写入者）里改；界面在 last_error()
+// 非 ESP_OK 时读，与 s_finder_err/s_remote_err 用同样的"单写者 + 无锁读"约定。
+static char s_finder_reason[72];
+static char s_remote_reason[72];
+
+static void set_reason(char *dst, size_t cap, const char *text)
+{
+    snprintf(dst, cap, "%s", text);
+}
 
 // ---------------------------------------------------------------------------
 // 初始化（互斥锁与设备表只建一次）
@@ -598,11 +610,25 @@ static void stack_down(void)
 esp_err_t app_ble_finder_start(void)
 {
     ensure_init();
+    s_finder_reason[0] = '\0';
 
     if (s_mode == BLE_MODE_FINDER) return ESP_OK;
-    if (s_mode != BLE_MODE_IDLE) return ESP_ERR_INVALID_STATE;
+    if (s_mode != BLE_MODE_IDLE) {
+        set_reason(s_finder_reason, sizeof(s_finder_reason),
+                   "蓝牙正被另一功能占用，请先退出那个页面");
+        return ESP_ERR_INVALID_STATE;
+    }
     if (app_ble_prov_active()) {
         ESP_LOGW(TAG, "蓝牙配网进行中，暂不能开启找设备");
+        set_reason(s_finder_reason, sizeof(s_finder_reason),
+                   "蓝牙配网正在使用，请先关闭配网");
+        return ESP_ERR_INVALID_STATE;
+    }
+    // 射频互斥：信道体检正在扫 Wi-Fi。它只持续几秒，直接拒绝比硬开更稳。
+    if (app_net_channel_scan_running()) {
+        ESP_LOGW(TAG, "信道体检正在扫描，暂不能开启找设备");
+        set_reason(s_finder_reason, sizeof(s_finder_reason),
+                   "信道体检正在扫描 Wi-Fi，请等几秒后重试");
         return ESP_ERR_INVALID_STATE;
     }
 
@@ -618,6 +644,8 @@ esp_err_t app_ble_finder_start(void)
     esp_err_t err = stack_up();
     if (err != ESP_OK) {
         s_mode = BLE_MODE_IDLE;
+        set_reason(s_finder_reason, sizeof(s_finder_reason),
+                   "蓝牙协议栈启动失败，请长按↑ 重试");
         return err;
     }
     return ESP_OK;
@@ -693,11 +721,25 @@ static void remote_tx_cleanup(void)
 esp_err_t app_ble_remote_start(void)
 {
     ensure_init();
+    s_remote_reason[0] = '\0';
 
     if (s_mode == BLE_MODE_REMOTE) return ESP_OK;
-    if (s_mode != BLE_MODE_IDLE) return ESP_ERR_INVALID_STATE;
+    if (s_mode != BLE_MODE_IDLE) {
+        set_reason(s_remote_reason, sizeof(s_remote_reason),
+                   "蓝牙正被另一功能占用，请先退出那个页面");
+        return ESP_ERR_INVALID_STATE;
+    }
     if (app_ble_prov_active()) {
         ESP_LOGW(TAG, "蓝牙配网进行中，暂不能开启遥控");
+        set_reason(s_remote_reason, sizeof(s_remote_reason),
+                   "蓝牙配网正在使用，请先关闭配网");
+        return ESP_ERR_INVALID_STATE;
+    }
+    // 射频互斥：信道体检正在扫 Wi-Fi。它只持续几秒，直接拒绝比硬开更稳。
+    if (app_net_channel_scan_running()) {
+        ESP_LOGW(TAG, "信道体检正在扫描，暂不能开启遥控");
+        set_reason(s_remote_reason, sizeof(s_remote_reason),
+                   "信道体检正在扫描 Wi-Fi，请等几秒后重试");
         return ESP_ERR_INVALID_STATE;
     }
 
@@ -708,9 +750,13 @@ esp_err_t app_ble_remote_start(void)
 
     // 发送队列与任务先建好：主机一连上、用户一按键就能立刻发出报文。
     s_txq = xQueueCreate(8, sizeof(remote_job_t));
-    if (!s_txq) return ESP_ERR_NO_MEM;
+    if (!s_txq) {
+        set_reason(s_remote_reason, sizeof(s_remote_reason), "内存不足，请稍后重试");
+        return ESP_ERR_NO_MEM;
+    }
     if (xTaskCreate(remote_tx_task, "ble_hid_tx", 3072, NULL, 5, &s_tx_task) != pdPASS) {
         remote_tx_cleanup();
+        set_reason(s_remote_reason, sizeof(s_remote_reason), "内存不足，请稍后重试");
         return ESP_ERR_NO_MEM;
     }
 
@@ -719,6 +765,8 @@ esp_err_t app_ble_remote_start(void)
     if (err != ESP_OK) {
         remote_tx_cleanup();
         s_mode = BLE_MODE_IDLE;
+        set_reason(s_remote_reason, sizeof(s_remote_reason),
+                   "蓝牙协议栈启动失败，请长按↑ 重试");
         return err;
     }
     ESP_LOGI(TAG, "万能遥控已就绪，等待主机连接");
@@ -816,9 +864,19 @@ void app_ble_finder_request_start(void) { post_req(BLE_REQ_FINDER_START); }
 void app_ble_finder_request_stop(void)  { post_req(BLE_REQ_FINDER_STOP); }
 esp_err_t app_ble_finder_last_error(void) { return s_finder_err; }
 
+const char *app_ble_finder_error_text(void)
+{
+    return s_finder_reason[0] ? s_finder_reason : NULL;
+}
+
 void app_ble_remote_request_start(void) { post_req(BLE_REQ_REMOTE_START); }
 void app_ble_remote_request_stop(void)  { post_req(BLE_REQ_REMOTE_STOP); }
 esp_err_t app_ble_remote_last_error(void) { return s_remote_err; }
+
+const char *app_ble_remote_error_text(void)
+{
+    return s_remote_reason[0] ? s_remote_reason : NULL;
+}
 
 // ---------------------------------------------------------------------------
 // 通用

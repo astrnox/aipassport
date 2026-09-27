@@ -6,7 +6,8 @@
 //     也互斥——进入其中一个页面会先停掉另一个。
 //   * 与配网同样互斥：配网在跑时拒绝开启，本模块在跑时配网也不能开启。
 //   * BLE 与 Wi-Fi 共用一路 2.4G 射频，因此本模块只在对应页面停留期间持有协议栈，
-//     离开页面立即释放，不做后台常驻，避免和赛事/校时/信道扫描抢射频。
+//     离开页面立即释放，不做后台常驻。与信道体检是硬互斥：体检扫描进行中拒绝开启
+//     蓝牙角色，反之体检也会拒绝启动，两边都用一句人话告诉用户"先退出哪个页面"。
 //
 // 线程约定：start/stop 会初始化或拆掉协议栈（耗时数百毫秒），必须在派生的 worker
 // 任务里调用，界面回调不得阻塞。扫描结果与 HID 状态都只在本模块内部维护，界面通过
@@ -43,6 +44,9 @@ void    app_ble_finder_request_start(void);
 void    app_ble_finder_request_stop(void);
 // 最近一次开启请求的结果（ESP_OK 表示成功）。界面用它把失败原因显示给用户。
 esp_err_t app_ble_finder_last_error(void);
+// 失败时给普通用户看的一句话原因（"先退出哪个页面 / 等几秒"），成功或尚未请求返回
+// NULL。可见性由 app_ble_finder_last_error() 决定，界面只在后者非 ESP_OK 时取用。
+const char *app_ble_finder_error_text(void);
 
 // ---------------------------------------------------------------------------
 // 万能遥控（BLE HID 外设：键盘 + 消费类控制）
@@ -65,6 +69,8 @@ bool app_ble_remote_press(app_remote_mode_t mode, app_remote_btn_t btn, app_remo
 void      app_ble_remote_request_start(void);
 void      app_ble_remote_request_stop(void);
 esp_err_t app_ble_remote_last_error(void);
+// 失败原因，语义与 app_ble_finder_error_text() 一致。
+const char *app_ble_remote_error_text(void);
 
 // ---------------------------------------------------------------------------
 // 通用

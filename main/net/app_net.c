@@ -11,6 +11,7 @@
 #include "app_net.h"
 
 #include "app_assets.h"
+#include "app_ble.h"
 #include "app_state.h"
 #include "logic/app_anim.h"
 #include "logic/app_badge.h"
@@ -726,6 +727,19 @@ void app_net_channel_scan_request(void)
 {
     if (!s_inited) return;
 
+    // 射频互斥：蓝牙（找设备 / 万能遥控）正占着 2.4G 时直接拒绝，不启动扫描。两者
+    // 抢同一路射频，硬开会让扫描和蓝牙双双不稳；这里把失败原因写成一句人话，界面
+    // 原样显示，用户知道"先去退出哪个页面"。
+    if (app_ble_active()) {
+        net_lock();
+        s_channel_running = false;
+        s_channel_state = APP_FETCH_FAILED;
+        copy_trunc(s_channel_error, sizeof(s_channel_error),
+                   "蓝牙正在使用（找设备/万能遥控），请先退出该页再扫描");
+        net_unlock();
+        return;
+    }
+
     net_lock();
     if (s_channel_running) {
         net_unlock();
@@ -744,6 +758,14 @@ void app_net_channel_scan_request(void)
         net_unlock();
         ESP_LOGE(TAG, "信道体检任务创建失败");
     }
+}
+
+bool app_net_channel_scan_running(void)
+{
+    net_lock();
+    bool running = s_channel_running;
+    net_unlock();
+    return running;
 }
 
 app_fetch_state_t app_net_channel_scan_state(void)

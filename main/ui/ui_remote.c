@@ -12,6 +12,9 @@
 //    HID 映射——界面上每个"短按 / 长按"都必须是真能发出去的。次级动作因此统一落在
 //    长按 ↑ / ↓：PPT 用长按 ↓ 退出放映、长按 ↑ 黑屏，拍照快门在 ↑ 短按（音量+，
 //    绝大多数相机都认）。
+//  - 蓝牙没打开（配网占用 / 信道体检正在扫 Wi-Fi）时，横幅直接写清原因，模式选择页的
+//    长按 ↑ 改作"重试打开"——绝不能只显示"去蓝牙列表里连本设备"，设备根本没在广播，
+//    那是把用户往死路上引。
 //
 // ui_pages.h 使用了 bool 但未自带 <stdbool.h>，本文件作为独立编译单元需先引入。
 #include <stdbool.h>
@@ -50,6 +53,7 @@ static struct {
     int       focus;
     bool      conn;
     bool      started;   // 是否已同步过一次连接状态，避免首帧误判为"变化"
+    esp_err_t start_err; // 最近一次"打开蓝牙"的结果，用来提示原因并提供重试
     ui_row_t  rows[APP_REMOTE_MODE_COUNT];
     lv_obj_t *hdr_right;
 } s;
@@ -57,6 +61,19 @@ static struct {
 static const char *conn_text(void)
 {
     return s.conn ? "已连接" : "未连接";
+}
+
+// 蓝牙没打开（配网占用 / 信道体检正在扫 Wi-Fi / 协议栈失败）：此时"去蓝牙列表里连本
+// 设备"是句废话——设备根本没在广播，必须先让用户把蓝牙打开。
+static bool start_failed(void)
+{
+    return app_ble_remote_last_error() != ESP_OK;
+}
+
+static const char *start_fail_text(void)
+{
+    const char *why = app_ble_remote_error_text();
+    return why ? why : "蓝牙没能打开，请稍后重试";
 }
 
 // ---------------------------------------------------------------------------
@@ -78,7 +95,9 @@ static void build_pick(void)
     memset(s.rows, 0, sizeof(s.rows));
 
     ui_header_create(c, "万能遥控", conn_text(), NULL, &s.hdr_right);
-    if (!s.conn) {
+    if (start_failed()) {
+        ui_banner_create(c, start_fail_text(), ui_c_warn());
+    } else if (!s.conn) {
         char banner[96];
         snprintf(banner, sizeof(banner),
                  "在手机或电脑蓝牙设置里连接 %s，连上后三键就是遥控器",
@@ -93,7 +112,8 @@ static void build_pick(void)
     if (s.focus < 0) s.focus = 0;
     if (s.focus >= APP_REMOTE_MODE_COUNT) s.focus = APP_REMOTE_MODE_COUNT - 1;
     pick_render_focus();
-    ui_page_set_hint("↑↓ 选择  OK 进入  长按OK 返回");
+    ui_page_set_hint(start_failed() ? "长按↑ 重试打开蓝牙   长按OK 返回"
+                                    : "↑↓ 选择  OK 进入  长按OK 返回");
 }
 
 // ---------------------------------------------------------------------------
@@ -125,7 +145,9 @@ static void build_active(void)
 
     ui_header_create(c, app_remote_mode_name((app_remote_mode_t)s.mode), conn_text(),
                      NULL, &s.hdr_right);
-    if (!s.conn) {
+    if (start_failed()) {
+        ui_banner_create(c, start_fail_text(), ui_c_warn());
+    } else if (!s.conn) {
         char banner[96];
         snprintf(banner, sizeof(banner),
                  "还没连接：请到手机或电脑蓝牙设置里找到 %s 并连接",
@@ -165,6 +187,10 @@ static void send_key(app_remote_btn_t bt, app_remote_press_t pr)
         ui_hint_flash("此模式没有这个功能", 1200);
         return;
     }
+    if (start_failed()) {
+        ui_hint_flash("蓝牙没打开：长按OK 回上一页重试", 1800);
+        return;
+    }
     if (!app_ble_remote_connected()) {
         ui_hint_flash("先在蓝牙设置里连接本设备", 1800);
         return;
@@ -189,6 +215,7 @@ void page_remote_enter(void)
 
     app_ble_remote_request_start();
     s.conn = app_ble_remote_connected();
+    s.start_err = app_ble_remote_last_error();
     s.started = true;
     build_pick();
     ui_hint_flash("正在打开蓝牙…", 1200);
@@ -229,6 +256,14 @@ void page_remote_key(bsp_btn_t btn, bsp_btn_ev_t ev)
     }
 
     // ---- 模式选择页 ----
+    if (ev == BSP_BTN_LONG && btn == BSP_BTN_UP) {
+        // 模式选择页的长按↑ 空闲：蓝牙没打开时改作"重试打开"，与横幅提示一致。
+        if (start_failed()) {
+            app_ble_remote_request_start();
+            ui_hint_flash("正在重试打开蓝牙…", 1400);
+        }
+        return;
+    }
     if (ev != BSP_BTN_CLICK) return;
     if (btn == BSP_BTN_UP) {
         s.focus = (s.focus + APP_REMOTE_MODE_COUNT - 1) % APP_REMOTE_MODE_COUNT;
@@ -247,9 +282,11 @@ void page_remote_tick(void)
 {
     if (!s.active || !s.page.scr) return;
     bool conn = app_ble_remote_connected();
-    if (conn != s.conn) {
+    esp_err_t err = app_ble_remote_last_error();
+    if (conn != s.conn || err != s.start_err) {
         s.conn = conn;
-        build_current();   // 连接状态一变就重画横幅与页眉，不留下"没连上还以为连上了"
+        s.start_err = err;
+        build_current();   // 连接状态或"是否打开成功"一变就重画，不留下过时的横幅
     }
 }
 

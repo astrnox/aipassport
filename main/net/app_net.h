@@ -58,8 +58,15 @@ esp_err_t app_net_sync_time(void);
 // 异步扫描 2.4 GHz 频段，把每个信道的 AP 数与信号强度汇总成拥挤度与推荐信道。
 // 运行中重复调用会被忽略；完成后用 app_net_channel_state() / app_net_channel_report()
 // 读取。不要求已联网：内部会按需拉起 Wi-Fi，扫完若没有别的用途立即释放射频。
+//
+// 射频互斥：蓝牙（找设备 / 万能遥控）正在占用 2.4G 时本函数直接拒绝——它不启动扫描，
+// 而是把结果置为 APP_FETCH_FAILED 并给出 app_net_channel_error() 里的一句人话。两者
+// 抢同一路射频，硬开会让扫描结果和蓝牙连接双双不稳；反过来蓝牙角色开启前也会用
+// app_net_channel_scan_running() 拒绝。用户侧表现为"告诉你去退出另一个页面"。
 void              app_net_channel_scan_request(void);
 app_fetch_state_t app_net_channel_scan_state(void);
+// 信道体检是否正在占用射频（扫描进行中）。蓝牙角色开启前用它做互斥判断。
+bool              app_net_channel_scan_running(void);
 // 最近一次扫描成功的报告；尚未成功时返回 NULL。
 const app_channel_report_t *app_net_channel_report(void);
 // 上次失败原因（简短中文），成功或未开始返回 NULL。

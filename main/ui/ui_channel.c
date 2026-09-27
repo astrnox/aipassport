@@ -6,6 +6,10 @@
 //
 // 扫描由 net/app_net 在内部 worker 完成，本页只读状态与报告，绝不在按键回调里等。
 //
+// 射频互斥：蓝牙（找设备 / 万能遥控）正占用 2.4G 时，app_net 会直接拒绝扫描并把原因
+// 放在 app_net_channel_error() 里。本页照原样显示，且不再写"正在扫描"——否则用户会
+// 对着一个永远不会来的结果干等。
+//
 // ui_pages.h 使用了 bool 但未自带 <stdbool.h>，本文件作为独立编译单元需先引入。
 #include <stdbool.h>
 
@@ -13,6 +17,7 @@
 
 #include "ui_theme.h"
 
+#include "net/app_ble.h"
 #include "net/app_net.h"
 
 #include "lvgl.h"
@@ -35,6 +40,7 @@ static struct {
     app_channel_report_t report;   // 本页自留副本：不直接遍历网络层正在写的结构
     bool                 have_report;
     app_fetch_state_t    last_state;
+    bool                 retry_pending;   // 被"蓝牙拆栈中"顶掉，等射频空出后自动补扫
     int                  focus;
     ui_row_t             rows[APP_CHANNEL_COUNT];
 } s;
@@ -92,9 +98,17 @@ static void build_main(void)
     }
 
     if (!s.have_report) {
-        ui_empty_create(c, "正在扫描附近的 Wi-Fi",
-                        "大约需要几秒。扫完会告诉你 2.4G 挤不挤、路由器该用哪个信道。");
-        ui_page_set_hint("长按↑ 重新扫描   长按OK 返回");
+        if (app_net_channel_scan_state() == APP_FETCH_FAILED) {
+            // 失败（最常见是被蓝牙占用）时不能再写"正在扫描"，否则用户会一直干等一个
+            // 永远不会来的结果。原因就在上方横幅里。
+            ui_empty_create(c, "没能开始扫描",
+                            "上方黄色提示写明了原因，照它处理后长按 ↑ 重试。");
+            ui_page_set_hint("长按↑ 重试扫描   长按OK 返回");
+        } else {
+            ui_empty_create(c, "正在扫描附近的 Wi-Fi",
+                            "大约需要几秒。扫完会告诉你 2.4G 挤不挤、路由器该用哪个信道。");
+            ui_page_set_hint("长按↑ 重新扫描   长按OK 返回");
+        }
         return;
     }
 
@@ -176,6 +190,17 @@ static void build_detail(void)
 // 页面接口
 // ---------------------------------------------------------------------------
 
+// 发起一次扫描，并判断这次拒绝是不是"蓝牙正在拆栈"造成的：蓝牙退出是异步的（拆协议栈
+// 要几百毫秒），用户刚离开找设备/遥控就进本页时，射频其实马上就空了。这种情况记下来，
+// 由 tick 在射频真正空闲后自动补扫一次——否则用户明明已经退出蓝牙，却被要求"先退出"。
+static void request_scan(void)
+{
+    bool ble_busy = app_ble_active();
+    app_net_channel_scan_request();
+    s.last_state = app_net_channel_scan_state();
+    s.retry_pending = (s.last_state == APP_FETCH_FAILED && ble_busy);
+}
+
 void page_channel_enter(void)
 {
     memset(&s, 0, sizeof(s));
@@ -183,11 +208,11 @@ void page_channel_enter(void)
     s.view = CH_MAIN;
     s.page = ui_page_create(NULL);
 
-    app_net_channel_scan_request();
-    s.last_state = app_net_channel_scan_state();
+    request_scan();
     refresh_report();
     build_main();
-    ui_hint_flash("正在扫描，请稍候…", 1500);
+    // 被拒绝时（蓝牙占用中）原因已经写在页内横幅与空态里，不再叠一句"正在扫描"误导。
+    if (s.last_state != APP_FETCH_FAILED) ui_hint_flash("正在扫描，请稍候…", 1500);
 }
 
 void page_channel_exit(void)
@@ -227,9 +252,13 @@ void page_channel_key(bsp_btn_t btn, bsp_btn_ev_t ev)
         return;
     }
     if (ev == BSP_BTN_LONG && btn == BSP_BTN_UP) {
-        app_net_channel_scan_request();
-        s.last_state = app_net_channel_scan_state();
-        ui_hint_flash("正在重新扫描…", 1500);
+        request_scan();
+        if (s.last_state == APP_FETCH_FAILED) {
+            build_main();   // 立刻把"被蓝牙占用"的原因显示出来，不让用户干等
+            ui_hint_flash("未能扫描：蓝牙正占用射频", 1800);
+        } else {
+            ui_hint_flash("正在重新扫描…", 1500);
+        }
         return;
     }
     if (ev != BSP_BTN_CLICK) return;
@@ -247,6 +276,17 @@ void page_channel_key(bsp_btn_t btn, bsp_btn_ev_t ev)
 void page_channel_tick(void)
 {
     if (!s.active || !s.page.scr) return;
+
+    // 蓝牙拆栈要几百毫秒：若这次请求是被"蓝牙还没退干净"顶掉的，等射频真正空出来
+    // 自动补扫一次，避免用户明明已退出蓝牙却被要求"先退出"。
+    if (s.retry_pending && !app_ble_active()) {
+        s.retry_pending = false;
+        app_net_channel_scan_request();
+        s.last_state = app_net_channel_scan_state();
+        if (s.view == CH_MAIN) build_main();
+        return;
+    }
+
     app_fetch_state_t st = app_net_channel_scan_state();
     if (st == s.last_state) return;
     s.last_state = st;
