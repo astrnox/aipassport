@@ -1,17 +1,14 @@
-// main/ui/ui_home.c —— 主页：个人名片卡 + 模块轮播。
+// main/ui/ui_home.c —— 主页：电子工牌 + 模块轮播。
 //
-// 用户要求主页"只有个人名片与时钟，而无其他"：时钟由全局状态栏始终显示在左上角（很小、
-// 常驻），主页内容区只放个人名片卡。原先的主页把大号时间卡、作息卡、赛事卡、竖排模块
-// 列表全塞在一起，信息过载、要滑很久才能看到模块入口，因此整体删掉。
+// 按用户要求，主页第一眼就是本人的电子工牌：大头像居中偏上，昵称与一行补充信息排在
+// 头像正下方。头像优先播放手机端上传的动图（GIF 由配置页解码、按最多 24 帧缩到
+// 96x96 的 RGB565 序列存进 assets 分区），没有动图时退回首字占位。动图帧不复制进
+// RAM，而是用 app_assets_map() 把 assets 分区零拷贝映射出来，LVGL 直接把它们当图源
+// 渲染；因此映射必须在整个播放期内保持有效，只有删掉 animimg 之后才允许解映射。
 //
-// 六个模块入口改为横向轮播：UP 看上一个、DOWN 看下一个，到两端再按会循环回另一端
-// （第一个再按 UP 跳到最后一个，最后一个再按 DOWN 回到第一个），OK 进入当前模块。
-// 轮播卡内用左右箭头、页码与圆点同时表达"还有其它模块"，不让用户以为只有一张卡。
-//
-// 个人名片卡把选中工牌的身份直接搬到首页：左侧是头像，有动图时用 lv_animimg 播放
-// 手机端上传的 RGB565 帧序列，右侧是昵称与一行补充信息。动图帧不复制进 RAM，而是
-// 用 app_assets_map() 把 assets 分区零拷贝映射出来，LVGL 直接把它们当图源渲染；
-// 因此映射必须在整个播放期内保持有效，只有删掉 animimg 之后才允许解映射。
+// 工牌下方留一张紧凑的模块轮播卡进入各功能：UP 看上一个、DOWN 看下一个，到两端再按
+// 会循环回另一端，OK 进入当前模块。轮播卡内用左右箭头、页码与圆点同时表达"还有其它
+// 模块"，不让用户以为只有一张卡。
 //
 // 快捷面板挂在主页屏幕之上，承载静音 / 主题 / 亮度 / 开始番茄钟四项。面板打开时
 // 由控制器把按键转交 home_quick_key()，关闭后恢复主页按键。
@@ -36,14 +33,15 @@
 #define HOME_CW        (UI_W - 2 * UI_MARGIN_X)   // 224
 #define HOME_QUICK_N   5
 
-// 个人名片卡几何：头像框是正方形，文字区占右侧剩余宽度。高度压到 64：正好容纳 56
-// 头像与两行文字（16px 行高 31 + 12px 行高 23）。
-#define HOME_AVATAR    56
-#define HOME_CARD_H    64
-#define HOME_TEXT_W    136
+// 电子工牌卡几何：头像是主角，做成整屏最大的一枚 96x96 正方形（也是手机端动图
+// 允许的最大边长），水平居中、明显偏上；昵称与一行补充信息居中排在头像正下方。
+// 高度按"上留白 10 + 头像 96 + 昵称行 31 + 信息行 23 + 下留白 8"取 170。
+#define HOME_AVATAR    96
+#define HOME_CARD_H    170
 
-// 模块轮播卡：中间是大号模块名，上方左右箭头，下方页码与圆点。
-#define HOME_CAROUSEL_H  120
+// 模块轮播卡。工牌占了大头，这里压到 66：一行左右箭头夹模块名，下面一行页码，
+// 足够表达"还有其它模块"即可，把纵向空间让给工牌。
+#define HOME_CAROUSEL_H  66
 #define HOME_MODULE_MAX  8
 
 enum { QUIET_MUTE = 0, QUIET_THEME, QUIET_BRIGHT, QUIET_POMO, QUIET_DND };
@@ -175,8 +173,8 @@ static bool avatar_anim_mount(lv_obj_t *box, const app_badge_t *b)
     return true;
 }
 
-// 建个人名片卡：取当前选中工牌，左侧头像（有动图就播，否则显首字），右侧昵称与
-// 第一条非空文本行。没有工牌时给出引导文案。
+// 建电子工牌卡：大头像居中偏上（有动图就播动图，否则显昵称首字），昵称与一行补充
+// 信息居中排在头像正下方。没有工牌时给出引导文案，绝不出现空头像框。
 static void build_badge_card(void)
 {
     app_badge_list_t *list = app_state_badges();
@@ -190,29 +188,34 @@ static void build_badge_card(void)
     lv_obj_t *card = ui_card_create(s.page.content, 0, 0, HOME_CW, HOME_CARD_H,
                                     ui_c_accent());
 
+    // 头像：96x96、水平居中、上边留 10，是整张工牌的视觉重心。
     lv_obj_t *box = lv_obj_create(card);
     lv_obj_remove_flag(box, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_pos(box, 8, (HOME_CARD_H - HOME_AVATAR) / 2);
     lv_obj_set_size(box, HOME_AVATAR, HOME_AVATAR);
+    lv_obj_align(box, LV_ALIGN_TOP_MID, 0, 10);
     lv_obj_set_style_bg_color(box, lv_color_hex(ui_c_accent()), 0);
     lv_obj_set_style_bg_opa(box, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(box, 10, 0);
+    lv_obj_set_style_radius(box, 16, 0);
     lv_obj_set_style_border_width(box, 0, 0);
     lv_obj_set_style_pad_all(box, 0, 0);
 
     if (!b || !avatar_anim_mount(box, b)) {
         char ch[8];
         home_first_char(b ? b->nickname : NULL, ch, sizeof(ch));
-        lv_obj_t *ava = ui_label_create(box, ch[0] ? ch : "?", ui_font_title, ui_c_bg());
+        // 占位首字用展示级大字号，和真头像一样撑满头像框，不会显得空。
+        lv_obj_t *ava = ui_label_create(box, ch[0] ? ch : "?", ui_font_display, ui_c_bg());
         lv_obj_center(ava);
     }
 
+    // 昵称：整卡宽度 + 居中，长名字也不会偏到一边。
     lv_obj_t *nick = ui_label_create(card,
         (b && b->nickname[0]) ? b->nickname : "还没有工牌",
         ui_font_body, ui_c_text());
-    lv_obj_set_width(nick, HOME_TEXT_W);
-    lv_obj_set_pos(nick, 74, 6);
+    lv_obj_set_width(nick, HOME_CW - 16);
+    lv_obj_set_style_text_align(nick, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(nick, LV_ALIGN_TOP_MID, 0, 10 + HOME_AVATAR + 2);
 
+    // 补充信息：取第一条非空文本行，居中排在昵称下方（16px 行高 31）。
     const char *sub = NULL;
     if (b) {
         for (int i = 0; i < APP_BADGE_MAX_LINES; i++) {
@@ -222,15 +225,16 @@ static void build_badge_card(void)
     if (!sub) sub = b ? "身份与工具可编辑" : "在身份与工具中添加";
 
     lv_obj_t *sub_lbl = ui_label_create(card, sub, ui_font_hint, ui_c_dim());
-    lv_obj_set_width(sub_lbl, HOME_TEXT_W);
-    lv_obj_set_pos(sub_lbl, 74, 6 + 31);
+    lv_obj_set_width(sub_lbl, HOME_CW - 16);
+    lv_obj_set_style_text_align(sub_lbl, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(sub_lbl, LV_ALIGN_TOP_MID, 0, 10 + HOME_AVATAR + 2 + 31);
 }
 
 // ---------------------------------------------------------------------------
 // 模块轮播
 // ---------------------------------------------------------------------------
 
-// 刷新轮播卡：当前模块名、页码与圆点。焦点永远在 0..module_count-1 之间。
+// 刷新轮播卡：当前模块名与页码。焦点永远在 0..module_count-1 之间。
 static void module_render(void)
 {
     if (!s.mod_card || s.module_count <= 0) return;
@@ -240,19 +244,6 @@ static void module_render(void)
     char page[16];
     snprintf(page, sizeof(page), "%d / %d", s.focus + 1, s.module_count);
     lv_label_set_text(s.mod_page, page);
-
-    for (int i = 0; i < HOME_MODULE_MAX; i++) {
-        if (!s.mod_dots[i]) continue;
-        if (i >= s.module_count) {
-            lv_obj_add_flag(s.mod_dots[i], LV_OBJ_FLAG_HIDDEN);
-            continue;
-        }
-        lv_obj_remove_flag(s.mod_dots[i], LV_OBJ_FLAG_HIDDEN);
-        bool on = (i == s.focus);
-        lv_obj_set_style_bg_color(s.mod_dots[i],
-            lv_color_hex(on ? ui_c_accent() : ui_c_border()), 0);
-        lv_obj_set_size(s.mod_dots[i], on ? 8 : 6, on ? 8 : 6);
-    }
 }
 
 // 循环移动焦点：到两端再按会绕回另一端。
@@ -274,43 +265,21 @@ static void build_module_carousel(void)
     s.mod_card = ui_card_create(s.page.content, 0, 0, HOME_CW, HOME_CAROUSEL_H,
                                 ui_c_accent());
 
-    lv_obj_t *left = ui_label_create(s.mod_card, LV_SYMBOL_LEFT, ui_font_title, ui_c_dim());
-    lv_obj_align(left, LV_ALIGN_LEFT_MID, 8, -8);
-    lv_obj_t *right = ui_label_create(s.mod_card, LV_SYMBOL_RIGHT, ui_font_title, ui_c_dim());
-    lv_obj_align(right, LV_ALIGN_RIGHT_MID, -8, -8);
+    lv_obj_t *left = ui_label_create(s.mod_card, LV_SYMBOL_LEFT, ui_font_body, ui_c_dim());
+    lv_obj_align(left, LV_ALIGN_LEFT_MID, 8, -6);
+    lv_obj_t *right = ui_label_create(s.mod_card, LV_SYMBOL_RIGHT, ui_font_body, ui_c_dim());
+    lv_obj_align(right, LV_ALIGN_RIGHT_MID, -8, -6);
 
-    s.mod_title = ui_label_create(s.mod_card, "", ui_font_title, ui_c_text());
-    lv_obj_set_width(s.mod_title, HOME_CW - 24);
+    s.mod_title = ui_label_create(s.mod_card, "", ui_font_body, ui_c_text());
+    lv_obj_set_width(s.mod_title, HOME_CW - 40);
     lv_obj_set_style_text_align(s.mod_title, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_long_mode(s.mod_title, LV_LABEL_LONG_WRAP);
-    lv_obj_align(s.mod_title, LV_ALIGN_CENTER, 0, -12);
+    lv_obj_align(s.mod_title, LV_ALIGN_CENTER, 0, -10);
 
+    // 页码替代原先的一排圆点：卡片压到 66 高后，圆点会和页码挤在一起，而"n / m"
+    // 已经能同时说明"当前第几个"和"一共几个"，信息不重复。
     s.mod_page = ui_label_create(s.mod_card, "", ui_font_hint, ui_c_dim());
-    lv_obj_align(s.mod_page, LV_ALIGN_CENTER, 0, 22);
-
-    // 圆点排成一行，居中放在卡片底部，直观表达"六个模块"。
-    lv_obj_t *dots = lv_obj_create(s.mod_card);
-    lv_obj_remove_flag(dots, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_size(dots, LV_SIZE_CONTENT, 12);
-    lv_obj_align(dots, LV_ALIGN_BOTTOM_MID, 0, -10);
-    lv_obj_set_style_bg_opa(dots, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(dots, 0, 0);
-    lv_obj_set_style_pad_all(dots, 0, 0);
-    lv_obj_set_style_pad_column(dots, 6, 0);
-    lv_obj_set_flex_flow(dots, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(dots, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
-                          LV_FLEX_ALIGN_CENTER);
-
-    for (int i = 0; i < HOME_MODULE_MAX; i++) {
-        lv_obj_t *dot = lv_obj_create(dots);
-        lv_obj_remove_flag(dot, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_set_size(dot, 6, 6);
-        lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, 0);
-        lv_obj_set_style_border_width(dot, 0, 0);
-        lv_obj_set_style_bg_color(dot, lv_color_hex(ui_c_border()), 0);
-        lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, 0);
-        s.mod_dots[i] = dot;
-    }
+    lv_obj_align(s.mod_page, LV_ALIGN_CENTER, 0, 16);
 
     int focus = app_state_settings()->home_focus;
     if (focus < 0 || focus >= s.module_count) focus = 0;

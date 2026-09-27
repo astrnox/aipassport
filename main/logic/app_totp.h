@@ -42,3 +42,12 @@ int  app_totp_format(const char *code, char *out, size_t out_cap);
 
 // 解析 otpauth://totp/LABEL?secret=...&digits=6&period=30&algorithm=SHA1。
 bool app_totp_parse_uri(const char *uri, app_totp_account_t *out);
+
+// 仅密钥导入：key 只需是密钥本身，忽略空格、'-' 与 '='，长度按有效字符计，允许
+// 10..64 位。编码形式自动识别——能全部解释为 Base32 时按 Base32（RFC 4648）解码，
+// 否则在全为 16 进制字符时按 16 进制解码，两者都不成立就拒绝。digits 只接受 6/8，
+// period 夹到 [10, 300]（<=0 取默认 30），algo 取 APP_TOTP_ALGO_*（其余按 SHA1）。
+// label 可为 NULL 或空串，此时账户名留空由调用方补。失败返回 false。
+bool app_totp_parse_secret(const char *label, const char *key,
+                           int digits, int period, uint8_t algo,
+                           app_totp_account_t *out);

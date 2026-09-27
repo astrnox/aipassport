@@ -642,11 +642,15 @@ void ui_progress_set(lv_obj_t *bar, int permille)
 void ui_scroll_into_view(lv_obj_t *obj)
 {
     if (!obj) return;
-    // 先强制结算一次布局：刚创建的控件其父容器还没排好子控件坐标，此时
-    // lv_obj_scroll_to_view 会按陈旧坐标（常常是 0）计算滚动量，表现为"光标往下走了
-    // 屏幕却不跟着滑"。结算后再滚，坐标才是真实的。
+    // 先强制结算一次布局：刚创建的控件其父容器还没排好子控件坐标，此时滚动会按陈旧
+    // 坐标（常常是 0）计算滚动量，表现为"光标往下走了屏幕却不跟着滑"。
     lv_obj_update_layout(obj);
-    lv_obj_scroll_to_view(obj, LV_ANIM_OFF);
+    // 用 recursive 版本逐级向上滚，而不是 lv_obj_scroll_to_view：列表行挂在
+    // ui_list_create() 返回的容器里，而那个容器是不可滚动的（真正能滚的是再上一层的
+    // 页面内容区）。lv_obj_scroll_to_view 只看直接父级，父级不可滚动时它什么都不做，
+    // 于是所有"行在列表里"的子界面都出现了"光标移动但屏幕不动"的问题——看起来就像
+    // 卡住或没定位到。recursive 会对每一层祖先都尝试滚动，可滚动的那一层才会真正滚动。
+    lv_obj_scroll_to_view_recursive(obj, LV_ANIM_OFF);
 }
 
 // ---------------------------------------------------------------------------

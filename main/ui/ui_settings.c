@@ -452,7 +452,7 @@ static const char *prov_err_text(int err)
 {
     switch ((esp_err_t)err) {
     case ESP_OK:                return NULL;
-    case ESP_ERR_NO_MEM:        return "设备内存不足，请先关闭其他功能后重试。";
+    case ESP_ERR_NO_MEM:        return "设备内存不足，长按下键清理内存后重试。";
     case ESP_ERR_INVALID_STATE: return "无线模块状态异常，请返回设置页后重试。";
     case ESP_ERR_INVALID_ARG:   return "无线参数有误，请重启设备后重试。";
     case ESP_ERR_NOT_FOUND:     return "未找到无线模块，请重启设备后重试。";
@@ -494,7 +494,7 @@ static void prov_refresh(void)
         // 没开起来时不要把凭证面板留在屏幕上：否则用户会以为可以照着连。
         lv_obj_add_flag(s.prov_panel, LV_OBJ_FLAG_HIDDEN);
         lv_label_set_text(s.prov_note,
-                          s_prov_err != 0 ? "再按一次 OK 可重试。" : "");
+                          s_prov_err != 0 ? "按 OK 重试；内存不足时长按下键清理内存。" : "");
     }
 }
 
@@ -506,7 +506,7 @@ static void prov_kick_off(void)
     s_prov_busy = true;
     s_prov_cancel = false;
     s_prov_err = 0;
-    if (xTaskCreate(prov_start_task, "prov_start", 4096, NULL, 5, NULL) != pdPASS) {
+    if (xTaskCreate(prov_start_task, "prov_start", 6144, NULL, 5, NULL) != pdPASS) {
         s_prov_busy = false;
         s_prov_err = (int)ESP_ERR_NO_MEM;
     }
@@ -574,7 +574,7 @@ static void prov_open(void)
     prov_kick_off();
 
     prov_refresh();
-    set_hint("↑↓ 滚动  OK 重试  长按OK 关闭");
+    set_hint("↑↓ 滚动  OK 重试  长按下 清理内存  长按OK 关闭");
     refresh_values();
 }
 
@@ -1061,6 +1061,20 @@ void page_settings_key(bsp_btn_t btn, bsp_btn_ev_t ev)
         // 动，失败后也重试不了，用户的感觉就是"按键没反应"。现在三种键都有明确动作。
         if (ev == BSP_BTN_LONG && btn == BSP_BTN_OK) {
             prov_close();
+        } else if (ev == BSP_BTN_LONG && btn == BSP_BTN_DOWN) {
+            // 内存不足时用户的长按下键出口：先清理可再生的内存，再重新拉起热点。
+            if (app_net_prov_active()) {
+                ui_hint_flash("热点已开启，无需清理", 1500);
+            } else if (s_prov_busy) {
+                ui_hint_flash("正在开启热点，请稍候…", 1500);
+            } else {
+                size_t freed = app_net_prov_reclaim_memory();
+                prov_kick_off();
+                prov_refresh();
+                char msg[64];
+                snprintf(msg, sizeof(msg), "已清理内存 +%u 字节，正在重试…", (unsigned)freed);
+                ui_hint_flash(msg, 2000);
+            }
         } else if (ev == BSP_BTN_CLICK && (btn == BSP_BTN_UP || btn == BSP_BTN_DOWN)) {
             // 内容超出卡片时靠这里翻看；内容放得下时滚动量为 0，不会有副作用。
             lv_obj_t *card = s.prov_note ? lv_obj_get_parent(s.prov_note) : NULL;
@@ -1102,7 +1116,7 @@ void page_settings_key(bsp_btn_t btn, bsp_btn_ev_t ev)
                 s_ble_busy = true;
                 s_ble_cancel = false;
                 s_ble_err = 0;
-                if (xTaskCreate(ble_start_task, "ble_start", 4096, NULL, 5, NULL) != pdPASS) {
+                if (xTaskCreate(ble_start_task, "ble_start", 6144, NULL, 5, NULL) != pdPASS) {
                     s_ble_busy = false;
                     s_ble_err = (int)ESP_ERR_NO_MEM;
                 }

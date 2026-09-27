@@ -102,6 +102,48 @@ int main(void)
     // 缺少 secret 必须失败。
     assert(!app_totp_parse_uri("otpauth://totp/ACME:alice?digits=6", &parsed));
 
+    // ---- 仅密钥导入：长度、编码自动识别与自定义参数 ----
+    app_totp_account_t sec;
+    // 16 位 Base32；带空格、横线与小写应被容忍。
+    assert(app_totp_parse_secret("邮箱", "gezd gnbv-gy3tqojq", 6, 30, APP_TOTP_ALGO_SHA1, &sec));
+    assert(strcmp(sec.label, "邮箱") == 0);
+    assert(sec.secret_len == 10);
+    assert(sec.digits == 6 && sec.period == 30 && sec.algo == APP_TOTP_ALGO_SHA1);
+
+    // 用户可自定义位数、刷新周期与算法。
+    assert(app_totp_parse_secret(NULL, "GEZDGNBVGY3TQOJQ", 8, 60, APP_TOTP_ALGO_SHA256, &sec));
+    assert(sec.digits == 8 && sec.period == 60 && sec.algo == APP_TOTP_ALGO_SHA256);
+    assert(sec.label[0] == '\0');
+
+    // 周期越界夹到 [10,300]；传 0 取默认 30。
+    assert(app_totp_parse_secret(NULL, "GEZDGNBVGY3TQOJQ", 6, 0, APP_TOTP_ALGO_SHA1, &sec));
+    assert(sec.period == 30);
+    assert(app_totp_parse_secret(NULL, "GEZDGNBVGY3TQOJQ", 6, 5000, APP_TOTP_ALGO_SHA1, &sec));
+    assert(sec.period == 300);
+    assert(app_totp_parse_secret(NULL, "GEZDGNBVGY3TQOJQ", 6, 1, APP_TOTP_ALGO_SHA1, &sec));
+    assert(sec.period == 10);
+
+    // 16 进制密钥：含 Base32 不接受的 0/1/8/9，应自动按 16 进制解码。
+    assert(app_totp_parse_secret(NULL, "0123456789ABCDEF", 6, 30, APP_TOTP_ALGO_SHA1, &sec));
+    assert(sec.secret_len == 8);
+    assert(sec.secret[0] == 0x01 && sec.secret[7] == 0xEF);
+
+    // 长度必须落在 10-64 位之间。
+    assert(!app_totp_parse_secret(NULL, "GEZDGNBV", 6, 30, APP_TOTP_ALGO_SHA1, &sec));   // 8 位过短
+    char too_long[72];
+    memset(too_long, 'A', 65);
+    too_long[65] = '\0';
+    assert(!app_totp_parse_secret(NULL, too_long, 6, 30, APP_TOTP_ALGO_SHA1, &sec));      // 65 位过长
+
+    char full_64[72];
+    memset(full_64, 'A', 64);
+    full_64[64] = '\0';
+    assert(app_totp_parse_secret(NULL, full_64, 6, 30, APP_TOTP_ALGO_SHA1, &sec));        // 64 位合法
+    assert(sec.secret_len == 40);
+
+    // 既不是 Base32 也不是 16 进制的字符必须拒绝。
+    assert(!app_totp_parse_secret(NULL, "!!not-a-key!!", 6, 30, APP_TOTP_ALGO_SHA1, &sec));
+
     puts("test_app_totp: PASS");
     return 0;
 }
