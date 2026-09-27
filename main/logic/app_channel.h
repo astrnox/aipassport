@@ -129,3 +129,10 @@ void app_channel_advice(const app_channel_report_t *r, char *out, size_t cap);
 // "邻频干扰主要来自 3 信道的路由器，建议改到 1 信道"。普通用户据此能理解"为什么换"。
 // r 为 NULL 时写空串；报告里一个 AP 都没有时也给一句可读结论，不返回空串。
 void app_channel_env_summary(const app_channel_report_t *r, char *out, size_t cap);
+
+// 统计本次扫描的"安全态势"：开放（无密码）、WEP（老式且已不安全）、隐藏 SSID 各有多少台。
+// 这是纯只读统计：数据全部来自信标/探测响应里公开的字段，不涉及任何连接、探测或破解。
+// 计数基于已保存的明细（最多 APP_CHANNEL_MAX_APS 条），若热点总数超过上限则统计不完整；
+// 任一输出指针可为 NULL。r 为 NULL 或越界安全模式按 0 / 不计处理。
+void app_channel_security_counts(const app_channel_report_t *r,
+                                 int *open, int *wep, int *hidden);

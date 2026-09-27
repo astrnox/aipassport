@@ -332,8 +332,14 @@ static void track_update(void)
     lv_obj_set_style_text_color(s.t_level, lv_color_hex(col), 0);
     ui_progress_set(s.t_bar, cl * 10);
     if (s.t_addr) {
+        // 被动盘点能给出的最"硬"的一条信息就是设备地址本身：它来自广播里公开的发送方
+        // 地址，不涉及任何连接或探测。这里把完整地址显示出来，方便用户把屏幕上这一行
+        // 与其它设备的扫描结果对上号。现代手机会轮换地址，所以它只标识"这一次广播的
+        // 发送方"，不代表设备身份。
+        const uint8_t *ad = s.entries[ti].addr;
         char buf[40];
-        snprintf(buf, sizeof(buf), "信号 %d dBm", s.entries[ti].rssi);
+        snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X  %d dBm",
+                 ad[0], ad[1], ad[2], ad[3], ad[4], ad[5], s.entries[ti].rssi);
         lv_label_set_text(s.t_addr, buf);
     }
 }

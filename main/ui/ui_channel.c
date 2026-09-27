@@ -164,7 +164,9 @@ static void build_main(void)
 
     lv_obj_t *list = ui_list_create(c);
 
-    char val[16];
+    // 64 而不是 32：下面"热点总览"那行要塞下 "N 个热点 · M 开放" 两个整数加中文和间隔点，
+    // 编译器按 int 最宽 10 位起算能到 40 多字节，32 会触发 -Werror=format-truncation。
+    char val[64];
     // 条目 0：推荐信道。按 OK 进入"逐信道"视图（先看每条信道挤不挤）。
     s.rows[0] = ui_row_create(list, "建议信道", NULL);
     snprintf(val, sizeof(val), "%d 信道", s.report.best_channel);
@@ -173,9 +175,19 @@ static void build_main(void)
         lv_obj_set_style_text_color(s.rows[0].value, lv_color_hex(ui_c_accent()), 0);
     }
 
-    // 条目 1：热点总览。按 OK 一次看完本次扫到的全部 AP。
+    // 条目 1：热点总览。按 OK 一次看完本次扫到的全部 AP。右侧顺带给出"开放网络"台数：
+    // 这只是对信标里公开字段的只读统计（开放=无密码），既不连接也不探测，但用户顺手
+    // 就能知道周围有没有不安全的网络。
     s.rows[1] = ui_row_create(list, "热点总览", NULL);
-    snprintf(val, sizeof(val), "%d 个热点", s.report.ap_total);
+    int open_n = 0, wep_n = 0;
+    app_channel_security_counts(&s.report, &open_n, &wep_n, NULL);
+    if (open_n > 0) {
+        snprintf(val, sizeof(val), "%d 个热点 · %d 开放", s.report.ap_total, open_n);
+    } else if (wep_n > 0) {
+        snprintf(val, sizeof(val), "%d 个热点 · %d 个 WEP", s.report.ap_total, wep_n);
+    } else {
+        snprintf(val, sizeof(val), "%d 个热点", s.report.ap_total);
+    }
     ui_row_set_value(s.rows[1], val);
 
     if (s.focus < 0 || s.focus > 1) s.focus = 0;   // 从明细/总览返回时把焦点收回第一个条目

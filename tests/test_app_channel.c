@@ -3,7 +3,7 @@
 // 覆盖：复位、非法信道忽略、强度加权累加与封顶、最强值更新、整体拥挤度与推荐信道、
 // 每信道明细（排序）、单信道热点列表（按强度排序 / 隐藏 SSID / 容量上限）、结论文案、
 // 给普通用户的建议，以及本次新增的安全模式标签、全量热点排序（热点总览）、
-// 邻频重叠边界与环境报告结论。
+// 邻频重叠边界、环境报告结论与安全态势统计（开放 / WEP / 隐藏）。
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
@@ -286,6 +286,27 @@ int main(void)
     app_channel_env_summary(&r, env, 0);
     app_channel_env_summary(NULL, env, sizeof(env));
     assert(env[0] == '\0');
+
+    // ---- 安全态势统计：开放 / WEP / 隐藏 各多少（只读，基于已保存明细） ----
+    app_channel_reset(&r);
+    app_channel_add_ap(&r, 1, -50, "open1", 5, NULL, APP_CHANNEL_SEC_OPEN);
+    app_channel_add_ap(&r, 1, -60, "open2", 5, NULL, APP_CHANNEL_SEC_OPEN);
+    app_channel_add_ap(&r, 6, -55, "wep1", 4, NULL, APP_CHANNEL_SEC_WEP);
+    app_channel_add_ap(&r, 6, -70, NULL, 0, NULL, APP_CHANNEL_SEC_WPA2);   // 隐藏 SSID
+    app_channel_add_ap(&r, 11, -65, "wpa3", 4, NULL, APP_CHANNEL_SEC_WPA3);
+    app_channel_finish(&r);
+    int n_open = -1, n_wep = -1, n_hid = -1;
+    app_channel_security_counts(&r, &n_open, &n_wep, &n_hid);
+    assert(n_open == 2);
+    assert(n_wep == 1);
+    assert(n_hid == 1);
+
+    // 任一输出指针可为 NULL，不应崩溃。
+    app_channel_security_counts(&r, NULL, NULL, &n_hid);
+    assert(n_hid == 1);
+    // 空报告 / 空指针：输出全部清零。
+    app_channel_security_counts(NULL, &n_open, &n_wep, &n_hid);
+    assert(n_open == 0 && n_wep == 0 && n_hid == 0);
 
     // ---- 空指针安全 ----
     app_channel_reset(NULL);

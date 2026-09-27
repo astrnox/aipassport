@@ -323,3 +323,22 @@ void app_channel_env_summary(const app_channel_report_t *r, char *out, size_t ca
         snprintf(out, cap, "同频热点较多，建议把路由器改到 %d 信道", best);
     }
 }
+
+void app_channel_security_counts(const app_channel_report_t *r,
+                                 int *open, int *wep, int *hidden)
+{
+    // 先清零：无论报告是否有效，输出都应该是可用的确定值，调用方无需预先初始化。
+    if (open) *open = 0;
+    if (wep) *wep = 0;
+    if (hidden) *hidden = 0;
+    if (!r) return;
+
+    // 只统计已保存的明细（stored），不遍历 ap_total——后者是"参与拥挤度统计的总数"，
+    // 超过 APP_CHANNEL_MAX_APS 的部分没有安全模式明细可数。这是只读统计，不碰射频。
+    for (int i = 0; i < r->stored; i++) {
+        const app_channel_ap_t *ap = &r->aps[i];
+        if (open && ap->sec == APP_CHANNEL_SEC_OPEN) (*open)++;
+        if (wep && ap->sec == APP_CHANNEL_SEC_WEP) (*wep)++;
+        if (hidden && ap->hidden) (*hidden)++;
+    }
+}

@@ -827,8 +827,8 @@ on GPIO18/19 — and there is no free header.
 | BLE device discovery | Yes | Shipped (Find device) | Uses the BLE scan; sorted by signal strength |
 | BLE HID remote | Yes | Shipped (Universal remote) | HID over GATT keyboard and media keys |
 | Wi-Fi access-point scan and channel congestion | Yes | Shipped (Channel checkup) | Per-channel hotspot list with congestion sorting |
-| BLE advertisement analysis | Yes | Reliable candidate | Reuses the existing scan callback |
-| Wi-Fi access-point inventory | Yes | Reliable candidate | Extends the existing scan |
+| BLE advertisement analysis | Yes | Shipped (Find device) | Classifies devices by manufacturer ID and service UUID and shows counts by category; the track view also shows the device address |
+| Wi-Fi access-point inventory | Yes | Shipped (Channel checkup) | Full access-point inventory sorted by signal, with security mode, hidden flag, and band |
 | Wi-Fi client list per access point | No | Not feasible / unreliable | See 13.4 |
 | Jamming, deauthentication, credential cracking | Not applicable | Explicitly excluded | Illegal and harmful; excluded regardless of feasibility |
 
@@ -863,15 +863,16 @@ claimed identity.
 ### 13.5 Reliable candidate backlog
 
 These candidates use only the confirmed Wi-Fi, BLE, and audio hardware and are ordered
-by user value. They belong to a future release, not this one.
+by user value. Everything shipped so far is passive and read-only; the status column
+records the current state.
 
-| Priority | Candidate | Basis |
-|---|---|---|
-| P1 | BLE device categories: classify by manufacturer ID and service UUID, and show counts by category | Extends the existing BLE scan; no new hardware |
-| P1 | Wi-Fi access-point inventory: a full access-point list sorted by signal, with security mode, hidden flag, and band | Extends the existing Wi-Fi scan and the channel-checkup pages |
-| P2 | Wi-Fi environment report: co-channel and adjacent-channel overlap with a plain-language router recommendation | Builds on the channel-checkup congestion model |
-| P2 | Sound level meter: use the microphone to show ambient loudness with a peak-hold reading | Uses the existing full-duplex audio capture |
-| P3 | Beacon and tracker detector: recognize common tracker advertisement patterns to help find your own tag | Uses the existing BLE scan; identification stays category-level only |
+| Priority | Candidate | Basis | Status |
+|---|---|---|---|
+| P1 | BLE device categories: classify by manufacturer ID and service UUID, and show counts by category | Extends the existing BLE scan; no new hardware | Shipped; the finder's track view also shows the device address |
+| P1 | Wi-Fi access-point inventory: a full access-point list sorted by signal, with security mode, hidden flag, and band | Extends the existing Wi-Fi scan and the channel-checkup pages | Shipped; the conclusion screen also shows the open/WEP count |
+| P2 | Wi-Fi environment report: co-channel and adjacent-channel overlap with a plain-language router recommendation | Builds on the channel-checkup congestion model | Shipped |
+| P2 | Sound level meter: use the microphone to show ambient loudness with a peak-hold reading | Uses the existing full-duplex audio capture | Not started |
+| P3 | Beacon and tracker detector: recognize common tracker advertisement patterns to help find your own tag | Uses the existing BLE scan; identification stays category-level only | Name-clue classification only; advertisement-pattern detection not started |
 
 ### 13.6 Explicitly excluded
 
@@ -884,8 +885,12 @@ applies: do not create daily debt and do not deceive users.
 
 ### 13.7 Status
 
-Discussion only. Nothing in this section is implemented, scheduled, or part of the
-acceptance criteria in section 11. Any item later taken up would first need its own
-hardware-contract entry (where new hardware is involved) and its own on-device
-acceptance criteria, and would be reviewed against the anti-human risk list in section
-3.2 before development.
+Partially implemented, and only ever as passive, read-only work. The P1 categories and
+access-point inventory, the P2 environment report, and two read-only details (the device
+address in the finder's track view, and the open/WEP count on the channel-checkup
+conclusion screen) are shipped. The sound level meter and advertisement-pattern tracker
+detection are not started. Nothing here authorizes any active operation: section 13.6
+still stands, and the deauthentication, jamming, and credential-cracking exclusions are
+unchanged. Any remaining item would still need its own hardware-contract entry (where new
+hardware is involved) and its own on-device acceptance criteria, and would be reviewed
+against the anti-human risk list in section 3.2 before development.
