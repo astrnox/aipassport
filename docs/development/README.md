@@ -19,6 +19,8 @@ This directory contains AI Passport engineering rules and reusable workflows, gr
 - [coding-conventions.md](engineering/coding-conventions.md): source-code and resource conventions, including Chinese font integration, blank/boxed text troubleshooting, and display acceptance.
 - [lvgl-chinese-fonts.md](engineering/lvgl-chinese-fonts.md): step-by-step CJK configuration, font generation/linking, fallback examples, glyph checks, and troubleshooting.
 - [wifi-provisioning.md](engineering/wifi-provisioning.md): Bluetooth-based Wi-Fi setup using the BLUFI reference branch, the companion mini program, and integration checks.
+- [ui-ins-visual-refresh.md](engineering/ui-ins-visual-refresh.md): planning-only Instagram-style visual refresh — warm neutral palette with a single accent, banned gradients and blue-violet hues, and migration steps.
+- [memory-and-power-optimization.md](engineering/memory-and-power-optimization.md): planning-only RAM and power review — LVGL object peaks, pool sizing, idle redraw waste, and a staged optimization path.
 
 ## CI
 

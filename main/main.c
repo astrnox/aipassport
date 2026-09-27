@@ -69,7 +69,10 @@ static esp_err_t input_dispatch_init(void)
 {
     s_input_queue = xQueueCreate(INPUT_QUEUE_DEPTH, sizeof(input_event_t));
     if (!s_input_queue) return ESP_ERR_NO_MEM;
-    if (xTaskCreate(input_task, "app_input", 4096, NULL, 5, &s_input_task) != pdPASS) {
+    // 8192：按键任务不只是派发事件，页面构建（今日/编辑列表等）也同步跑在它上面。
+    // 4096 时，深一点的调用链（build_* → render_* → snprintf / LVGL 样式 / 递归滚动）
+    // 一旦溢出就是 Stack canary → panic → 背光已亮的白屏重启。参考文档同样建议 8192。
+    if (xTaskCreate(input_task, "app_input", 8192, NULL, 5, &s_input_task) != pdPASS) {
         vQueueDelete(s_input_queue);
         s_input_queue = NULL;
         return ESP_ERR_NO_MEM;

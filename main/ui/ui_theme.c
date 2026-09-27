@@ -337,6 +337,9 @@ lv_obj_t *ui_label_create(lv_obj_t *parent, const char *text,
                           const lv_font_t *font, uint32_t color)
 {
     lv_obj_t *label = lv_label_create(parent);
+    // LVGL 内部池/堆耗尽时 create 会返回 NULL；不拦的话紧随其后的样式调用就会解引用
+    // 空指针，表现正是"背光已亮的白屏重启"。这里与下面各 create 统一做防御。
+    if (!label) return NULL;
     lv_obj_set_style_text_font(label, font, 0);
     lv_obj_set_style_text_color(label, lv_color_hex(color), 0);
     lv_label_set_text(label, text ? text : "");
@@ -346,6 +349,7 @@ lv_obj_t *ui_label_create(lv_obj_t *parent, const char *text,
 lv_obj_t *ui_card_create(lv_obj_t *parent, int x, int y, int w, int h, uint32_t accent)
 {
     lv_obj_t *card = lv_obj_create(parent);
+    if (!card) return NULL;
     lv_obj_remove_flag(card, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_pos(card, x, y);
     lv_obj_set_size(card, w, h);
@@ -360,19 +364,21 @@ lv_obj_t *ui_card_create(lv_obj_t *parent, int x, int y, int w, int h, uint32_t 
 
     if (accent != 0) {
         lv_obj_t *bar = lv_obj_create(card);
-        lv_obj_remove_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
-        // LVGL 9 的 flex/grid 布局会覆盖 lv_obj_set_pos 设置的坐标；accent bar
-        // 是纯装饰条，必须钉在 (0,0)，所以用 FLOATING 把它排除在布局之外。
-        lv_obj_add_flag(bar, LV_OBJ_FLAG_FLOATING);
-        // 通高的方条会从圆角处戳出来。把它缩进成一段圆头竖条：上下各留出圆角的高度，
-        // 落点正好在卡片侧边变直的位置，看起来是有意留白而不是画歪了。
-        int inset = (h > 40) ? 8 : 0;
-        lv_obj_set_pos(bar, 0, inset);
-        lv_obj_set_size(bar, 3, h - inset * 2);
-        lv_obj_set_style_bg_color(bar, lv_color_hex(accent), 0);
-        lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
-        lv_obj_set_style_border_width(bar, 0, 0);
-        lv_obj_set_style_radius(bar, 2, 0);
+        if (bar) {
+            lv_obj_remove_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
+            // LVGL 9 的 flex/grid 布局会覆盖 lv_obj_set_pos 设置的坐标；accent bar
+            // 是纯装饰条，必须钉在 (0,0)，所以用 FLOATING 把它排除在布局之外。
+            lv_obj_add_flag(bar, LV_OBJ_FLAG_FLOATING);
+            // 通高的方条会从圆角处戳出来。把它缩进成一段圆头竖条：上下各留出圆角的高度，
+            // 落点正好在卡片侧边变直的位置，看起来是有意留白而不是画歪了。
+            int inset = (h > 40) ? 8 : 0;
+            lv_obj_set_pos(bar, 0, inset);
+            lv_obj_set_size(bar, 3, h - inset * 2);
+            lv_obj_set_style_bg_color(bar, lv_color_hex(accent), 0);
+            lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
+            lv_obj_set_style_border_width(bar, 0, 0);
+            lv_obj_set_style_radius(bar, 2, 0);
+        }
     }
     return card;
 }
@@ -388,6 +394,7 @@ ui_digit_row_t ui_digit_row_create(lv_obj_t *parent, int digits,
     row.count = digits;
     for (int i = 0; i < digits; i++) {
         lv_obj_t *label = lv_label_create(parent);
+        if (!label) break;
         lv_obj_set_style_text_font(label, font, 0);
         lv_obj_set_style_text_color(label, lv_color_hex(color), 0);
         lv_obj_set_width(label, digit_w);
@@ -413,6 +420,7 @@ void ui_digit_row_set(ui_digit_row_t *row, const char *text, uint32_t color)
 lv_obj_t *ui_list_create(lv_obj_t *parent)
 {
     lv_obj_t *list = lv_obj_create(parent);
+    if (!list) return NULL;
     lv_obj_remove_flag(list, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_width(list, LV_PCT(100));
     lv_obj_set_height(list, LV_SIZE_CONTENT);
@@ -429,6 +437,7 @@ ui_row_t ui_row_create(lv_obj_t *parent, const char *title, const char *value)
 {
     ui_row_t row = {0};
     lv_obj_t *obj = lv_obj_create(parent);
+    if (!obj) return row;   // 池/堆耗尽：返回空行，调用方按 !row.obj 跳过，不再崩溃
     lv_obj_remove_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_width(obj, LV_PCT(100));
     lv_obj_set_height(obj, UI_ROW_H);
@@ -442,23 +451,25 @@ ui_row_t ui_row_create(lv_obj_t *parent, const char *title, const char *value)
     row.obj = obj;
 
     row.indicator = lv_obj_create(obj);
-    lv_obj_remove_flag(row.indicator, LV_OBJ_FLAG_SCROLLABLE);
-    // 选中指示条是装饰元素，钉在行左侧；若行将来被设为 flex 容器，
-    // 需要 FLOATING 才能不被布局重新排列。
-    lv_obj_add_flag(row.indicator, LV_OBJ_FLAG_FLOATING);
-    lv_obj_set_pos(row.indicator, 0, 4);
-    lv_obj_set_size(row.indicator, 3, UI_ROW_H - 8);
-    lv_obj_set_style_bg_color(row.indicator, lv_color_hex(ui_c_accent()), 0);
-    lv_obj_set_style_bg_opa(row.indicator, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(row.indicator, 0, 0);
-    lv_obj_set_style_radius(row.indicator, 0, 0);
-    lv_obj_add_flag(row.indicator, LV_OBJ_FLAG_HIDDEN);
+    if (row.indicator) {
+        lv_obj_remove_flag(row.indicator, LV_OBJ_FLAG_SCROLLABLE);
+        // 选中指示条是装饰元素，钉在行左侧；若行将来被设为 flex 容器，
+        // 需要 FLOATING 才能不被布局重新排列。
+        lv_obj_add_flag(row.indicator, LV_OBJ_FLAG_FLOATING);
+        lv_obj_set_pos(row.indicator, 0, 4);
+        lv_obj_set_size(row.indicator, 3, UI_ROW_H - 8);
+        lv_obj_set_style_bg_color(row.indicator, lv_color_hex(ui_c_accent()), 0);
+        lv_obj_set_style_bg_opa(row.indicator, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(row.indicator, 0, 0);
+        lv_obj_set_style_radius(row.indicator, 0, 0);
+        lv_obj_add_flag(row.indicator, LV_OBJ_FLAG_HIDDEN);
+    }
 
     lv_obj_t *title_lbl = ui_label_create(obj, title, ui_font_body, ui_c_text());
-    lv_obj_align(title_lbl, LV_ALIGN_LEFT_MID, 12, 0);
+    if (title_lbl) lv_obj_align(title_lbl, LV_ALIGN_LEFT_MID, 12, 0);
 
     row.value = ui_label_create(obj, value ? value : "", ui_font_hint, ui_c_dim());
-    lv_obj_align(row.value, LV_ALIGN_RIGHT_MID, -10, 0);
+    if (row.value) lv_obj_align(row.value, LV_ALIGN_RIGHT_MID, -10, 0);
     return row;
 }
 

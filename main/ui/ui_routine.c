@@ -227,6 +227,19 @@ static void render_today_rows(void)
     }
 }
 
+// 定位完成后的反馈。时间未校准/未同步时"当前节点"本身就不可信，提示要与实际相符，
+// 不能一律报"已定位到当前节点"。
+static void flash_located(void)
+{
+    if (!app_state_time_known()) {
+        ui_hint_flash("时间未校准，定位可能不准", 1600);
+    } else if (!app_state_settings()->time_synced) {
+        ui_hint_flash("已定位到当前节点（时间未同步）", 1600);
+    } else {
+        ui_hint_flash("已定位到当前节点", 1200);
+    }
+}
+
 static void today_focus(int index)
 {
     if (s.node_count <= 0) return;
@@ -268,6 +281,19 @@ static void build_today(void)
         app_fmt_date_short(d, sizeof(d), now.month, now.day, s.built_weekday);
         snprintf(d + strlen(d), sizeof(d) - strlen(d), "%s", slot_suffix());
         lv_label_set_text(s.today_hdr_right, d);
+    }
+
+    // 时间未校准/未同步时的定位提醒。定位仍按设备本地时钟走（离线优先，作息不依赖
+    // 校时），但"当前节点"可能整段错位，必须让用户知道这不是数据出错。区分两种状态：
+    //   !time_known：从未校过（出厂/清数据），本地钟从占位基准 2026-01-01 00:00 起算，
+    //               开机后一直落在清晨，于是永远定位到第一个节点——正是 #7 的现象。
+    //   !time_synced：曾校准过、重启后未同步，基准来自上次已知时间，通常接近但可能漂移。
+    if (!app_state_time_known()) {
+        ui_banner_create(v, "时间未校准，按设备本地钟定位，可能不准；可在\u201c设置\u201d里校时",
+                         ui_c_warn());
+    } else if (!app_state_settings()->time_synced) {
+        ui_banner_create(v, "时间未同步，定位可能有偏差；可在\u201c设置\u201d里校时",
+                         ui_c_soon());
     }
 
     lv_obj_t *card = ui_card_create(v, 0, 0, RT_CW, RT_CD_H, ui_c_accent());
@@ -738,7 +764,7 @@ void page_routine_key(bsp_btn_t btn, bsp_btn_ev_t ev)
                 s.focus = current_node_index(day);
                 render_today_rows();
                 today_focus(s.focus);
-                ui_hint_flash("已定位到当前节点", 1200);
+                flash_located();
             }
             return;
         }
@@ -763,7 +789,7 @@ void page_routine_key(bsp_btn_t btn, bsp_btn_ev_t ev)
             s.focus = current_node_index(day);
             render_today_rows();
             today_focus(s.focus);
-            ui_hint_flash("已定位到当前节点", 1200);
+            flash_located();
         }
         return;
     }
