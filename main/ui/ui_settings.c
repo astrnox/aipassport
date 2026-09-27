@@ -14,6 +14,7 @@
 #include "ui_pages.h"
 
 #include "ui_app.h"
+#include "ui_sound.h"
 #include "ui_theme.h"
 #include "ui_timeedit.h"
 
@@ -962,11 +963,15 @@ static void activate(void)
     case SET_SOUND:
         st->sound_muted = !st->sound_muted;
         app_state_save_settings();
+        // 静音/取消静音立刻落到 codec，避免"静了音，某页还在响"。
+        ui_sound_apply_volume();
         break;
 
     case SET_VOLUME:
         st->volume = (uint8_t)(st->volume >= 100 ? 20 : st->volume + 20);
         app_state_save_settings();
+        // 音量也要立刻全局生效，而不是等下次打开音频。
+        ui_sound_apply_volume();
         break;
 
     case SET_POWERSAVE:

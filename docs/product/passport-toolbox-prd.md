@@ -780,3 +780,112 @@ Engineering acceptance. The application layer does not duplicate hardware pin an
 ## 12. Out of Scope for This Release
 
 AI voice conversation and radio and other capabilities that require continuous connectivity and high compute; Bluetooth HID remote-control capabilities (PPT, short video, etc.); social plays with multi-device interaction; third-party content aggregation such as weather; cross-device data sync and account systems; the third-tier extended esports information; habit check-in features that require daily maintenance; and offline random divination content such as I Ching divination and the daily draw — it does not fit this product's positioning of "not creating daily debt and not deceiving users," nor is it consistent with the practical orientation of the rest of the toolbox, so it is removed in this release and the corresponding item is removed from the screen list as well.
+
+---
+
+## 13. Flipper Zero/One-Inspired Portable Geek Capabilities (Discussion Only)
+
+This section records a capability comparison requested by the product owner: which
+features of a portable geek multi-tool such as Flipper Zero or Flipper One could be
+reliably implemented on the FoloToy AI Passport, and which cannot. It is a discussion
+and backlog record only. It changes nothing in sections 1–12, adds no feature to this
+release, and is not part of the acceptance criteria in section 11.
+
+### 13.1 What the reference products are
+
+Flipper Zero is a pocket multi-tool for hardware and radio experimentation. Its
+capabilities come from dedicated radios and wired hardware rather than from software:
+Sub-GHz transmit and receive around 300–928 MHz, 125 kHz RFID and 13.56 MHz NFC
+read/write/emulate, infrared transmit and receive, iButton (1-Wire), an exposed GPIO
+header with UART/SPI/I2C, and a USB port that can act as a USB HID device or a "Bad
+USB" host. Flipper One extends the same idea toward a Linux-class handheld with more
+radios and I/O.
+
+The relevant lesson is that a Flipper's signature capabilities are hardware, not
+applications. Software cannot create a radio or a coil that the board does not have.
+
+### 13.2 What the Passport hardware actually provides
+
+The confirmed capabilities are the repository's hardware contract: a single 2.4 GHz
+Wi-Fi radio (802.11 b/g/n station, with access-point mode only for provisioning), one
+BLE radio (NimBLE: advertise, scan, and connect), an ES8311 audio codec with
+full-duplex PCM (playback and microphone capture), a CW2017 fuel gauge on the shared
+I2C bus, a 240×320 display, three buttons on one ADC pin, and native USB Serial/JTAG.
+Every pin is committed — display SPI, backlight, button ADC, shared I2C, I2S, and USB
+on GPIO18/19 — and there is no free header.
+
+### 13.3 Capability mapping
+
+| Flipper capability | Available on Passport | Classification | Why |
+|---|---|---|---|
+| Sub-GHz transmit/receive | No | Not feasible | No Sub-GHz radio or antenna; needs an added module outside the hardware contract |
+| 125 kHz RFID / NFC | No | Not feasible | No coil or analog front end, and no free pin to attach one |
+| Infrared transmit/receive | No | Not feasible | No IR emitter or receiver on the board |
+| iButton (1-Wire) | No | Not feasible | No 1-Wire interface and no free pin |
+| GPIO / UART / SPI / I2C breakout | No | Not feasible | All pins serve display, audio, battery, and USB |
+| Bad USB (USB HID host) | No | Not feasible | USB is a Serial/JTAG console only; the C3 is not wired or supported as a general USB host |
+| BLE device discovery | Yes | Shipped (Find device) | Uses the BLE scan; sorted by signal strength |
+| BLE HID remote | Yes | Shipped (Universal remote) | HID over GATT keyboard and media keys |
+| Wi-Fi access-point scan and channel congestion | Yes | Shipped (Channel checkup) | Per-channel hotspot list with congestion sorting |
+| BLE advertisement analysis | Yes | Reliable candidate | Reuses the existing scan callback |
+| Wi-Fi access-point inventory | Yes | Reliable candidate | Extends the existing scan |
+| Wi-Fi client list per access point | No | Not feasible / unreliable | See 13.4 |
+| Jamming, deauthentication, credential cracking | Not applicable | Explicitly excluded | Illegal and harmful; excluded regardless of feasibility |
+
+### 13.4 Answers to the two capability questions
+
+Can we capture nearby Wi-Fi and list which devices are connected to each access point?
+
+No, not with the confirmed hardware and firmware contract. A station scan returns
+beacons and probe responses from access points; the clients associated with an access
+point are never broadcast, and a station that is not associated cannot enumerate them.
+Obtaining that list would require promiscuous/monitor-mode frame capture, which on the
+ESP32-C3 shares the single 2.4 GHz radio with normal Wi-Fi and cannot run reliably
+alongside it, sees only unencrypted management frames, and cannot reliably map a
+client to a specific access point; modern phones also rotate their MAC addresses.
+Offering a "which devices are on this network" list would therefore be inaccurate, and
+this product does not make claims it cannot keep. The honest and still useful
+substitute is already shipped: which access points exist, on which channel, how
+strong, and how congested.
+
+Can we find nearby phones or electronic devices?
+
+Yes, within limits, and this already works. The "Find device" finder scans BLE
+advertisements and lists nearby devices, translating signal strength into a plain
+closeness value and sorting by signal, which is enough to locate your own earbuds,
+watch, or phone. A reliable future enhancement is to classify devices from their
+advertisement content (manufacturer ID, service UUIDs, common tracker patterns) into
+categories such as phone, earbuds, watch, and tracker, and to show counts by category.
+It cannot reveal a device's identity or owner: phones rotate their addresses and most
+devices advertise no name, so the page must show categories and signal, never a
+claimed identity.
+
+### 13.5 Reliable candidate backlog
+
+These candidates use only the confirmed Wi-Fi, BLE, and audio hardware and are ordered
+by user value. They belong to a future release, not this one.
+
+| Priority | Candidate | Basis |
+|---|---|---|
+| P1 | BLE device categories: classify by manufacturer ID and service UUID, and show counts by category | Extends the existing BLE scan; no new hardware |
+| P1 | Wi-Fi access-point inventory: a full access-point list sorted by signal, with security mode, hidden flag, and band | Extends the existing Wi-Fi scan and the channel-checkup pages |
+| P2 | Wi-Fi environment report: co-channel and adjacent-channel overlap with a plain-language router recommendation | Builds on the channel-checkup congestion model |
+| P2 | Sound level meter: use the microphone to show ambient loudness with a peak-hold reading | Uses the existing full-duplex audio capture |
+| P3 | Beacon and tracker detector: recognize common tracker advertisement patterns to help find your own tag | Uses the existing BLE scan; identification stays category-level only |
+
+### 13.6 Explicitly excluded
+
+Illegal or harmful radio operations — deauthentication attacks, jamming, cloning or
+cracking credentials, and any unauthorized access — are excluded regardless of
+feasibility. Capabilities that need hardware the board does not have — Sub-GHz, NFC and
+RFID, infrared, iButton, a GPIO breakout, and USB HID host — are outside the current
+hardware contract and are not promised. The same principle as the rest of this product
+applies: do not create daily debt and do not deceive users.
+
+### 13.7 Status
+
+Discussion only. Nothing in this section is implemented, scheduled, or part of the
+acceptance criteria in section 11. Any item later taken up would first need its own
+hardware-contract entry (where new hardware is involved) and its own on-device
+acceptance criteria, and would be reviewed against the anti-human risk list in section
+3.2 before development.

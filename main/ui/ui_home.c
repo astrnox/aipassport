@@ -18,12 +18,15 @@
 
 #include "ui_theme.h"
 #include "ui_app.h"
+#include "ui_sound.h"
 
 #include "app_assets.h"
 #include "app_state.h"
 #include "logic/app_anim.h"
 #include "logic/app_badge.h"
 #include "logic/app_pomodoro.h"
+
+#include "bsp_display.h"
 
 #include "lvgl.h"
 
@@ -405,6 +408,8 @@ static void quick_activate(void)
     case QUIET_MUTE:
         st->sound_muted = !st->sound_muted;
         app_state_save_settings();
+        // 快捷面板也要让静音立刻全局生效，与设置页保持一致。
+        ui_sound_apply_volume();
         quick_update_values();
         break;
     case QUIET_THEME:
@@ -417,6 +422,8 @@ static void quick_activate(void)
     case QUIET_BRIGHT:
         st->backlight = (uint8_t)(st->backlight >= 100 ? 10 : st->backlight + 10);
         app_state_save_settings();
+        // 以前只改了设置值没立刻应用，会出现"改了亮度当场没反应、之后某次才突然变"。
+        bsp_display_backlight(st->backlight);
         quick_update_values();
         break;
     case QUIET_POMO: {

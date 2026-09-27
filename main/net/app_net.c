@@ -677,7 +677,10 @@ static void channel_worker(void *arg)
 {
     (void)arg;
 
-    app_channel_report_t report;
+    // 报告含 48 条热点明细（每条约 42 字节），放栈上会吃掉 2KB 以上；任务栈只有几千
+    // 字节，还要留给 esp_wifi 调用链。放静态区，并用 s_channel_running 保证同一时刻
+    // 只有一个 worker 在写它。
+    static app_channel_report_t report;
     app_channel_reset(&report);
     app_fetch_state_t final = APP_FETCH_FAILED;
     char err[64] = { 0 };
@@ -715,7 +718,13 @@ static void channel_worker(void *arg)
     }
     if (n > 0 && esp_wifi_scan_get_ap_records(&n, recs) == ESP_OK) {
         for (uint16_t i = 0; i < n; i++) {
-            app_channel_add_ap(&report, recs[i].primary, recs[i].rssi);
+            // 隐藏 SSID 时驱动给出的 ssid 为空串，这里按长度 0 处理，明细页会显示
+            // "隐藏网络"。BSSID 一并带上，方便同一 SSID 的多个 AP 区分开。
+            const char *ssid = (const char *)recs[i].ssid;
+            int ssid_len = 0;
+            while (ssid_len < 32 && ssid[ssid_len] != '\0') ssid_len++;
+            app_channel_add_ap(&report, recs[i].primary, recs[i].rssi,
+                               ssid, ssid_len, recs[i].bssid);
         }
     }
     free(recs);
@@ -769,7 +778,9 @@ void app_net_channel_scan_request(void)
     s_channel_error[0] = '\0';
     net_unlock();
 
-    if (xTaskCreate(channel_worker, "net_channel", 4096, NULL, 4, NULL) != pdPASS) {
+    // 6144：报告本身已挪到静态区，但 esp_wifi_scan_* 的调用链在无 PSRAM 的目标上
+    // 仍需可观栈空间，4096 在密集环境里偏紧。
+    if (xTaskCreate(channel_worker, "net_channel", 6144, NULL, 4, NULL) != pdPASS) {
         net_lock();
         s_channel_running = false;
         s_channel_state = APP_FETCH_FAILED;
