@@ -27,6 +27,9 @@ esp_err_t app_ble_prov_start(void);
 // 幂等，可在未开启时调用。
 void app_ble_prov_stop(void);
 
+// 协议栈是否真的处于运行中（广播 / 已连接 / 正在应用 / 已完成）。开启失败时返回
+// false：这样界面才会允许重试，找设备与遥控也不会被一次失败永久挡住。想看失败原因
+// 用 app_ble_prov_state() == APP_BLE_PROV_FAILED 与 app_ble_prov_error()。
 bool                app_ble_prov_active(void);
 app_ble_prov_state_t app_ble_prov_state(void);
 // 设备广播名，供界面展示。
