@@ -6,6 +6,7 @@
 idf_component_register(
     SRCS "main.c"
          "app_assets.c"
+         "app_metrics.c"
          "app_state.c"
          "logic/app_anim.c"
          "logic/app_badge.c"

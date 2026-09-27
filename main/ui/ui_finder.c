@@ -50,6 +50,7 @@ typedef enum {
 typedef struct {
     uint8_t addr[6];
     char    name[APP_FINDER_NAME_LEN];
+    app_finder_cat_t category;   // 启发式类别；UNKNOWN 表示没有可显示的判断
     bool    saved;
     bool    present;    // 本次快照里是否搜到
     int     rssi;       // present 时有效
@@ -139,6 +140,7 @@ static int build_entries(void)
             e->present = true;
             e->rssi = s.snap.devs[di].rssi;
             e->closeness = app_finder_closeness(e->rssi);
+            e->category = s.snap.devs[di].category;   // 搜到了才有类别可显示
             if (!e->name[0] && s.snap.devs[di].has_name) {
                 snprintf(e->name, sizeof(e->name), "%s", s.snap.devs[di].name);
             }
@@ -157,8 +159,35 @@ static int build_entries(void)
         e->present = true;
         e->rssi = s.snap.devs[i].rssi;
         e->closeness = app_finder_closeness(e->rssi);
+        e->category = s.snap.devs[i].category;
     }
     return n;
+}
+
+// 按类别计数的汇总文案。只讲"有几台像什么"，不讲是谁的：MAC 会随机化、多数设备
+// 不广播名字，这里永远只是启发式归类。只输出计数非零的类别，顺序固定，便于扫读。
+static void category_summary(char *out, size_t cap)
+{
+    int counts[APP_FINDER_CAT_COUNT];
+    app_finder_category_counts(&s.snap, counts);
+
+    static const app_finder_cat_t order[] = {
+        APP_FINDER_CAT_PHONE, APP_FINDER_CAT_EARBUDS, APP_FINDER_CAT_WATCH,
+        APP_FINDER_CAT_TRACKER, APP_FINDER_CAT_AUDIO, APP_FINDER_CAT_COMPUTER,
+        APP_FINDER_CAT_OTHER, APP_FINDER_CAT_UNKNOWN,
+    };
+
+    size_t used = 0;
+    out[0] = '\0';
+    for (size_t i = 0; i < sizeof(order) / sizeof(order[0]); i++) {
+        int cnt = counts[order[i]];
+        if (cnt <= 0) continue;
+        int w = snprintf(out + used, cap - used, "%s%s %d",
+                         used == 0 ? "" : " · ",
+                         app_finder_category_text(order[i]), cnt);
+        if (w < 0 || (size_t)w >= cap - used) break;   // 放不下就停，宁可少显示也不溢出
+        used += (size_t)w;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -196,6 +225,21 @@ static void build_list(void)
         ui_banner_create(c, why ? why : "蓝牙没能打开，请稍后重试", ui_c_warn());
     }
 
+    // 类别计数汇总：放在标题下方作为副标题。措辞刻意只说"像什么"，不暗示设备归属。
+    if (s.count > 0) {
+        char summary[128];
+        category_summary(summary, sizeof(summary));
+        if (summary[0]) {
+            char line[160];
+            snprintf(line, sizeof(line), "类别统计：%s", summary);
+            lv_obj_t *lbl = ui_label_create(c, line, ui_font_hint, ui_c_dim());
+            if (lbl) {
+                lv_obj_set_width(lbl, FD_CW);
+                lv_label_set_long_mode(lbl, LV_LABEL_LONG_WRAP);
+            }
+        }
+    }
+
     if (s.count > 0) {
         lv_obj_t *list = ui_list_create(c);
         bool section_saved = false;
@@ -213,9 +257,18 @@ static void build_list(void)
 
             char title[40];
             display_name(s.entries[i].addr, s.entries[i].name, title, sizeof(title));
+            // 已知类别时把短标签拼在名字后（"AirPods · 耳机"）；未知则只显示名字，
+            // 不给用户一个无意义的"未知"后缀。
+            char title_cat[48];
+            const char *cat_text = (s.entries[i].category != APP_FINDER_CAT_UNKNOWN)
+                                       ? app_finder_category_text(s.entries[i].category)
+                                       : NULL;
+            if (cat_text) {
+                snprintf(title_cat, sizeof(title_cat), "%s · %s", title, cat_text);
+            }
             char val[32];
             entry_text(&s.entries[i], val, sizeof(val));
-            s.rows[i] = ui_row_create(list, title, val);
+            s.rows[i] = ui_row_create(list, cat_text ? title_cat : title, val);
 
             uint32_t col = s.entries[i].present ? closeness_color(s.entries[i].closeness)
                                                 : ui_c_dim();

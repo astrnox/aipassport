@@ -1,7 +1,7 @@
 // tests/test_app_finder.c —— app_finder 的主机侧单元测试。
 //
 // 覆盖：设备表的插入/更新/淘汰/超时清理、排序、信号平滑、接近度与人话档位、
-// 收藏的增删查、以及收藏字节流的序列化往返与损坏拒绝。
+// 设备类别的启发式归类与按类别计数、收藏的增删查、以及收藏字节流的序列化往返与损坏拒绝。
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
@@ -26,7 +26,7 @@ int main(void)
 
     // ---- 新设备插入并带名字 ----
     addr_of(a, 0x10);
-    int i0 = app_finder_feed(&f, a, "AirPods", 7, -60, 1000);
+    int i0 = app_finder_feed(&f, a, 0, NULL, 0, "AirPods", 7, -60, 1000);
     assert(i0 == 0);
     assert(f.count == 1);
     assert(f.devs[0].has_name == true);
@@ -34,31 +34,34 @@ int main(void)
     assert(f.devs[0].rssi == -60);
     assert(f.devs[0].raw_rssi == -60);
     assert(f.devs[0].last_ms == 1000);
+    assert(f.devs[0].category == APP_FINDER_CAT_EARBUDS);   // 名字线索命中
 
     // ---- 同址更新：平滑信号 + 推进时间 ----
-    int i1 = app_finder_feed(&f, a, NULL, 0, -40, 1500);
+    int i1 = app_finder_feed(&f, a, 0, NULL, 0, NULL, 0, -40, 1500);
     assert(i1 == 0);
     assert(f.count == 1);                          // 不重复插入
     assert(f.devs[0].rssi == -55);                 // -60 + (20>>2)
     assert(f.devs[0].raw_rssi == -40);
     assert(f.devs[0].last_ms == 1500);
     assert(strcmp(f.devs[0].name, "AirPods") == 0);   // 本次没带名字，保留旧的
+    assert(f.devs[0].category == APP_FINDER_CAT_EARBUDS);   // 本次无线索，类别不降级
 
     // ---- 从未带过名字的设备 ----
     addr_of(b, 0x20);
-    app_finder_feed(&f, b, NULL, 0, -70, 2000);
+    app_finder_feed(&f, b, 0, NULL, 0, NULL, 0, -70, 2000);
     assert(app_finder_find(&f, b) == 1);
     assert(f.devs[1].has_name == false);
     assert(f.devs[1].name[0] == '\0');
+    assert(f.devs[1].category == APP_FINDER_CAT_UNKNOWN);
     // 之后补发名字
-    app_finder_feed(&f, b, "MX Master", 9, -70, 2100);
+    app_finder_feed(&f, b, 0, NULL, 0, "MX Master", 9, -70, 2100);
     assert(f.devs[1].has_name == true);
     assert(strcmp(f.devs[1].name, "MX Master") == 0);
 
     // ---- 超长名字截断且以 NUL 结尾 ----
     uint8_t c[6];
     addr_of(c, 0x30);
-    app_finder_feed(&f, c, "0123456789012345678901234567890", 31, -50, 2200);
+    app_finder_feed(&f, c, 0, NULL, 0, "0123456789012345678901234567890", 31, -50, 2200);
     int ic = app_finder_find(&f, c);
     assert(ic >= 0);
     assert(strlen(f.devs[ic].name) == APP_FINDER_NAME_LEN - 1);
@@ -73,13 +76,13 @@ int main(void)
     app_finder_init(&f);
     addr_of(a, 0x10);
     addr_of(b, 0x20);
-    app_finder_feed(&f, a, "A", 1, -50, 1000);
-    app_finder_feed(&f, b, "B", 1, -60, 9000);
+    app_finder_feed(&f, a, 0, NULL, 0, "A", 1, -50, 1000);
+    app_finder_feed(&f, b, 0, NULL, 0, "B", 1, -60, 9000);
     app_finder_prune(&f, 9000 + APP_FINDER_TTL_MS + 1);   // a 早已超时，b 刚超
     assert(f.count == 0);
     app_finder_init(&f);
-    app_finder_feed(&f, a, "A", 1, -50, 1000);
-    app_finder_feed(&f, b, "B", 1, -60, 9000);
+    app_finder_feed(&f, a, 0, NULL, 0, "A", 1, -50, 1000);
+    app_finder_feed(&f, b, 0, NULL, 0, "B", 1, -60, 9000);
     app_finder_prune(&f, 9000);                           // b 恰好在有效期内
     assert(f.count == 1);
     assert(app_finder_find(&f, b) == 0);
@@ -90,9 +93,9 @@ int main(void)
     addr_of(d1, 1);
     addr_of(d2, 2);
     addr_of(d3, 3);
-    app_finder_feed(&f, d1, "weak", 4, -90, 10);
-    app_finder_feed(&f, d2, "strong", 6, -40, 10);
-    app_finder_feed(&f, d3, "mid", 3, -65, 10);
+    app_finder_feed(&f, d1, 0, NULL, 0, "weak", 4, -90, 10);
+    app_finder_feed(&f, d2, 0, NULL, 0, "strong", 6, -40, 10);
+    app_finder_feed(&f, d3, 0, NULL, 0, "mid", 3, -65, 10);
     app_finder_sort(&f);
     assert(f.devs[0].rssi == -40);
     assert(f.devs[1].rssi == -65);
@@ -103,14 +106,14 @@ int main(void)
     uint8_t e[6];
     for (int i = 0; i < APP_FINDER_MAX; i++) {
         addr_of(e, (uint8_t)(0x40 + i));
-        app_finder_feed(&f, e, NULL, 0, -50, (uint64_t)(100 + i));
+        app_finder_feed(&f, e, 0, NULL, 0, NULL, 0, -50, (uint64_t)(100 + i));
     }
     assert(f.count == APP_FINDER_MAX);
     uint8_t oldest[6];
     addr_of(oldest, 0x40);                 // 最早插入、last_ms 最小
     assert(app_finder_find(&f, oldest) == 0);
     addr_of(e, 0x99);
-    int idx = app_finder_feed(&f, e, "new", 3, -45, 9999);
+    int idx = app_finder_feed(&f, e, 0, NULL, 0, "new", 3, -45, 9999);
     assert(idx >= 0);
     assert(f.count == APP_FINDER_MAX);
     assert(app_finder_find(&f, oldest) == -1);   // 被淘汰
@@ -132,6 +135,98 @@ int main(void)
     assert(strcmp(app_finder_level(12), "有点远") == 0);
     assert(strcmp(app_finder_level(11), "信号很弱") == 0);
     assert(strcmp(app_finder_level(0), "信号很弱") == 0);
+
+    // ---- 设备类别：空输入与未知 ----
+    assert(app_finder_classify(0, NULL, 0, NULL, 0) == APP_FINDER_CAT_UNKNOWN);
+    assert(app_finder_classify(0, NULL, 0, "", 0) == APP_FINDER_CAT_UNKNOWN);
+    assert(app_finder_classify(0xFFFF, NULL, 0, NULL, 0) == APP_FINDER_CAT_UNKNOWN);   // 未登记厂商
+
+    // ---- 设备类别：厂商 ID 命中 ----
+    assert(app_finder_classify(0x004C, NULL, 0, NULL, 0) == APP_FINDER_CAT_PHONE);     // Apple
+    assert(app_finder_classify(0x0075, NULL, 0, NULL, 0) == APP_FINDER_CAT_PHONE);     // Samsung
+    assert(app_finder_classify(0x00E0, NULL, 0, NULL, 0) == APP_FINDER_CAT_PHONE);     // Google
+    assert(app_finder_classify(0x0006, NULL, 0, NULL, 0) == APP_FINDER_CAT_COMPUTER);  // Microsoft
+
+    // ---- 设备类别：标准服务 UUID ----
+    const uint16_t u_fastpair[] = {0xFE2C};
+    const uint16_t u_heart[]    = {0x180F, 0x180D};   // 含电池 + 心率，心率应胜出
+    const uint16_t u_hid[]      = {0x1812};
+    const uint16_t u_batt[]     = {0x180F};           // 仅电池：过于通用，不定性
+    assert(app_finder_classify(0, u_fastpair, 1, NULL, 0) == APP_FINDER_CAT_EARBUDS);
+    assert(app_finder_classify(0, u_heart, 2, NULL, 0) == APP_FINDER_CAT_WATCH);
+    assert(app_finder_classify(0, u_hid, 1, NULL, 0) == APP_FINDER_CAT_OTHER);
+    assert(app_finder_classify(0, u_batt, 1, NULL, 0) == APP_FINDER_CAT_UNKNOWN);
+    // 厂商 ID 与 UUID 同时出现：更具体的 UUID 应优先（Apple 厂商 + Fast Pair → 耳机）。
+    assert(app_finder_classify(0x004C, u_fastpair, 1, NULL, 0) == APP_FINDER_CAT_EARBUDS);
+
+    // ---- 设备类别：名称线索（大小写无关、中英混排） ----
+    assert(app_finder_classify(0, NULL, 0, "AirPods Pro", 11) == APP_FINDER_CAT_EARBUDS);
+    assert(app_finder_classify(0, NULL, 0, "WH-1000XM4 headphone", 20) == APP_FINDER_CAT_EARBUDS);
+    assert(app_finder_classify(0, NULL, 0, "JBL Flip 6", 10) == APP_FINDER_CAT_AUDIO);
+    assert(app_finder_classify(0, NULL, 0, "Galaxy Watch5", 13) == APP_FINDER_CAT_WATCH);
+    assert(app_finder_classify(0, NULL, 0, "SmartTag2", 9) == APP_FINDER_CAT_TRACKER);
+    assert(app_finder_classify(0, NULL, 0, "MacBook Pro", 11) == APP_FINDER_CAT_COMPUTER);
+    assert(app_finder_classify(0, NULL, 0, "我的耳机", 12) == APP_FINDER_CAT_EARBUDS);
+    // 名称线索优先于厂商 ID：Apple 厂商但名字是音箱 → 音频。
+    assert(app_finder_classify(0x004C, NULL, 0, "JBL Flip", 8) == APP_FINDER_CAT_AUDIO);
+
+    // ---- 类别标签 ----
+    assert(strcmp(app_finder_category_text(APP_FINDER_CAT_UNKNOWN), "未知") == 0);
+    assert(strcmp(app_finder_category_text(APP_FINDER_CAT_PHONE), "手机") == 0);
+    assert(strcmp(app_finder_category_text(APP_FINDER_CAT_EARBUDS), "耳机") == 0);
+    assert(strcmp(app_finder_category_text(APP_FINDER_CAT_WATCH), "手表") == 0);
+    assert(strcmp(app_finder_category_text(APP_FINDER_CAT_TRACKER), "追踪器") == 0);
+    assert(strcmp(app_finder_category_text(APP_FINDER_CAT_AUDIO), "音频") == 0);
+    assert(strcmp(app_finder_category_text(APP_FINDER_CAT_COMPUTER), "电脑") == 0);
+    assert(strcmp(app_finder_category_text(APP_FINDER_CAT_OTHER), "其它") == 0);
+    assert(strcmp(app_finder_category_text(APP_FINDER_CAT_COUNT), "未知") == 0);   // 越界兜底
+
+    // ---- feed 记录类别，并在后续广播中更新 ----
+    app_finder_init(&f);
+    addr_of(a, 0x10);
+    app_finder_feed(&f, a, 0x004C, NULL, 0, NULL, 0, -50, 1000);   // 仅厂商 → 手机
+    assert(f.devs[0].category == APP_FINDER_CAT_PHONE);
+    app_finder_feed(&f, a, 0, u_fastpair, 1, NULL, 0, -50, 1100);  // 后续广播带 Fast Pair → 耳机
+    assert(f.devs[0].category == APP_FINDER_CAT_EARBUDS);
+    app_finder_feed(&f, a, 0, NULL, 0, NULL, 0, -50, 1200);        // 再后来无线索，不降级
+    assert(f.devs[0].category == APP_FINDER_CAT_EARBUDS);
+
+    // ---- 按类别计数 ----
+    app_finder_init(&f);
+    int counts[APP_FINDER_CAT_COUNT];
+    app_finder_category_counts(&f, counts);                       // 空表：全 0
+    for (int i = 0; i < APP_FINDER_CAT_COUNT; i++) assert(counts[i] == 0);
+
+    addr_of(a, 0x10);
+    app_finder_feed(&f, a, 0x004C, NULL, 0, NULL, 0, -50, 1000);           // 手机
+    addr_of(b, 0x20);
+    app_finder_feed(&f, b, 0, u_fastpair, 1, NULL, 0, -55, 1000);          // 耳机
+    uint8_t e2[6];
+    addr_of(e2, 0x30);
+    app_finder_feed(&f, e2, 0, u_heart, 2, NULL, 0, -60, 1000);            // 手表
+    uint8_t e3[6];
+    addr_of(e3, 0x40);
+    app_finder_feed(&f, e3, 0, u_hid, 1, NULL, 0, -65, 1000);              // 其它
+    uint8_t e4[6];
+    addr_of(e4, 0x50);
+    app_finder_feed(&f, e4, 0, NULL, 0, NULL, 0, -70, 1000);               // 未知
+    uint8_t e5[6];
+    addr_of(e5, 0x60);
+    app_finder_feed(&f, e5, 0, NULL, 0, NULL, 0, -70, 1000);               // 未知
+
+    app_finder_category_counts(&f, counts);
+    assert(counts[APP_FINDER_CAT_PHONE] == 1);
+    assert(counts[APP_FINDER_CAT_EARBUDS] == 1);
+    assert(counts[APP_FINDER_CAT_WATCH] == 1);
+    assert(counts[APP_FINDER_CAT_OTHER] == 1);
+    assert(counts[APP_FINDER_CAT_UNKNOWN] == 2);
+    assert(counts[APP_FINDER_CAT_TRACKER] == 0);
+    assert(counts[APP_FINDER_CAT_AUDIO] == 0);
+    assert(counts[APP_FINDER_CAT_COMPUTER] == 0);
+
+    // NULL 入参不应崩溃，且把输出清零。
+    app_finder_category_counts(NULL, counts);
+    for (int i = 0; i < APP_FINDER_CAT_COUNT; i++) assert(counts[i] == 0);
 
     // ---- 收藏增删查 ----
     app_finder_init(&f);

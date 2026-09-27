@@ -12,6 +12,7 @@
 
 #include "app_assets.h"
 #include "app_ble.h"
+#include "app_metrics.h"
 #include "app_state.h"
 #include "logic/app_anim.h"
 #include "logic/app_badge.h"
@@ -617,6 +618,7 @@ done:
 
     // 校时不构成常驻联网的理由：赛事中心不在用、也没有赛事拉取在跑时释放射频。
     if (!in_center && !esports_busy) app_net_wifi_stop();
+    app_metrics_stack("net_time 退出");
     vTaskDelete(NULL);
 }
 
@@ -673,6 +675,25 @@ const char *app_net_time_error(void)
 // 再多只是把同一批 AP 的重复记录算两次。
 #define CHANNEL_SCAN_MAX_AP 48
 
+// 把驱动的 authmode 映射成 app_channel 的本地短标签枚举。映射只在这一个地方做：
+// app_channel 因此不必 include esp_wifi，界面也只需认一套中文标签。混合模式
+// (WPA_WPA2_PSK)、企业级按它实际支持的最高档归类，方便用户一眼判断加密强度；
+// 本工具不细分的模式（如 WAPI）统一落到"未知"，不冒充开放网络。
+static app_channel_sec_t channel_sec_from_authmode(wifi_auth_mode_t mode)
+{
+    switch (mode) {
+    case WIFI_AUTH_OPEN:          return APP_CHANNEL_SEC_OPEN;
+    case WIFI_AUTH_WEP:           return APP_CHANNEL_SEC_WEP;
+    case WIFI_AUTH_WPA_PSK:       return APP_CHANNEL_SEC_WPA;
+    case WIFI_AUTH_WPA2_PSK:
+    case WIFI_AUTH_WPA2_ENTERPRISE:
+    case WIFI_AUTH_WPA_WPA2_PSK:  return APP_CHANNEL_SEC_WPA2;
+    case WIFI_AUTH_WPA3_PSK:
+    case WIFI_AUTH_WPA2_WPA3_PSK: return APP_CHANNEL_SEC_WPA3;
+    default:                      return APP_CHANNEL_SEC_UNKNOWN;
+    }
+}
+
 static void channel_worker(void *arg)
 {
     (void)arg;
@@ -724,7 +745,8 @@ static void channel_worker(void *arg)
             int ssid_len = 0;
             while (ssid_len < 32 && ssid[ssid_len] != '\0') ssid_len++;
             app_channel_add_ap(&report, recs[i].primary, recs[i].rssi,
-                               ssid, ssid_len, recs[i].bssid);
+                               ssid, ssid_len, recs[i].bssid,
+                               channel_sec_from_authmode(recs[i].authmode));
         }
     }
     free(recs);
@@ -748,6 +770,7 @@ done:
     }
     s_channel_running = false;
     net_unlock();
+    app_metrics_stack("net_channel 退出");
     vTaskDelete(NULL);
 }
 
@@ -997,6 +1020,7 @@ done:
 
     // 详情拉取可能正在等同一次 Wi-Fi 窗口，别把它脚下的射频关掉。
     if (!in_center && !detail_busy) app_net_wifi_stop();
+    app_metrics_stack("net_esports 退出");
     vTaskDelete(NULL);
 }
 
@@ -1283,6 +1307,7 @@ done:
     net_unlock();
 
     if (!in_center) app_net_wifi_stop();   // 用户已离开赛事中心，释放射频
+    app_metrics_stack("net_esdetail 退出");
     vTaskDelete(NULL);
 }
 
@@ -1392,6 +1417,7 @@ static void leagues_worker(void *arg)
     net_lock();
     s_leagues_running = false;
     net_unlock();
+    app_metrics_stack("net_leagues 退出");
     vTaskDelete(NULL);
 }
 
@@ -1568,6 +1594,7 @@ done:
     net_lock();
     s_standings_running = false;
     net_unlock();
+    app_metrics_stack("net_standings 退出");
     vTaskDelete(NULL);
 }
 

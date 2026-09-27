@@ -13,6 +13,7 @@
 #include "ui_theme.h"
 #include "ui_timeedit.h"
 
+#include "app_metrics.h"
 #include "app_state.h"
 #include "logic/app_esports.h"
 
@@ -108,6 +109,10 @@ static void wake_now(void)
     s_asleep = false;
     s_idle_seconds = 0;
     bsp_display_backlight(app_state_settings()->backlight);
+    // 息屏期间跳过了状态栏的周期刷新（见 app_tick），这里补一次，避免唤醒后短暂
+    // 显示息屏前的旧电量或旧 LIVE 角标。调用点均在 LVGL 锁内，可直接触碰控件。
+    app_state_battery_refresh();
+    ui_app_refresh_status();
     ESP_LOGI(TAG, "唤醒");
 }
 
@@ -158,8 +163,12 @@ static void teardown_current(void)
     // 弹层挂在当前页面的屏幕上，页面屏幕删除前必须先收掉，否则 s_alert 会留下悬空指针。
     ui_alert_close();
     if (s_current >= 0) {
+        // 先记下采样标签（标题），再销毁页面——销毁之后 LVGL 池的回收才反映在这个点。
+        char label[64];
+        snprintf(label, sizeof(label), "离开:%s", MODULES[s_current].title);
         MODULES[s_current].exit();
         s_current = -1;
+        app_metrics_mem(label);
     } else {
         page_home_exit();
     }
@@ -181,6 +190,11 @@ void ui_app_open_module(int index)
     MODULES[index].enter();
     ui_app_note_activity();
     ui_app_refresh_status();
+
+    // 进入该页后的内存/栈水位采样（内存优化阶段 1）。
+    char label[64];
+    snprintf(label, sizeof(label), "进入:%s", MODULES[index].title);
+    app_metrics_report(label);
 }
 
 void ui_app_show_quick_panel(void) { home_quick_open(); }
@@ -344,6 +358,9 @@ static void report_missed_reminders(void)
     char body[192];
     snprintf(body, sizeof(body), "关机期间错过 %d 条提醒：%s", missed, list_text);
     ESP_LOGI(TAG, "错过提醒 %d 条: %s", missed, list_text);
+    // 与 check_reminders 同一约定：息屏时不"默默"弹层——校时可能发生在息屏之后，
+    // 先唤醒再弹，既让用户看到，也避免在背光熄灭时白白重绘一帧。
+    if (s_asleep) wake_now();
     ui_sound_beep();
     if (ui_alert_is_open()) ui_alert_close();
     ui_alert_open(lv_screen_active(), "错过的提醒", body);
@@ -422,10 +439,17 @@ static void app_tick(lv_timer_t *timer)
         else MODULES[s_current].tick();
     }
 
-    if (s_tick_count % 15 == 0) {
+    // 息屏时不刷新状态栏：背光已灭，重绘看不见，却要让 CPU 跑一趟 LVGL 失效与
+    // SPI 输出。省电阶段 1 的核心就是去掉这段无用功；唤醒时在 wake_now 补刷一次，
+    // 所以醒着时状态栏不会停在旧值。
+    if (!s_asleep && s_tick_count % 15 == 0) {
         app_state_battery_refresh();
         ui_app_refresh_status();
     }
+
+    // 每 60 秒一次汇总采样：内存快照 + 输入任务与 LVGL 任务的栈高水位。周期性而非
+    // 仅页面切换时采样，是为了覆盖"长时间停留/反复操作"后的缓慢泄漏与栈峰值。
+    if (s_tick_count % 60 == 0) app_metrics_report("周期");
 
     bsp_lvgl_unlock();
 }

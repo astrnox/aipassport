@@ -19,6 +19,7 @@
 #include "bsp_pins.h"
 
 #include "app_assets.h"
+#include "app_metrics.h"
 #include "app_state.h"
 #include "logic/app_vault.h"
 #include "net/app_net.h"
@@ -26,6 +27,7 @@
 #include "ui/ui_theme.h"
 
 #include "esp_log.h"
+#include "esp_pm.h"
 #include "esp_random.h"
 #include "esp_sleep.h"
 #include "freertos/FreeRTOS.h"
@@ -77,6 +79,8 @@ static esp_err_t input_dispatch_init(void)
         s_input_queue = NULL;
         return ESP_ERR_NO_MEM;
     }
+    // 把句柄交给测量工具：周期采样时连它的栈高水位一起记录（内存优化阶段 1）。
+    app_metrics_set_input_task(s_input_task);
     return ESP_OK;
 }
 
@@ -115,6 +119,22 @@ void app_main(void)
     esp_sleep_wakeup_cause_t wakeup = esp_sleep_get_wakeup_cause();
     if (wakeup != ESP_SLEEP_WAKEUP_UNDEFINED) {
         ESP_LOGI(TAG, "休眠唤醒原因: %d", wakeup);
+    }
+
+    // 功耗管理：只启用动态调频（DFS），空闲时把 CPU/APB 降到 40MHz。刻意不启用自动
+    // light sleep——它会牵扯 USB-Serial/JTAG 控制台、SPI/DMA 与 I2S 音频，需先在真机
+    // 上验证才能开启，见 docs/development/engineering/memory-and-power-optimization.md。
+    esp_pm_config_t pm_config = {
+        .max_freq_mhz = 160,
+        .min_freq_mhz = 40,
+        .light_sleep_enable = false,
+    };
+    esp_err_t pm_err = esp_pm_configure(&pm_config);
+    if (pm_err != ESP_OK) {
+        ESP_LOGW(TAG, "功耗管理配置失败(%s)，按默认频率运行", esp_err_to_name(pm_err));
+    } else {
+        ESP_LOGI(TAG, "功耗管理：动态调频已启用（%d-%d MHz，不自动 light sleep）",
+                 pm_config.min_freq_mhz, pm_config.max_freq_mhz);
     }
 
     bsp_i2c_init();

@@ -22,6 +22,7 @@
 #include "ui_app.h"
 #include "ui_timeedit.h"
 
+#include "app_metrics.h"
 #include "app_state.h"
 #include "logic/app_routine.h"
 #include "logic/app_text.h"
@@ -710,6 +711,10 @@ static void show_tab(int index)
     case 2: build_edit();  break;
     default: build_opts(); break;
     }
+
+    // 切标签是本页对象数峰值的关键点（先释放旧标签再建新标签），这里采样一次，
+    // 便于核对"只留一个标签"是否真的把峰值压下来了（内存优化阶段 1）。
+    app_metrics_mem("作息:切标签");
 }
 
 // ---------------------------------------------------------------------------
