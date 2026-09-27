@@ -117,10 +117,12 @@ ui_digit_row_t ui_digit_row_create(lv_obj_t *parent, int digits,
                                    const lv_font_t *font, uint32_t color, int digit_w);
 void ui_digit_row_set(ui_digit_row_t *row, const char *text, uint32_t color);
 
-// 列表行：左侧标题、右侧状态值、可选左侧选中指示条。
+// 列表行：左侧标题、右侧状态值，选中时以行自身左边框作指示条。
+// title 直接保存标题标签句柄：以前靠 lv_obj_get_child(row.obj, 1) 按下标取，
+// 一旦行内部控件结构变化就会取错，这里不再依赖子对象顺序。
 typedef struct {
     lv_obj_t *obj;
-    lv_obj_t *indicator;
+    lv_obj_t *title;
     lv_obj_t *value;
 } ui_row_t;
 

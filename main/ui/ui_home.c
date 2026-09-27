@@ -334,7 +334,7 @@ static void quick_focus(int index)
     for (int i = 0; i < HOME_QUICK_N; i++) {
         lv_obj_t *row = s.quick_rows[i];
         if (!row) continue;
-        lv_obj_t *title = lv_obj_get_child(row, 1);   // 0 是指示条，1 是标题
+        lv_obj_t *title = lv_obj_get_child(row, 0);   // 行不再有指示条子对象，标题是第 0 个
         if (title) {
             lv_obj_set_style_text_color(title,
                 lv_color_hex(i == index ? ui_c_accent() : ui_c_text()), 0);

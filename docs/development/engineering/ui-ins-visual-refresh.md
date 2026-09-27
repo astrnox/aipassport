@@ -4,9 +4,21 @@
 
 # Instagram-style UI/UX Refresh Plan
 
-Status: **planning only**. This document proposes a visual refresh and does not
-change any runtime behavior by itself. Nothing here should be implemented until
-the open questions at the end are settled.
+Status: **palette and component changes implemented; on-device verification
+pending.** The token swap and the component audit described below now run in the
+shipping theme ([`ui_theme.c`](../../../main/ui/ui_theme.c)). Contrast must still
+be checked on the real RGB565 panel, and the open questions at the end remain
+open.
+
+## Implemented
+
+- Both palettes in [`ui_theme.c`](../../../main/ui/ui_theme.c) use the
+  warm-neutral values in the table below; the cyan-on-navy scheme is gone.
+- `ui_row_create()` renders selection as a 3px left border on the row itself
+  instead of a separate child object, and `ui_row_t` stores the title label
+  handle directly rather than by child index.
+- The esports teams tab shows a win-rate bar built from block glyphs
+  (`█`/`░`), which adds no LVGL objects per row.
 
 ## Scope
 
@@ -56,9 +68,9 @@ and a few component details.
 Only `PALETTE_DARK` and `PALETTE_LIGHT` change. Every page keeps calling the
 existing `ui_c_*()` accessors, so no page code is touched.
 
-The values below are a **starting proposal**, chosen to be verified on the real
-RGB565 panel. Contrast — especially `dim` text on `card` and `accent` on `card` —
-must be checked per screen on device before this is accepted.
+The values below are implemented in [`ui_theme.c`](../../../main/ui/ui_theme.c).
+Contrast — especially `dim` text on `card` and `accent` on `card` — must still be
+checked per screen on the real RGB565 panel.
 
 | Token | Role | Dark proposal | Light proposal |
 | --- | --- | --- | --- |

@@ -49,6 +49,13 @@ enum {
     DETAIL_TAB_COUNT,
 };
 
+// 赛程列表每页行数。48 场一次建出来约 140+ 个 LVGL 对象，是无 PSRAM 设备上的最大
+// 峰值；分页后单页只有约 30 个，显著压低 LVGL 池占用，也与 PRD"赛事数据分页加载"一致。
+#define ESPORTS_PAGE_SIZE 10
+
+// 战队页胜率横条的格数。横条用块元素字形拼成，不额外建 LVGL 对象（见 fmt_rate_bar）。
+#define TEAM_BAR_CELLS 5
+
 // 位置中文名，索引与 app_esport_role_t 对齐。
 static const char *const ROLE_NAMES[APP_ROLE_UNKNOWN + 1] = {
     "上单", "打野", "中单", "下路", "辅助", "—",
@@ -76,10 +83,11 @@ typedef struct {
     lv_obj_t *tabs;                              // 主标签页控件（赛程/积分榜/战队）
     lv_obj_t *banner;                            // 赛程页数据新鲜度横幅
     lv_obj_t *banner_label;                      // 横幅内文字标签，tick 原地更新用
-    ui_row_t  rows[APP_ESPORT_MAX_MATCHES];      // 当前列表的行句柄，用于选中态刷新
-    int       row_count;                         // 当前列表有效行数
+    ui_row_t  rows[APP_ESPORT_MAX_MATCHES];      // 当前页的行句柄，用于选中态刷新
+    int       row_count;                         // 当前页有效行数
+    int       row_base;                          // rows[0] 对应的全局列表下标（分页用）
     int       tab;                               // 当前主标签（TAB_*）
-    int       selected;                          // 当前标签下的选中行下标
+    int       selected;                          // 全局列表选中下标（分页后仍指向完整列表）
     int       league_idx;                        // 积分榜当前赛区下标（对应 app_net_league_*）
     bool      in_detail;                         // 是否处于单场详情二级视图
     int       detail_tab;                        // 详情子页 0=阵容 1=经济 2=选手
@@ -216,13 +224,15 @@ static void content_clear(void)
     s.banner = NULL;
     s.banner_label = NULL;
     s.row_count = 0;
+    s.row_base = 0;
 }
 
-// 把选中态（左侧指示条 + 背景高亮）应用到当前行并滚动到可见区域。
+// 把选中态（左侧指示条 + 背景高亮）应用到当前行并滚动到可见区域。分页列表用
+// row_base 把行下标换算成全局下标，选中项才能始终对齐 s.selected。
 static void apply_selection(void)
 {
     for (int i = 0; i < s.row_count; i++) {
-        bool sel = (i == s.selected);
+        bool sel = (s.row_base + i == s.selected);
         ui_row_set_selected(s.rows[i], sel);
         if (sel) ui_scroll_into_view(s.rows[i].obj);
     }
@@ -259,19 +269,37 @@ static void render_schedule(void)
 
     int n = c->match_count;
     if (n > APP_ESPORT_MAX_MATCHES) n = APP_ESPORT_MAX_MATCHES;
-    for (int i = 0; i < n; i++) {
+    if (s.selected >= n) s.selected = n - 1;
+    if (s.selected < 0) s.selected = 0;
+
+    // 只建当前页：s.selected 是全局下标，先换算成页，再决定页首与页内行数。
+    int page_count = (n + ESPORTS_PAGE_SIZE - 1) / ESPORTS_PAGE_SIZE;
+    int page = s.selected / ESPORTS_PAGE_SIZE;
+
+    // 页内位置提示，让用户知道还有多少场、当前在第几页。
+    if (page_count > 1) {
+        // 缓冲区按 GCC 对 %d 最坏情形（11 位）+ 中文字节数留足，避免 -Wformat-truncation。
+        char pg[64];
+        snprintf(pg, sizeof(pg), "第 %d/%d 页 · 共 %d 场", page + 1, page_count, n);
+        lv_obj_t *pl = ui_label_create(s.page.content, pg, ui_font_hint, ui_c_dim());
+        lv_obj_set_width(pl, LV_PCT(100));
+        lv_obj_set_style_text_align(pl, LV_TEXT_ALIGN_CENTER, 0);
+    }
+
+    s.row_base = page * ESPORTS_PAGE_SIZE;
+    int count = n - s.row_base;
+    if (count > ESPORTS_PAGE_SIZE) count = ESPORTS_PAGE_SIZE;
+    for (int i = 0; i < count; i++) {
         char title[64];
         char value[24];
         uint32_t col;
-        format_match_row(&c->matches[i], now, title, sizeof(title),
+        format_match_row(&c->matches[s.row_base + i], now, title, sizeof(title),
                          value, sizeof(value), &col);
         ui_row_t row = ui_row_create(s.page.content, title, value);
         ui_row_set_title_color(row, col);
         s.rows[i] = row;
     }
-    s.row_count = n;
-    if (s.selected >= s.row_count) s.selected = s.row_count - 1;
-    if (s.selected < 0) s.selected = 0;
+    s.row_count = count;
     apply_selection();
 }
 
@@ -361,7 +389,29 @@ static void rebuild_team_rows(void)
     }
 }
 
-// 战队标签页：列出战队并标注关注状态（● 已关注 / ○ 未关注）。
+// 把 0..100 的百分比画成 TEAM_BAR_CELLS 格横条，如 "███░░"。实心/空心格直接用
+// 生成字体已覆盖的块元素字形 █(U+2588) / ░(U+2591)（见 tools/gen_fonts.py 的
+// EXTRA_RANGES），拼进一个字符串交给现有标签即可，不再为每行新建 lv_bar 对象——
+// 战队最多 32 支，每行省一个对象就能把 LVGL 池峰值压住。
+static void fmt_rate_bar(int pct, char *buf, size_t cap)
+{
+    int filled = (pct * TEAM_BAR_CELLS + 50) / 100;
+    if (filled < 0) filled = 0;
+    if (filled > TEAM_BAR_CELLS) filled = TEAM_BAR_CELLS;
+
+    size_t o = 0;
+    for (int i = 0; i < TEAM_BAR_CELLS; i++) {
+        const char *cell = (i < filled) ? "█" : "░";
+        size_t n = strlen(cell);
+        if (o + n + 1 > cap) break;
+        memcpy(buf + o, cell, n);
+        o += n;
+    }
+    buf[o] = '\0';
+}
+
+// 战队标签页：列出战队并标注关注状态（● 已关注 / ○ 未关注），带统计时右侧给出
+// 胜场-负场 + 胜率横条。
 static void render_teams(void)
 {
     rebuild_team_rows();
@@ -377,13 +427,18 @@ static void render_teams(void)
     app_esport_cache_t *c = app_state_esports();
     for (int i = 0; i < s.team_row_count; i++) {
         bool followed = app_esport_is_followed(c, s.team_rows[i].name);
-        char title[24];
-        char value[32];
+        char title[32];
+        char value[64];
         snprintf(title, sizeof(title), "%s %s", followed ? "●" : "○",
                  s.team_rows[i].name);
         if (s.team_rows[i].stats) {
-            snprintf(value, sizeof(value), "%d胜%d负", s.team_rows[i].win,
-                     s.team_rows[i].loss);
+            int w = s.team_rows[i].win;
+            int l = s.team_rows[i].loss;
+            int tot = w + l;
+            int pct = tot > 0 ? (w * 100 + tot / 2) / tot : 0;
+            char bar[TEAM_BAR_CELLS * 3 + 1];
+            fmt_rate_bar(pct, bar, sizeof(bar));
+            snprintf(value, sizeof(value), "%d-%d %s %d%%", w, l, bar, pct);
         } else {
             snprintf(value, sizeof(value), "-");
         }
@@ -764,10 +819,26 @@ static void move_selection(int delta)
         return;
     }
     if (s.row_count <= 0) return;
+
+    // 赛程是分页列表：s.row_count 只是当前页行数，边界要按完整列表算；跨页时整体重绘。
+    int total = s.row_count;
+    if (s.tab == TAB_SCHEDULE) {
+        app_esport_cache_t *c = app_state_esports();
+        total = c->match_count;
+        if (total > APP_ESPORT_MAX_MATCHES) total = APP_ESPORT_MAX_MATCHES;
+        if (total <= 0) return;
+    }
+
     s.selected += delta;
     if (s.selected < 0) s.selected = 0;
-    if (s.selected >= s.row_count) s.selected = s.row_count - 1;
-    apply_selection();
+    if (s.selected >= total) s.selected = total - 1;
+
+    if (s.tab == TAB_SCHEDULE &&
+        (s.selected < s.row_base || s.selected >= s.row_base + s.row_count)) {
+        render();
+    } else {
+        apply_selection();
+    }
 }
 
 // ---------------------------------------------------------------------------

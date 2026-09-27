@@ -522,7 +522,18 @@ static esp_err_t http_get_json(const char *url, char **out, int *out_len)
         return ESP_ERR_INVALID_RESPONSE;
     }
 
-    char *buf = (char *)malloc(NET_HTTP_MAX_BODY + 1);
+    // 不要再一次性 malloc(NET_HTTP_MAX_BODY)（64 KB）：无 PSRAM 的 C3 上，应用常驻
+    // 状态 + LVGL 池 + Wi-Fi 栈已经吃掉大半内部 RAM，64 KB 连续块时有时无，失败时就是
+    // 界面上那句"内存不足"。改为按需增长：已知长度就按长度精确分配，未知（分块传输）
+    // 从 4 KB 起按倍翻倍，峰值只到实际正文大小——正常响应通常几 KB 到十几 KB。
+    int hint = esp_http_client_get_content_length(client);
+    if (hint > NET_HTTP_MAX_BODY) {
+        esp_http_client_close(client);
+        esp_http_client_cleanup(client);
+        return ESP_ERR_INVALID_SIZE;
+    }
+    int cap = (hint > 0) ? hint : 4096;
+    char *buf = (char *)malloc((size_t)cap + 1);
     if (!buf) {
         esp_http_client_close(client);
         esp_http_client_cleanup(client);
@@ -531,13 +542,21 @@ static esp_err_t http_get_json(const char *url, char **out, int *out_len)
 
     int total = 0;
     bool too_big = false;
-    while (total < NET_HTTP_MAX_BODY) {
-        int r = esp_http_client_read(client, buf + total, NET_HTTP_MAX_BODY - total);
+    for (;;) {
+        if (total == cap) {
+            if (cap >= NET_HTTP_MAX_BODY) { too_big = true; break; }
+            int ncap = cap * 2;
+            if (ncap > NET_HTTP_MAX_BODY) ncap = NET_HTTP_MAX_BODY;
+            char *nb = (char *)realloc(buf, (size_t)ncap + 1);
+            if (!nb) { err = ESP_ERR_NO_MEM; break; }
+            buf = nb;
+            cap = ncap;
+        }
+        int r = esp_http_client_read(client, buf + total, cap - total);
         if (r < 0) { err = ESP_FAIL; break; }
         if (r == 0) break;
         total += r;
     }
-    if (total >= NET_HTTP_MAX_BODY) too_big = true;
 
     esp_http_client_close(client);
     esp_http_client_cleanup(client);

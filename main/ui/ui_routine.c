@@ -100,6 +100,8 @@ static int s_edit_values[5];
 
 // 数据变更后重建今日/编辑页并刷新一周页。定义在编辑视图之后，这里前置声明。
 static void after_data_change(void);
+// 切换/重建标签页：只构建当前标签页，并释放其余标签页的控件。前置声明供上面复用。
+static void show_tab(int index);
 
 // ---------------------------------------------------------------------------
 // 今日视图
@@ -213,7 +215,7 @@ static void render_today_rows(void)
         bool live = (n->start_min <= now_min && now_min < n->end_min);
 
         ui_row_t row = s.nodes[i];
-        lv_obj_t *title_lbl = lv_obj_get_child(row.obj, 1);
+        lv_obj_t *title_lbl = row.title;
         if (title_lbl) {
             lv_label_set_text(title_lbl, title);
             lv_obj_set_style_text_color(title_lbl,
@@ -605,9 +607,9 @@ static void node_delete_confirm(bool confirmed, void *user)
 
 static void after_data_change(void)
 {
-    build_today();
-    week_refresh();
-    build_edit();
+    // 只重建当前标签页。以前这里把今日、一周、编辑三个视图一起重建，正是"套用模板/
+    // 清空/切标签后白屏"的对象峰值来源；其余标签页留到切过去时由 show_tab() 按需重建。
+    show_tab(s.tab);
 }
 
 static void apply_template(bool boarding)
@@ -690,8 +692,15 @@ static void show_tab(int index)
     s.tab = index;
 
     for (int i = 0; i < RT_TAB_COUNT; i++) {
-        if (i == index) lv_obj_remove_flag(s.views[i], LV_OBJ_FLAG_HIDDEN);
-        else lv_obj_add_flag(s.views[i], LV_OBJ_FLAG_HIDDEN);
+        if (i == index) {
+            lv_obj_remove_flag(s.views[i], LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(s.views[i], LV_OBJ_FLAG_HIDDEN);
+            // 释放非当前标签页的控件。四个标签页全建出来会同时占用几百个 LVGL 对象
+            // （今日 24 行 + 编辑 26 行 + 一周 7 + 设置 6），在无 PSRAM 的 C3 上足以
+            // 逼近独立的 LVGL 池上限。回到该标签页时会在下面重建，代价可接受。
+            lv_obj_clean(s.views[i]);
+        }
     }
     ui_tabs_select(s.tabs, index);
 

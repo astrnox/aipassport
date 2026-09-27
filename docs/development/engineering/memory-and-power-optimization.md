@@ -4,9 +4,32 @@
 
 # Memory and Power Optimization Plan
 
-Status: **planning only**. This document identifies where RAM and power go today
-and proposes a staged optimization path. It changes no code. Every number marked
+Status: **Stage 2 memory work partly implemented; measurement and power work
+pending.** The low-risk memory reductions below now ship; the Stage 1
+measurement harness and every power change are still to do. Every number marked
 "estimate" must be replaced by a measured value before a change is accepted.
+
+## Implemented so far
+
+These changes target the "memory full" prompts seen during esports fetch,
+channel scan, and time sync / provisioning:
+
+- LVGL pool `CONFIG_LV_MEM_SIZE_KILOBYTES` 48 → 40, returning 8 KB to the
+  system heap.
+- Routine page releases a tab's widgets (`lv_obj_clean`) when it is hidden and
+  rebuilds on show, so four tabs no longer coexist.
+- `ui_row_create()` draws selection as a left border on the row instead of a
+  separate child object, and `ui_row_t` stores the title handle directly.
+- HTTP JSON responses are read into a buffer sized from the response (or grown
+  from 4 KB), instead of a fixed `NET_HTTP_MAX_BODY` (64 KB) allocation.
+- The esports schedule list is paginated (10 rows per page); the teams tab shows
+  a win-rate bar built from block glyphs, adding no objects.
+- `app_input` task stack raised 4 → 8 KB, and `ui_theme.c` helpers NULL-check
+  widget creation.
+
+Measurement is still required to confirm these are sufficient: without
+`lv_mem_monitor()` and internal-heap watermarks from a device, the headroom is
+an estimate, not a result.
 
 ## Scope and method
 
@@ -40,7 +63,7 @@ or not those modules are used. This is the main static RAM cost.
 | Item | Size | Source |
 | --- | --- | --- |
 | LVGL draw buffer | 240 × 40 × 2 B = **19.2 KB**, single buffer, internal DMA RAM | [`bsp_display_lvgl.c`](../../../components/bsp/src/bsp_display_lvgl.c) |
-| LVGL heap pool | **48 KB** static, separate from the system heap | `CONFIG_LV_MEM_SIZE_KILOBYTES=48` |
+| LVGL heap pool | **40 KB** static, separate from the system heap | `CONFIG_LV_MEM_SIZE_KILOBYTES=40` (reduced from 48) |
 | LVGL port task stack | ~7 KB | `ESP_LVGL_PORT_INIT_CONFIG()` default |
 | `app_input` task stack | 8 KB | raised from 4 KB in [`main.c`](../../../main/main.c) |
 | Network workers | 4–8 KB each, created per request and expected to exit | [`app_net.c`](../../../main/net/app_net.c) |
@@ -48,20 +71,21 @@ or not those modules are used. This is the main static RAM cost.
 
 ### Peak risk: LVGL object count
 
-The system heap and the 48 KB LVGL pool are separate. A page with many objects
+The system heap and the 40 KB LVGL pool are separate. A page with many objects
 can exhaust the pool even when the system heap has room, which is exactly the
-"backlight-lit white screen" failure mode; the NULL guards now added in
+"backlight-lit white screen" failure mode; the NULL guards added in
 [`ui_theme.c`](../../../main/ui/ui_theme.c) turn that failure from a crash into a
 graceful skip, but they do not remove the pressure.
 
-The routine page ([`ui_routine.c`](../../../main/ui/ui_routine.c)) is the worst
-case: it has four tabs, and `show_tab()` builds a tab without releasing the
-contents of the tabs built before it. Visiting all four tabs therefore keeps
+The routine page ([`ui_routine.c`](../../../main/ui/ui_routine.c)) was the worst
+case: four tabs, and `show_tab()` built a tab without releasing the contents of
+the tabs built before it, so visiting all four kept
 `today (24 rows) + week (7) + edit (26) + options (6)` alive at once. Each
-`ui_row_t` costs four LVGL objects (container, indicator, title, value), so the
-four tabs can hold roughly 250 objects — on the order of tens of KB. **This is
-estimated and must be confirmed with `lv_mem_monitor()`; it is the leading
-suspect for the pool exhaustion that produced the white screens.**
+`ui_row_t` cost four LVGL objects (container, indicator, title, value), so the
+four tabs could hold roughly 250 objects. This is now addressed: `show_tab()`
+releases hidden tabs, and rows no longer carry the indicator object. The
+resulting peak still needs `lv_mem_monitor()` confirmation on device; the
+estimate alone is not a result.
 
 ## Memory optimization plan
 
@@ -96,11 +120,12 @@ suspect for the pool exhaustion that produced the white screens.**
 4. Re-measure. If the peak is still close to the pool limit, repeat steps 1–2 on
    the next-largest page (settings, vault, esports detail).
 
-### Stage 3 — right-size the pool (only if Stage 2 is not enough)
+### Stage 3 — right-size the pool
 
-- With measured high-water data, reduce `CONFIG_LV_MEM_SIZE_KILOBYTES` from 48
-  KB toward the measured peak plus margin, returning the difference to the
-  system heap.
+- The pool has already been reduced 48 → 40 KB ahead of measurement, because the
+  system-heap pressure was the observed symptom. Confirm with high-water data
+  that 40 KB still clears the real peak plus margin; if not, raise it back, and
+  if there is slack, lower it further.
 - Alternative: switch LVGL to the system heap (`CONFIG_LV_USE_CLIB_MALLOC`), so
   the pool limit and the system heap are no longer two silos. This trades a
   hard, predictable ceiling for shared pressure and must be re-evaluated against

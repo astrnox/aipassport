@@ -172,10 +172,12 @@ static void reminder_row_text(int index)
     snprintf(title, sizeof(title), "%02d:%02d %s", r->hour, r->minute, when);
 
     ui_row_t row = s.rows[index];
-    lv_obj_t *title_lbl = lv_obj_get_child(row.obj, 1);
-    if (title_lbl) lv_label_set_text(title_lbl, title);
-    lv_obj_set_style_text_color(title_lbl,
-        lv_color_hex(r->enabled ? ui_c_text() : ui_c_dim()), 0);
+    lv_obj_t *title_lbl = row.title;
+    if (title_lbl) {
+        lv_label_set_text(title_lbl, title);
+        lv_obj_set_style_text_color(title_lbl,
+            lv_color_hex(r->enabled ? ui_c_text() : ui_c_dim()), 0);
+    }
     ui_row_set_value(row, r->enabled ? "开" : "关");
     if (row.value) {
         lv_obj_set_style_text_color(row.value,
