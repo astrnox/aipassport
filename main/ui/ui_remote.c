@@ -7,9 +7,11 @@
 // 交互取舍：
 //  - 分两级：先选模式（一屏四行，写明这个模式能干嘛），再进按键页。这样"三个键既是
 //    遥控键、又要用来切模式"就不会打架。
-//  - 长按 OK 恒为返回（先回模式选择、再回工具页），与其它子页一致。为了守住这条，
-//    各模式里原本占用长按 OK 的功能已让位：PPT 的"退出放映"改到长按 ↓，自拍快门保留
-//    在 ↑ 短按（音量+，绝大多数相机都认）。
+//  - 长按 OK 恒为返回（先回模式选择、再回工具页），与其它子页一致。这条是硬约定：
+//    按键回调在任何模式下发报文之前就把它消费掉，所以逻辑层也不再为长按 OK 登记任何
+//    HID 映射——界面上每个"短按 / 长按"都必须是真能发出去的。次级动作因此统一落在
+//    长按 ↑ / ↓：PPT 用长按 ↓ 退出放映、长按 ↑ 黑屏，拍照快门在 ↑ 短按（音量+，
+//    绝大多数相机都认）。
 //
 // ui_pages.h 使用了 bool 但未自带 <stdbool.h>，本文件作为独立编译单元需先引入。
 #include <stdbool.h>
@@ -77,8 +79,11 @@ static void build_pick(void)
 
     ui_header_create(c, "万能遥控", conn_text(), NULL, &s.hdr_right);
     if (!s.conn) {
-        ui_banner_create(c, "在手机或电脑的蓝牙设置里连接本设备，连上后三键就是遥控器",
-                         ui_c_warn());
+        char banner[96];
+        snprintf(banner, sizeof(banner),
+                 "在手机或电脑蓝牙设置里连接 %s，连上后三键就是遥控器",
+                 app_ble_remote_name());
+        ui_banner_create(c, banner, ui_c_warn());
     }
 
     lv_obj_t *list = ui_list_create(c);
@@ -121,8 +126,11 @@ static void build_active(void)
     ui_header_create(c, app_remote_mode_name((app_remote_mode_t)s.mode), conn_text(),
                      NULL, &s.hdr_right);
     if (!s.conn) {
-        ui_banner_create(c, "还没连接。请到手机或电脑的蓝牙设置里连接本设备",
-                         ui_c_warn());
+        char banner[96];
+        snprintf(banner, sizeof(banner),
+                 "还没连接：请到手机或电脑蓝牙设置里找到 %s 并连接",
+                 app_ble_remote_name());
+        ui_banner_create(c, banner, ui_c_warn());
     }
 
     lv_obj_t *card = ui_card_create(c, 0, 0, RM_CW, 162, ui_c_accent());

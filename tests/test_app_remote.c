@@ -74,12 +74,11 @@ int main(void)
     assert(press(APP_REMOTE_MODE_READER, APP_REMOTE_BTN_OK, APP_REMOTE_CLICK, &down, &up));
     assert_kb(&down, 0x28);   // Enter
 
-    assert(press(APP_REMOTE_MODE_READER, APP_REMOTE_BTN_OK, APP_REMOTE_LONG, &down, &up));
-    assert_kb(&down, 0x29);   // Esc
+    assert(press(APP_REMOTE_MODE_READER, APP_REMOTE_BTN_DOWN, APP_REMOTE_LONG, &down, &up));
+    assert_kb(&down, 0x29);   // Esc 返回书架
 
-    // 电子书模式没有长按 UP/DOWN 的映射
+    // 电子书模式没有长按 UP 的映射
     assert(press(APP_REMOTE_MODE_READER, APP_REMOTE_BTN_UP, APP_REMOTE_LONG, &down, &up) == false);
-    assert(press(APP_REMOTE_MODE_READER, APP_REMOTE_BTN_DOWN, APP_REMOTE_LONG, &down, &up) == false);
 
     // ---- 音量控制 ----
     assert(press(APP_REMOTE_MODE_VOLUME, APP_REMOTE_BTN_UP, APP_REMOTE_CLICK, &down, &up));
@@ -90,10 +89,10 @@ int main(void)
     assert_cons(&down, 0x00EA);   // Volume Down
 
     assert(press(APP_REMOTE_MODE_VOLUME, APP_REMOTE_BTN_OK, APP_REMOTE_CLICK, &down, &up));
-    assert_cons(&down, 0x00E2);   // Mute
-
-    assert(press(APP_REMOTE_MODE_VOLUME, APP_REMOTE_BTN_OK, APP_REMOTE_LONG, &down, &up));
     assert_cons(&down, 0x00CD);   // Play/Pause
+
+    assert(press(APP_REMOTE_MODE_VOLUME, APP_REMOTE_BTN_DOWN, APP_REMOTE_LONG, &down, &up));
+    assert_cons(&down, 0x00E2);   // Mute
     assert(app_remote_press(APP_REMOTE_MODE_VOLUME, APP_REMOTE_BTN_UP, APP_REMOTE_LONG,
                             &down, &up) == false);
 
@@ -104,12 +103,10 @@ int main(void)
     assert_kb(&down, 0x4E);
     assert(press(APP_REMOTE_MODE_SLIDES, APP_REMOTE_BTN_OK, APP_REMOTE_CLICK, &down, &up));
     assert_kb(&down, 0x3E);   // F5 开始放映
-    assert(press(APP_REMOTE_MODE_SLIDES, APP_REMOTE_BTN_OK, APP_REMOTE_LONG, &down, &up));
-    assert_kb(&down, 0x29);   // Esc 退出放映
     assert(press(APP_REMOTE_MODE_SLIDES, APP_REMOTE_BTN_UP, APP_REMOTE_LONG, &down, &up));
     assert_kb(&down, 0x05);   // B 黑屏
     assert(press(APP_REMOTE_MODE_SLIDES, APP_REMOTE_BTN_DOWN, APP_REMOTE_LONG, &down, &up));
-    assert_kb(&down, 0x1A);   // W 白屏
+    assert_kb(&down, 0x29);   // Esc 退出放映（必须可达，否则演示者只能走回电脑）
 
     // ---- 万能遥控（媒体 + 快门） ----
     assert(press(APP_REMOTE_MODE_MEDIA, APP_REMOTE_BTN_OK, APP_REMOTE_CLICK, &down, &up));
@@ -122,8 +119,16 @@ int main(void)
     assert_cons(&down, 0x00B5);   // 下一曲
     assert(press(APP_REMOTE_MODE_MEDIA, APP_REMOTE_BTN_DOWN, APP_REMOTE_LONG, &down, &up));
     assert_cons(&down, 0x00B6);   // 上一曲
-    assert(press(APP_REMOTE_MODE_MEDIA, APP_REMOTE_BTN_OK, APP_REMOTE_LONG, &down, &up));
-    assert_kb(&down, 0x28);       // Enter 快门
+
+    // ---- 长按 OK 永远是界面"返回"，不得有任何 HID 映射 ----
+    // 这条不变量防的是"界面显示长按 OK 能干嘛、实际按下去只是返回"的假功能：曾经
+    // PPT 的退出放映和拍照快门都登记在长按 OK 上，用户按了只会退回模式选择页。
+    for (int m = 0; m < APP_REMOTE_MODE_COUNT; m++) {
+        assert(app_remote_press((app_remote_mode_t)m, APP_REMOTE_BTN_OK, APP_REMOTE_LONG,
+                                &down, &up) == false);
+        assert(app_remote_action_text((app_remote_mode_t)m, APP_REMOTE_BTN_OK,
+                                      APP_REMOTE_LONG) == NULL);
+    }
 
     // ---- 非法参数 ----
     assert(app_remote_press((app_remote_mode_t)99, APP_REMOTE_BTN_OK, APP_REMOTE_CLICK,
@@ -138,8 +143,10 @@ int main(void)
     // ---- 界面文案 ----
     assert(strcmp(app_remote_action_text(APP_REMOTE_MODE_SLIDES, APP_REMOTE_BTN_OK,
                                          APP_REMOTE_CLICK), "开始放映") == 0);
-    assert(strcmp(app_remote_action_text(APP_REMOTE_MODE_MEDIA, APP_REMOTE_BTN_OK,
-                                         APP_REMOTE_LONG), "快门 / 确认") == 0);
+    assert(strcmp(app_remote_action_text(APP_REMOTE_MODE_SLIDES, APP_REMOTE_BTN_DOWN,
+                                         APP_REMOTE_LONG), "退出放映") == 0);
+    assert(strcmp(app_remote_action_text(APP_REMOTE_MODE_MEDIA, APP_REMOTE_BTN_UP,
+                                         APP_REMOTE_LONG), "下一曲") == 0);
     assert(app_remote_action_text(APP_REMOTE_MODE_READER, APP_REMOTE_BTN_UP,
                                   APP_REMOTE_LONG) == NULL);
     assert(app_remote_action_text((app_remote_mode_t)99, APP_REMOTE_BTN_OK,

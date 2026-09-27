@@ -32,13 +32,13 @@
 #include "host/ble_hs_adv.h"
 #include "host/ble_hs_mbuf.h"
 #include "host/ble_sm.h"
+#include "host/ble_store.h"
 #include "host/ble_uuid.h"
 #include "host/util/util.h"
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
-#include "store/util/ble_store_util.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -746,6 +746,11 @@ bool app_ble_remote_running(void)
 bool app_ble_remote_connected(void)
 {
     return s_connected;
+}
+
+const char *app_ble_remote_name(void)
+{
+    return BLE_REMOTE_NAME;
 }
 
 bool app_ble_remote_press(app_remote_mode_t mode, app_remote_btn_t btn, app_remote_press_t press)

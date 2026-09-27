@@ -53,6 +53,9 @@ void      app_ble_remote_stop(void);
 bool      app_ble_remote_running(void);
 // 主机是否已连接。未连接时按键报文发不出去，界面据此提示"去手机蓝牙里连一下"。
 bool      app_ble_remote_connected(void);
+// 主机在蓝牙列表里看到的本机名称。遥控页用它告诉用户"去列表里找这个名字"，
+// 否则用户面对一长串设备名不知道连哪一个。
+const char *app_ble_remote_name(void);
 
 // 按当前模式发一次按键。内部把"按下 / 松开"两条报文排队交给发送任务，界面立刻返回，
 // 不会因为 BLE 发送而卡住 LVGL。未连接或无映射返回 false。
