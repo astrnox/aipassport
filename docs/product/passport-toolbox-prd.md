@@ -296,6 +296,7 @@ Key hardware constraints. The three buttons share a GPIO0 ADC resistor divider, 
 | 25 | Theme and display | Provides light and dark themes and an option to switch automatically by local time period (for example, dark from 19:00 to 07:00 the next day), saved after the user selects it; dark is only for night-time eye comfort and does not imply power saving. |
 | 26 | Sound and mute | Provides a mute switch and volume levels, covering alert tones, node-switching tones, and Pomodoro alert tones. Mute status is visible in the status bar. |
 | 27 | Data backup and clearing | Supports exporting badges, routines, dynamic-passcode secrets, and recovery codes to the phone configuration page as a backup; supports clearing data by category, with a second confirmation before clearing. |
+| 28 | Desktop stick-figure pet | A pet card on the home page, plus a tiny silhouette of the very same stick figure centered in the status bar on every page; both share one state, so the user sees one and the same character. It ships 15 actions (idle, look, wave, jump, dance, walk, sit, sleep, stretch, think, cheer, facepalm, dab, kick, shake), picks one at random while idle according to its current mood, and speaks in emoticons or short phrases. It reacts to Pomodoro focus start / focus end / break end, reminder due, low battery, a saved Bluetooth device, and a tracked tracker tag, and offers a "mischief mode". |
 
 ### 6.4 Module details and prototypes
 
@@ -321,7 +322,8 @@ Key hardware constraints. The three buttons share a GPIO0 ADC resistor divider, 
 ```
 
 - Business logic: after boot, it enters the home page and restores the last focused module. The status bar refreshes the time and battery every 30 seconds. The routine card computes the next node from the local routine table, and falls back to showing today's date when there is no routine table. The esports card selects content by the priorities in section 7: when there is a followed match in progress it shows the live score, otherwise it shows the countdown to the nearest followed match, and when there is neither it shows guiding copy.
-- Interaction logic: UP/DOWN moves the module focus and updates the highlight immediately; OK enters the selected module; long-press OK turns off the screen; long-press UP opens the quick panel (mute, theme, brightness, and a "Start Pomodoro" entry). The three information cards do not take part in focus movement, and pressing OK only acts on the module list. This revision removes the home-page shortcut of long-pressing DOWN to directly start the Pomodoro timer: it is a hidden gesture and also accidentally starts a 25-minute timer that users often notice only seconds later; the Pomodoro timer can still be entered from the module list and the quick panel.
+- Interaction logic: UP/DOWN moves the module focus and updates the highlight immediately; OK enters the selected module; long-press OK turns off the screen; long-press UP opens the quick panel (mute, theme, brightness, start Pomodoro, do-not-disturb, pet mischief). The three information cards do not take part in focus movement, and pressing OK only acts on the module list. This revision removes the home-page shortcut of long-pressing DOWN to directly start the Pomodoro timer: it is a hidden gesture and also accidentally starts a 25-minute timer that users often notice only seconds later; the Pomodoro timer can still be entered from the module list and the quick panel.
+- Pet: a pet card sits permanently on the home page, and a tiny silhouette of the same stick figure is centered in the status bar on every page (see 6.4.9). The pet takes no buttons and joins no focus movement; it moves on its own in the background and reacts to events such as the Pomodoro timer, reminders, and battery.
 - Rule constraints: the module list is fixed at six entries and cannot be added to or removed by the user. The focus position is saved locally and restored after a restart. The information-card height is fixed to keep the module list position from jumping with the content.
 - Boundaries and exceptions: when not provisioned, the network status shows "not provisioned" and the esports badge and card show guiding copy; when the battery reading fails it shows --% without blocking other features; when the routine table is empty the routine card does not occupy blank space and directly shows the date.
 
@@ -528,6 +530,24 @@ flowchart TD
 - Rule constraints: time setting is not allowed to start from zero cell by cell; a default value must be given first; any time-dependent feature (passcode, reminders, routine countdown) shows a warning but remains usable when the time is not calibrated, without blocking use.
 - Boundaries and exceptions: if the clock is lost after the device is fully powered off, on boot it re-enters time setting while retaining the rest of the data; the time zone is not detected automatically, and a manual time-zone selection is provided; after skipping the guide, it can be re-entered from system settings.
 
+#### 6.4.9 Desktop stick-figure pet (feature 28)
+
+```
+┌──────────────────────────────────────────────┐
+│   o      Let's go, together today            │  ← Pet card (left: stick-figure box; right: speech)
+│  /|\                                         │
+│  / \                                         │
+├──────────────────────────────────────────────┤
+│ 14:32   ▓▓ 76%   o    ▲ LIVE                 │  ← Tiny silhouette centered in the status bar, line color follows mood
+└──────────────────────────────────────────────┘
+```
+
+- Business logic: the figure's actions, moods, and lines are driven entirely by an on-device state machine; it uses no network and no extra hardware. Each action is a list of keyframes, and the pose is linearly interpolated between keyframes over their durations, so motion is continuous and fully deterministic. After a random idle interval it picks an action according to the current mood, and an external event interrupts it immediately. It ships 15 actions: idle (a slight breathing motion), look, wave, jump, dance, walk, sit, sleep, stretch, think, cheer, facepalm, dab, kick, and shake.
+- Interaction logic: the pet is given no button operation and no hidden gesture such as "pet it". The user can toggle mischief mode with the "pet mischief" switch in the home quick panel; when on, the pet pops up more often with an action and a short line, and when off it settles back down. The status-bar silhouette on every page follows the same one pet, so switching pages does not reset its state or mood.
+- Event reactions: Pomodoro focus start — it thinks with folded arms and quiets down; focus end — it cheers; break end — it stretches to signal back-to-work; reminder due — it waves; low battery — it shivers; a saved device in the BLE finder — it cheers; a tracked tracker tag — it is surprised.
+- Rule constraints: actions and lines use only ASCII and common emoticons, so no new font is needed. The figure keeps one skeleton ratio and line width to stay recognizably the same character; segment lengths are percentages of the canvas height (torso 20%, upper arm 13%, forearm 11%, thigh/shin 14% each, head radius 8%), and at any size the head, torso, and limbs stay inside the canvas, so it still reads as a figure at small sizes. Rendering uses line widgets rather than a canvas bitmap: a 60×60 RGB565 canvas would cost 7 KB of resident memory, while lines cost less and only invalidate the small area they cross, which is less likely to drop frames with a single DMA buffer.
+- Boundaries and exceptions: nothing is redrawn while the screen is off, and the pet settles back to standing on the first tick after wake; when the drawing-rig limit is exceeded the pet is skipped without failing the page; the pet holds no heap memory and is destroyed with the page.
+
 ### 6.5 Storage, offline, and data strategy
 
 This product treats offline usability as an architectural premise. All user data and the esports cache are stored in the device's non-volatile storage, and the device is a fully functional tool with no network and no phone.
@@ -683,7 +703,7 @@ Empty state. Explains why it is empty and the next action, never a purely blank 
 
 ### 8.6 Motion
 
-Page transitions fade in over 150 milliseconds; list scrolling has no extra animation; the ring progress refreshes every 100 milliseconds; a top progress bar appears during refresh; screen-off fades out over 200 milliseconds; node switching and reminders are presented with a 300-millisecond hint bar plus an optional alert tone. Motion is restrained, with no decorative animation, to avoid dropped frames on a device without PSRAM.
+Page transitions fade in over 150 milliseconds; list scrolling has no extra animation; the ring progress refreshes every 100 milliseconds; a top progress bar appears during refresh; screen-off fades out over 200 milliseconds; node switching and reminders are presented with a 300-millisecond hint bar plus an optional alert tone. Motion is restrained to avoid dropped frames on a device without PSRAM. The desktop stick-figure pet (6.4.9) is the only continuously moving element: it refreshes its skeleton lines on a 120-millisecond tick and only redraws while the screen is on; apart from it there is no decorative animation.
 
 ### 8.7 Key screen list
 
@@ -850,15 +870,15 @@ strong, and how congested.
 
 Can we find nearby phones or electronic devices?
 
-Yes, within limits, and this already works. The "Find device" finder scans BLE
-advertisements and lists nearby devices, translating signal strength into a plain
-closeness value and sorting by signal, which is enough to locate your own earbuds,
-watch, or phone. A reliable future enhancement is to classify devices from their
-advertisement content (manufacturer ID, service UUIDs, common tracker patterns) into
-categories such as phone, earbuds, watch, and tracker, and to show counts by category.
-It cannot reveal a device's identity or owner: phones rotate their addresses and most
-devices advertise no name, so the page must show categories and signal, never a
-claimed identity.
+Yes, but with limits, and it already works. The finder scans BLE advertisements to
+list nearby devices and translates signal strength into an intuitive closeness value
+and sorting by signal, which is enough to locate your own earbuds, watch, or phone.
+Classification by advertisement content (manufacturer ID and type byte, service UUIDs,
+and common tracker patterns) is now shipped: phone, earbuds, watch, and tracker are
+shown by category, and trackers also use the signal trend to hint whether you are
+getting closer or walking away. It cannot reveal a device's identity or owner: phones
+rotate their addresses and most devices advertise no name, so the page must show
+categories and signal, never a claimed identity.
 
 ### 13.5 Reliable candidate backlog
 
@@ -872,7 +892,7 @@ records the current state.
 | P1 | Wi-Fi access-point inventory: a full access-point list sorted by signal, with security mode, hidden flag, and band | Extends the existing Wi-Fi scan and the channel-checkup pages | Shipped; the conclusion screen also shows the open/WEP count |
 | P2 | Wi-Fi environment report: co-channel and adjacent-channel overlap with a plain-language router recommendation | Builds on the channel-checkup congestion model | Shipped |
 | P2 | Sound level meter: use the microphone to show ambient loudness with a peak-hold reading | Uses the existing full-duplex audio capture | Not started |
-| P3 | Beacon and tracker detector: recognize common tracker advertisement patterns to help find your own tag | Uses the existing BLE scan; identification stays category-level only | Name-clue classification only; advertisement-pattern detection not started |
+| P3 | Beacon and tracker detector: recognize common tracker advertisement patterns to help find your own tag | Uses the existing BLE scan; identification stays category-level only | Shipped; classifies by manufacturer ID + type byte and by tracker service UUIDs, and gives a signal trend (approaching / receding) with a wrong-way hint |
 
 ### 13.6 Explicitly excluded
 
@@ -886,10 +906,10 @@ applies: do not create daily debt and do not deceive users.
 ### 13.7 Status
 
 Partially implemented, and only ever as passive, read-only work. The P1 categories and
-access-point inventory, the P2 environment report, and two read-only details (the device
-address in the finder's track view, and the open/WEP count on the channel-checkup
-conclusion screen) are shipped. The sound level meter and advertisement-pattern tracker
-detection are not started. Nothing here authorizes any active operation: section 13.6
+access-point inventory, the P2 environment report, the P3 beacon and tracker detector,
+and two read-only details (the device address in the finder's track view, and the
+open/WEP count on the channel-checkup conclusion screen) are shipped. The sound level
+meter is not started. Nothing here authorizes any active operation: section 13.6
 still stands, and the deauthentication, jamming, and credential-cracking exclusions are
 unchanged. Any remaining item would still need its own hardware-contract entry (where new
 hardware is involved) and its own on-device acceptance criteria, and would be reviewed

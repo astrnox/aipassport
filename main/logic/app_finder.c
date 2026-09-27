@@ -10,6 +10,9 @@
 // 平滑系数：新值占 1/4。BLE 的 RSSI 抖动可达十几 dB，直接显示会让"接近度"条乱跳；
 // 取 1/4 既能跟上走动速度，又能把单次异常值压下去。
 #define FINDER_SMOOTH_SHIFT 2
+// 慢平滑系数：新值占 1/32。作为"静止基线"用于趋势判断——比快平滑慢一个数量级，
+// 这样人真的走动时快值会先于基线变化，两者之差就能反映移动方向。
+#define FINDER_SLOW_SHIFT 5
 
 static void copy_name(char *dst, size_t cap, const char *name, int name_len)
 {
@@ -74,11 +77,18 @@ static int find_oldest(const app_finder_t *f)
 #define APP_FINDER_CO_SAMSUNG  0x0075
 #define APP_FINDER_CO_GOOGLE   0x00E0
 
+// Apple 厂商自定义数据里的"类型"字节（紧跟厂商 ID 之后）。这些取值来自社区对
+// Apple 广播格式的公开整理，用于区分同一厂商下的不同用途。
+#define APP_FINDER_APPLE_FINDMY  0x12   // Find My 网络：AirTag 及第三方 Find My 配件
+#define APP_FINDER_APPLE_AIRPODS 0x07   // AirPods 等音频配件
+
 // 标准服务 UUID。
 #define APP_FINDER_UUID_FASTPAIR 0xFE2C   // Google Fast Pair：耳机/音箱等音频配件
 #define APP_FINDER_UUID_HID      0x1812   // Human Interface Device：键鼠/手柄等外设
 #define APP_FINDER_UUID_HEART    0x180D   // Heart Rate：心率带/手表
 #define APP_FINDER_UUID_BATTERY  0x180F   // Battery：过于通用，单独出现时不做定性
+#define APP_FINDER_UUID_TILE     0xFEED   // Tile 防丢器使用的服务 UUID
+#define APP_FINDER_UUID_SMARTTAG 0xFD5A   // 三星 SmartTag 使用的服务 UUID
 
 static int ascii_lower(int c)
 {
@@ -120,7 +130,7 @@ static bool uuid16_has(const uint16_t *uuid16, int count, uint16_t want)
     return false;
 }
 
-app_finder_cat_t app_finder_classify(uint16_t company_id,
+app_finder_cat_t app_finder_classify(uint16_t company_id, uint8_t mfg_type,
                                      const uint16_t *uuid16, int uuid16_count,
                                      const char *name, int name_len)
 {
@@ -182,16 +192,26 @@ app_finder_cat_t app_finder_classify(uint16_t company_id,
     if (uuid16_has(uuid16, uuid16_count, APP_FINDER_UUID_HEART)) {
         return APP_FINDER_CAT_WATCH;
     }
+    // 防丢器专用服务 UUID：Tile（0xFEED）与三星 SmartTag（0xFD5A）。这类 UUID 是
+    // 厂商为自家防丢器注册的，命中度高；但设备仍可借用别人的 UUID，所以只是"像防丢器"。
+    if (uuid16_has(uuid16, uuid16_count, APP_FINDER_UUID_TILE) ||
+        uuid16_has(uuid16, uuid16_count, APP_FINDER_UUID_SMARTTAG)) {
+        return APP_FINDER_CAT_TRACKER;
+    }
     // 电池服务（0x180F）几乎人人都有，单独出现说明不了任何类别，因此不参与判断——
     // 这也是"保守"的体现：宁可留 UNKNOWN，也不用一条无用线索硬凑一个答案。
 
-    // 规则三：厂商 ID。厂商 ID 只说明"谁注册的广播格式"，同一家厂商既有手机也有
-    // 耳机、手表、追踪器，所以这条线索最弱，放在最后。
-    switch (company_id) {
-    case APP_FINDER_CO_APPLE:
-        // Apple 的自定义广播大量来自 iPhone，但也可能是 AirPods/手表/AirTag；
-        // 在没有更具体线索时归为手机是概率上的多数，仍只作类别参考。
+    // 规则三：厂商 ID（配合厂商自定义数据的类型字节）。厂商 ID 只说明"谁注册的广播
+    // 格式"，同一家厂商既有手机也有耳机、手表、追踪器，所以这条线索最弱，放在后面。
+    // Apple 是唯一能靠"厂商 ID + 类型字节"进一步细分的：类型字节 0x12 表示设备正在
+    // 用 Find My 网络广播，这正是 AirTag 与第三方 Find My 防丢器的工作方式；0x07 是
+    // AirPods 一类的音频配件。其余 Apple 广播仍按概率归为手机。
+    if (company_id == APP_FINDER_CO_APPLE) {
+        if (mfg_type == APP_FINDER_APPLE_FINDMY)  return APP_FINDER_CAT_TRACKER;
+        if (mfg_type == APP_FINDER_APPLE_AIRPODS) return APP_FINDER_CAT_EARBUDS;
         return APP_FINDER_CAT_PHONE;
+    }
+    switch (company_id) {
     case APP_FINDER_CO_SAMSUNG:
     case APP_FINDER_CO_GOOGLE:
         return APP_FINDER_CAT_PHONE;
@@ -228,6 +248,30 @@ const char *app_finder_category_text(app_finder_cat_t c)
     }
 }
 
+app_finder_trend_t app_finder_trend(const app_finder_dev_t *d)
+{
+    if (!d) return APP_FINDER_TREND_UNKNOWN;
+    if (d->samples < APP_FINDER_TREND_MIN_SAMPLES) return APP_FINDER_TREND_UNKNOWN;
+
+    // 比较"快平滑值"与"慢平滑值"：快值代表此刻，慢值代表一段时间的基线。快值明显
+    // 高于基线说明信号在变强（靠近）。两者都是平滑量，因此单帧抖动不会直接触发判断。
+    int diff = d->rssi - d->rssi_slow;
+    if (diff >= APP_FINDER_TREND_DB) return APP_FINDER_TREND_APPROACHING;
+    if (diff <= -APP_FINDER_TREND_DB) return APP_FINDER_TREND_RECEDING;
+    return APP_FINDER_TREND_STEADY;
+}
+
+const char *app_finder_trend_text(app_finder_trend_t t)
+{
+    switch (t) {
+    case APP_FINDER_TREND_APPROACHING: return "在靠近";
+    case APP_FINDER_TREND_RECEDING:    return "在远离";
+    case APP_FINDER_TREND_STEADY:      return "信号平稳";
+    case APP_FINDER_TREND_UNKNOWN:
+    default:                           return "刚发现";
+    }
+}
+
 void app_finder_category_counts(const app_finder_t *f, int out[APP_FINDER_CAT_COUNT])
 {
     if (!out) return;
@@ -242,7 +286,8 @@ void app_finder_category_counts(const app_finder_t *f, int out[APP_FINDER_CAT_CO
 }
 
 int app_finder_feed(app_finder_t *f, const uint8_t addr[6],
-                    uint16_t company_id, const uint16_t *uuid16, int uuid16_count,
+                    uint16_t company_id, uint8_t mfg_type,
+                    const uint16_t *uuid16, int uuid16_count,
                     const char *name, int name_len, int rssi, uint64_t now_ms)
 {
     if (!f || !addr) return -1;
@@ -261,10 +306,15 @@ int app_finder_feed(app_finder_t *f, const uint8_t addr[6],
         }
         memcpy(f->devs[idx].addr, addr, 6);
         f->devs[idx].rssi = rssi;
+        f->devs[idx].rssi_slow = rssi;   // 基线从第一帧起算，避免被初始 0 拉偏
+        f->devs[idx].samples = 1;
     } else {
-        // 指数平滑：新值占 1/4，其余沿用旧值。
+        // 指数平滑：快值取 1/4，慢基线取 1/32。基线单独维护，供趋势判断使用。
         int prev = f->devs[idx].rssi;
         f->devs[idx].rssi = prev + ((rssi - prev) >> FINDER_SMOOTH_SHIFT);
+        int base = f->devs[idx].rssi_slow;
+        f->devs[idx].rssi_slow = base + ((rssi - base) >> FINDER_SLOW_SHIFT);
+        if (f->devs[idx].samples < 255) f->devs[idx].samples++;
     }
 
     f->devs[idx].raw_rssi = rssi;
@@ -273,7 +323,7 @@ int app_finder_feed(app_finder_t *f, const uint8_t addr[6],
     // 类别用本次广播的线索重新推断。广播是分片发送的：名字、厂商数据、服务 UUID
     // 往往不在同一条报文里，因此"这次推断不出来"不代表之前的判断失效——只在推断
     // 到已知类别时才覆盖，避免列表里的类别在相邻两次刷新间忽有忽无地闪烁。
-    app_finder_cat_t cat = app_finder_classify(company_id, uuid16, uuid16_count,
+    app_finder_cat_t cat = app_finder_classify(company_id, mfg_type, uuid16, uuid16_count,
                                                name, name_len);
     if (cat != APP_FINDER_CAT_UNKNOWN) f->devs[idx].category = cat;
 

@@ -9,6 +9,7 @@
 #include "ui_app.h"
 
 #include "ui_pages.h"
+#include "ui_pet.h"
 #include "ui_sound.h"
 #include "ui_theme.h"
 #include "ui_timeedit.h"
@@ -50,6 +51,9 @@ static bool s_routine_seen;
 
 // 错过提醒只在本次开机、且时间重新校准后汇总一次。
 static bool s_missed_reported;
+
+// 低电量只在本次开机第一次跌破阈值时告诉桌宠一次，避免电量在阈值附近抖动时反复触发。
+static bool s_low_batt_reported;
 
 int ui_app_module_count(void) { return MODULE_COUNT; }
 
@@ -214,11 +218,21 @@ static void advance_pomodoro(void)
     app_pomodoro_roll_day(p, (uint32_t)(now.year * 10000 + now.month * 100 + now.day));
 
     // 长休息也要推进，因此用 tick 的返回值判断阶段切换，而不是先看状态。
+    // 桌宠跟着这些切换做反应：进入专注、专注结束、休息结束各有不同表现。进入专注这一步
+    // 没有 tick 事件（用户按开始键时状态就跳过去了），只能靠 tick 前后的阶段对比捕捉；
+    // 并且必须限定在 ev == NONE，否则"休息结束自动接续专注"会被同时当成开始与结束两件事。
+    app_pomo_state_t before = app_pomodoro_phase(p);
     app_pomo_event_t ev = app_pomodoro_tick(p, 1);
+    app_pomo_state_t after = app_pomodoro_phase(p);
+    if (ev == APP_POMO_EVENT_NONE && before != APP_POMO_FOCUS && after == APP_POMO_FOCUS) {
+        ui_pet_event(APP_PET_EV_FOCUS_ON);
+    }
     if (ev != APP_POMO_EVENT_NONE) {
-        // 阶段切换：写入一次持久化，让重启后能回到正确的段；同时给出提示音。
+        // 阶段切换：写入一次持久化，让重启后能回到正确的段；同时给出提示音与桌宠反应。
         app_state_save_pomodoro();
         ui_sound_beep();
+        ui_pet_event(ev == APP_POMO_EVENT_FOCUS_DONE ? APP_PET_EV_FOCUS_DONE
+                                                     : APP_PET_EV_BREAK_DONE);
     }
 }
 
@@ -302,6 +316,7 @@ static void check_reminders(void)
     // 会遮住提醒的临时浮层收掉后弹出。
     if (s_asleep) wake_now();
     ui_sound_beep();
+    ui_pet_event(APP_PET_EV_REMINDER);
     if (onboarding_active()) return;
     if (home_quick_active()) home_quick_close();
 
@@ -411,6 +426,17 @@ static void check_routine_node(void)
     if (index >= 0 && !dnd_active()) ui_sound_beep();
 }
 
+// 低电量提醒：桌宠发抖一下，提示该充电了。与息屏策略里的低电量阈值共用同一个常量，
+// 免得"省电提前息屏"和"桌宠反应"对低电量的定义不一致。
+static void check_low_battery(void)
+{
+    if (s_low_batt_reported) return;
+    int soc = app_state_battery_soc();
+    if (soc < 0 || soc >= APP_BATTERY_LOW_PCT) return;
+    s_low_batt_reported = true;
+    ui_pet_event(APP_PET_EV_LOW_BATTERY);
+}
+
 static void app_tick(lv_timer_t *timer)
 {
     (void)timer;
@@ -420,6 +446,7 @@ static void app_tick(lv_timer_t *timer)
     advance_pomodoro();
     check_reminders();
     check_routine_node();
+    check_low_battery();
     tick_missed_reminders();
     // 免打扰结束后补报期间压下的提醒。放在这里而不是阶段切换的分支里，是因为弹层
     // 冲突时它需要等界面空下来再报。
