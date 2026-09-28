@@ -21,6 +21,12 @@ The full requirements, interaction rules, and acceptance criteria are in the
 scrollable, interactive screen prototype ships beside it as
 [`passport-toolbox-ui-prototype.html`](docs/product/passport-toolbox-ui-prototype.html).
 
+A planned seventh module group is specified separately in the
+[Field Kit PRD](docs/product/passport-field-kit-prd.md): an on-board archive, a
+USB serial console, and passive Wi-Fi and BLE observation, together with the
+capabilities of Flipper Zero and ESP32Marauder that this board cannot support.
+It is planning only and not implemented.
+
 ## What the application does
 
 | Area | Highlights |

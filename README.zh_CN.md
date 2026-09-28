@@ -14,6 +14,10 @@
 完整需求、交互规则与验收标准见[产品需求文档](docs/product/passport-toolbox-prd.md)；
 可滚动的交互原型随文档一同提供：[`passport-toolbox-ui-prototype.html`](docs/product/passport-toolbox-ui-prototype.html)。
 
+规划中的第七个模块组单独成文，见[现场工具需求文档](docs/product/passport-field-kit-prd.md)：
+板载档案库、USB 串口控制台、Wi-Fi 与蓝牙被动观察，同时写明 Flipper Zero 与 ESP32Marauder
+的哪些能力在本板上不具备条件。该文档仅为规划，尚未实现。
+
 ## 应用提供什么
 
 | 板块 | 要点 |
