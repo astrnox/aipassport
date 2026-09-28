@@ -2678,7 +2678,10 @@ static void fill_ap_config(wifi_config_t *ap)
     ap->ap.ssid_len = (uint8_t)n;
     strncpy((char *)ap->ap.password, PROV_PASS, sizeof(ap->ap.password) - 1);
     ap->ap.channel = 1;
-    ap->ap.max_connection = 4;
+    // 配网页只需同时服务一台手机。参考 softap-provisioning-and-resource-budget.md：
+    // 单人配置页的实测保守起点是 max_connection=1，调大要等实测过堆与 socket 占用。
+    // 原来的 4 会让 AP 预留更多每站资源，在无 PSRAM 的 C3 上直接吃掉配网要用的连续内存。
+    ap->ap.max_connection = 1;
     ap->ap.authmode = WIFI_AUTH_WPA2_PSK;
     ap->ap.pmf_cfg.required = false;
 }

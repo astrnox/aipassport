@@ -24,9 +24,11 @@
 #include "net/app_blufi.h"
 #include "net/app_net.h"
 
+#include "bsp_audio.h"
 #include "bsp_display.h"
 
 #include "esp_log.h"
+#include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -431,6 +433,11 @@ static void manual_time_open(void)
 static void prov_start_task(void *arg)
 {
     (void)arg;
+    // 热点 + httpd 需要一块较大的连续内存，而无 PSRAM 的 C3 上音频子系统
+    // (I2S DMA + ES8311 对象)从开机起就常驻，是最大的一块可再生占用。先把它还给
+    // 系统堆再拉热点；提示音/节拍器下次发声时由 bsp_audio_set_format() 按需重建，
+    // 用户感知不到。这是"清理内存"真正能回收的那部分，避免配网反复报内存不足。
+    bsp_audio_deinit();
     esp_err_t err = app_net_prov_start();
     // 任务启动期间用户关了浮层：把刚开起来的热点收掉。取消优先，覆盖启动结果。
     if (s_prov_cancel) {
@@ -1074,6 +1081,12 @@ void page_settings_key(bsp_btn_t btn, bsp_btn_ev_t ev)
                 ui_hint_flash("正在开启热点，请稍候…", 1500);
             } else {
                 size_t freed = app_net_prov_reclaim_memory();
+                // 音频子系统才是这里真正能回收的大块内存；释放后由
+                // bsp_audio_set_format() 在下次发声时按需重建。把它计入提示字节数，
+                // "清理内存"显示的就是真实回收量，而不是原来的 +0 字节。
+                uint32_t before = esp_get_free_heap_size();
+                bsp_audio_deinit();
+                freed += (size_t)(esp_get_free_heap_size() - before);
                 prov_kick_off();
                 prov_refresh();
                 char msg[64];
