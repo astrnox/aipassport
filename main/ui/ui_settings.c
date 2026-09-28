@@ -724,7 +724,9 @@ static void ble_open(void)
         s_ble_busy = true;
         s_ble_cancel = false;
         s_ble_err = 0;
-        if (xTaskCreate(ble_start_task, "ble_start", 4096, NULL, 5, NULL) != pdPASS) {
+        // 启动任务里要依次初始化 BT 控制器、Wi-Fi 射频和 NimBLE/BLUFI 协议栈，4KB 栈不
+        // 够用会直接栈溢出复位。与重试路径统一用 6144，避免"首次进入闪退、重试反而能起"。
+        if (xTaskCreate(ble_start_task, "ble_start", 6144, NULL, 5, NULL) != pdPASS) {
             s_ble_busy = false;
             s_ble_err = (int)ESP_ERR_NO_MEM;
         }
