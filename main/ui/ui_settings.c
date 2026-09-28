@@ -899,8 +899,16 @@ static void activate(void)
         if (!app_net_has_credentials()) {
             ui_hint_flash("未配置 Wi-Fi，先开启热点配网", 1800);
         } else if (!app_net_wifi_connected()) {
-            if (app_net_wifi_start() == ESP_OK) ui_hint_flash("正在连接 Wi-Fi…", 1500);
-            else ui_hint_flash("Wi-Fi 启动失败", 1500);
+            // 无 PSRAM 的 C3 上，Wi-Fi 射频初始化要一块较大的连续内存；音频子系统
+            // (I2S DMA + ES8311 对象)从开机起常驻、多数时间空闲，是最大的一块可再生占用。
+            // 不先归还它时 esp_wifi_start() 常因连续块不足报内存错误，界面只能显示
+            // "Wi-Fi 启动失败"。与热点配网同源处理：先释放音频再拉射频；音频下次发声时
+            // 由 bsp_audio_set_format() 按需重建，用户感知不到。
+            bsp_audio_deinit();
+            esp_err_t werr = app_net_wifi_start();
+            if (werr == ESP_OK) ui_hint_flash("正在连接 Wi-Fi…", 1500);
+            else if (werr == ESP_ERR_NO_MEM) ui_hint_flash("设备内存不足，请先清理内存后重试", 1800);
+            else ui_hint_flash("Wi-Fi 启动失败，请重试", 1500);
         } else {
             ui_hint_flash("已连接到 Wi-Fi", 1200);
         }
