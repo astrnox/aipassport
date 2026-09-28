@@ -9,10 +9,12 @@
 #include "ui_app.h"
 
 #include "ui_pages.h"
+#include "ui_pet.h"
 #include "ui_sound.h"
 #include "ui_theme.h"
 #include "ui_timeedit.h"
 
+#include "app_metrics.h"
 #include "app_state.h"
 #include "logic/app_esports.h"
 
@@ -49,6 +51,9 @@ static bool s_routine_seen;
 
 // 错过提醒只在本次开机、且时间重新校准后汇总一次。
 static bool s_missed_reported;
+
+// 低电量只在本次开机第一次跌破阈值时告诉桌宠一次，避免电量在阈值附近抖动时反复触发。
+static bool s_low_batt_reported;
 
 int ui_app_module_count(void) { return MODULE_COUNT; }
 
@@ -108,6 +113,10 @@ static void wake_now(void)
     s_asleep = false;
     s_idle_seconds = 0;
     bsp_display_backlight(app_state_settings()->backlight);
+    // 息屏期间跳过了状态栏的周期刷新（见 app_tick），这里补一次，避免唤醒后短暂
+    // 显示息屏前的旧电量或旧 LIVE 角标。调用点均在 LVGL 锁内，可直接触碰控件。
+    app_state_battery_refresh();
+    ui_app_refresh_status();
     ESP_LOGI(TAG, "唤醒");
 }
 
@@ -158,8 +167,12 @@ static void teardown_current(void)
     // 弹层挂在当前页面的屏幕上，页面屏幕删除前必须先收掉，否则 s_alert 会留下悬空指针。
     ui_alert_close();
     if (s_current >= 0) {
+        // 先记下采样标签（标题），再销毁页面——销毁之后 LVGL 池的回收才反映在这个点。
+        char label[64];
+        snprintf(label, sizeof(label), "离开:%s", MODULES[s_current].title);
         MODULES[s_current].exit();
         s_current = -1;
+        app_metrics_mem(label);
     } else {
         page_home_exit();
     }
@@ -181,6 +194,11 @@ void ui_app_open_module(int index)
     MODULES[index].enter();
     ui_app_note_activity();
     ui_app_refresh_status();
+
+    // 进入该页后的内存/栈水位采样（内存优化阶段 1）。
+    char label[64];
+    snprintf(label, sizeof(label), "进入:%s", MODULES[index].title);
+    app_metrics_report(label);
 }
 
 void ui_app_show_quick_panel(void) { home_quick_open(); }
@@ -200,11 +218,21 @@ static void advance_pomodoro(void)
     app_pomodoro_roll_day(p, (uint32_t)(now.year * 10000 + now.month * 100 + now.day));
 
     // 长休息也要推进，因此用 tick 的返回值判断阶段切换，而不是先看状态。
+    // 桌宠跟着这些切换做反应：进入专注、专注结束、休息结束各有不同表现。进入专注这一步
+    // 没有 tick 事件（用户按开始键时状态就跳过去了），只能靠 tick 前后的阶段对比捕捉；
+    // 并且必须限定在 ev == NONE，否则"休息结束自动接续专注"会被同时当成开始与结束两件事。
+    app_pomo_state_t before = app_pomodoro_phase(p);
     app_pomo_event_t ev = app_pomodoro_tick(p, 1);
+    app_pomo_state_t after = app_pomodoro_phase(p);
+    if (ev == APP_POMO_EVENT_NONE && before != APP_POMO_FOCUS && after == APP_POMO_FOCUS) {
+        ui_pet_event(APP_PET_EV_FOCUS_ON);
+    }
     if (ev != APP_POMO_EVENT_NONE) {
-        // 阶段切换：写入一次持久化，让重启后能回到正确的段；同时给出提示音。
+        // 阶段切换：写入一次持久化，让重启后能回到正确的段；同时给出提示音与桌宠反应。
         app_state_save_pomodoro();
         ui_sound_beep();
+        ui_pet_event(ev == APP_POMO_EVENT_FOCUS_DONE ? APP_PET_EV_FOCUS_DONE
+                                                     : APP_PET_EV_BREAK_DONE);
     }
 }
 
@@ -288,6 +316,7 @@ static void check_reminders(void)
     // 会遮住提醒的临时浮层收掉后弹出。
     if (s_asleep) wake_now();
     ui_sound_beep();
+    ui_pet_event(APP_PET_EV_REMINDER);
     if (onboarding_active()) return;
     if (home_quick_active()) home_quick_close();
 
@@ -344,6 +373,9 @@ static void report_missed_reminders(void)
     char body[192];
     snprintf(body, sizeof(body), "关机期间错过 %d 条提醒：%s", missed, list_text);
     ESP_LOGI(TAG, "错过提醒 %d 条: %s", missed, list_text);
+    // 与 check_reminders 同一约定：息屏时不"默默"弹层——校时可能发生在息屏之后，
+    // 先唤醒再弹，既让用户看到，也避免在背光熄灭时白白重绘一帧。
+    if (s_asleep) wake_now();
     ui_sound_beep();
     if (ui_alert_is_open()) ui_alert_close();
     ui_alert_open(lv_screen_active(), "错过的提醒", body);
@@ -394,6 +426,17 @@ static void check_routine_node(void)
     if (index >= 0 && !dnd_active()) ui_sound_beep();
 }
 
+// 低电量提醒：桌宠发抖一下，提示该充电了。与息屏策略里的低电量阈值共用同一个常量，
+// 免得"省电提前息屏"和"桌宠反应"对低电量的定义不一致。
+static void check_low_battery(void)
+{
+    if (s_low_batt_reported) return;
+    int soc = app_state_battery_soc();
+    if (soc < 0 || soc >= APP_BATTERY_LOW_PCT) return;
+    s_low_batt_reported = true;
+    ui_pet_event(APP_PET_EV_LOW_BATTERY);
+}
+
 static void app_tick(lv_timer_t *timer)
 {
     (void)timer;
@@ -403,6 +446,7 @@ static void app_tick(lv_timer_t *timer)
     advance_pomodoro();
     check_reminders();
     check_routine_node();
+    check_low_battery();
     tick_missed_reminders();
     // 免打扰结束后补报期间压下的提醒。放在这里而不是阶段切换的分支里，是因为弹层
     // 冲突时它需要等界面空下来再报。
@@ -422,10 +466,17 @@ static void app_tick(lv_timer_t *timer)
         else MODULES[s_current].tick();
     }
 
-    if (s_tick_count % 15 == 0) {
+    // 息屏时不刷新状态栏：背光已灭，重绘看不见，却要让 CPU 跑一趟 LVGL 失效与
+    // SPI 输出。省电阶段 1 的核心就是去掉这段无用功；唤醒时在 wake_now 补刷一次，
+    // 所以醒着时状态栏不会停在旧值。
+    if (!s_asleep && s_tick_count % 15 == 0) {
         app_state_battery_refresh();
         ui_app_refresh_status();
     }
+
+    // 每 60 秒一次汇总采样：内存快照 + 输入任务与 LVGL 任务的栈高水位。周期性而非
+    // 仅页面切换时采样，是为了覆盖"长时间停留/反复操作"后的缓慢泄漏与栈峰值。
+    if (s_tick_count % 60 == 0) app_metrics_report("周期");
 
     bsp_lvgl_unlock();
 }

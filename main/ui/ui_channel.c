@@ -1,10 +1,13 @@
 // main/ui/ui_channel.c —— 工具页子页：信道体检（Wi-Fi 信道扫描）。
 //
 // 普通用户看不懂"信道 6 上有 7 个 AP、RSSI -52"，只想知道"我家 Wi-Fi 为什么卡、要不要
-// 动路由器"。所以默认这一屏只给结论：拥挤度、一句人话、建议改到哪个信道。想看细节的人
-// 按 OK 进第二屏，按拥挤度从低到高列出 13 条信道（最空的排最前）；在某条信道上再按 OK
-// 进第三屏，列出这条信道上的热点（SSID、信号强度），按强度从强到弱排。这正是
-// "普通结论 + 逐信道 + 逐热点" 三级。
+// 动路由器"。所以默认这一屏只给结论：拥挤度、一句人话、建议改到哪个信道，并用 ↑↓ 在
+// "建议信道"与"热点总览"两个条目间挪焦点，OK 进当前焦点对应的视图。往里有三条路：
+//   · 逐信道：按拥挤度从低到高列出 13 条信道（最空的排最前），顶部横幅给一句大白话
+//     环境结论（同频/邻频干扰来自哪条信道、建议改到哪条）；某条信道上再按 OK 看该信道
+//     的热点（SSID、安全模式、信号强度）。
+//   · 热点总览：本次扫描到的全部 AP，跨信道按信号从强到弱一次列完，每行同样带安全模式。
+// 三级浏览共用三键：OK 进入 / 返回，长按 OK 逐级退回结论屏，长按 ↑ 重扫。
 //
 // 扫描由 net/app_net 在内部 worker 完成，本页只读状态与报告，绝不在按键回调里等。
 //
@@ -30,9 +33,10 @@
 #define CH_CW (UI_W - 2 * UI_MARGIN_X)
 
 typedef enum {
-    CH_MAIN = 0,   // 结论
+    CH_MAIN = 0,   // 结论（焦点可在"建议信道"与"热点总览"两个条目间移动）
     CH_DETAIL,     // 逐信道（按拥挤度排序）
     CH_APS,        // 某信道上的热点明细
+    CH_INVENTORY,  // 热点总览：本次扫描到的全部 AP，按信号从强到弱
 } ch_view_t;
 
 static struct {
@@ -45,10 +49,14 @@ static struct {
     app_fetch_state_t    last_state;
     bool                 retry_pending;   // 被"蓝牙拆栈中"顶掉，等射频空出后自动补扫
 
-    int                  focus;           // DETAIL：order 中的位置；APS：热点下标
+    // MAIN：结论条目下标（0=建议信道，1=热点总览）；DETAIL：order 位置；
+    // APS/INVENTORY：热点下标。四种视图同一时刻只有一个在屏，复用同一个焦点变量。
+    int                  focus;
     int                  aps_channel;     // APS 视图对应的信道
     int                  ap_idx[APP_CHANNEL_MAX_APS];
     int                  ap_count;
+    int                  inv_idx[APP_CHANNEL_MAX_APS];   // 热点总览的全部热点下标
+    int                  inv_count;
     ui_row_t             rows[APP_CHANNEL_MAX_APS];   // 明细最多 13、热点最多 48，取大者
 } s;
 
@@ -99,6 +107,13 @@ static void refresh_report(void)
 // 主视图：只讲结论
 // ---------------------------------------------------------------------------
 
+// 结论屏只有两个条目，焦点用行自身的选中条表达：用户一眼能看出按 OK 会进哪一个。
+static void main_render_focus(void)
+{
+    ui_row_set_selected(s.rows[0], s.focus == 0);
+    ui_row_set_selected(s.rows[1], s.focus == 1);
+}
+
 static void build_main(void)
 {
     lv_obj_t *c = s.page.content;
@@ -148,13 +163,36 @@ static void build_main(void)
     ui_banner_create(c, advice, col);
 
     lv_obj_t *list = ui_list_create(c);
-    ui_row_t rec = ui_row_create(list, "建议信道", NULL);
-    char val[16];
-    snprintf(val, sizeof(val), "%d 信道", s.report.best_channel);
-    ui_row_set_value(rec, val);
-    if (rec.value) lv_obj_set_style_text_color(rec.value, lv_color_hex(ui_c_accent()), 0);
 
-    ui_page_set_hint("OK 看每信道明细   长按↑ 重扫   长按OK 返回");
+    // 64 而不是 32：下面"热点总览"那行要塞下 "N 个热点 · M 开放" 两个整数加中文和间隔点，
+    // 编译器按 int 最宽 10 位起算能到 40 多字节，32 会触发 -Werror=format-truncation。
+    char val[64];
+    // 条目 0：推荐信道。按 OK 进入"逐信道"视图（先看每条信道挤不挤）。
+    s.rows[0] = ui_row_create(list, "建议信道", NULL);
+    snprintf(val, sizeof(val), "%d 信道", s.report.best_channel);
+    ui_row_set_value(s.rows[0], val);
+    if (s.rows[0].value) {
+        lv_obj_set_style_text_color(s.rows[0].value, lv_color_hex(ui_c_accent()), 0);
+    }
+
+    // 条目 1：热点总览。按 OK 一次看完本次扫到的全部 AP。右侧顺带给出"开放网络"台数：
+    // 这只是对信标里公开字段的只读统计（开放=无密码），既不连接也不探测，但用户顺手
+    // 就能知道周围有没有不安全的网络。
+    s.rows[1] = ui_row_create(list, "热点总览", NULL);
+    int open_n = 0, wep_n = 0;
+    app_channel_security_counts(&s.report, &open_n, &wep_n, NULL);
+    if (open_n > 0) {
+        snprintf(val, sizeof(val), "%d 个热点 · %d 开放", s.report.ap_total, open_n);
+    } else if (wep_n > 0) {
+        snprintf(val, sizeof(val), "%d 个热点 · %d 个 WEP", s.report.ap_total, wep_n);
+    } else {
+        snprintf(val, sizeof(val), "%d 个热点", s.report.ap_total);
+    }
+    ui_row_set_value(s.rows[1], val);
+
+    if (s.focus < 0 || s.focus > 1) s.focus = 0;   // 从明细/总览返回时把焦点收回第一个条目
+    main_render_focus();
+    ui_page_set_hint("↑↓ 选条目   OK 进入   长按↑ 重扫   长按OK 返回");
 }
 
 // ---------------------------------------------------------------------------
@@ -176,8 +214,11 @@ static void build_detail(void)
     char right[24];
     snprintf(right, sizeof(right), "共 %d 个热点", s.report.ap_total);
     ui_header_create(c, "每信道明细", right, NULL, NULL);
-    ui_banner_create(c, "已按拥挤度排序，最空的排最前；某条信道里有哪些热点，按 OK 进去看",
-                     ui_c_accent());
+    // 顶部横幅给一句大白话环境结论：不只说"该换哪条信道"，还说清"干扰是从哪条信道
+    // 漏过来的"，普通用户看完能理解为什么要换。下面按拥挤度排序，最空的排最前。
+    char env[128];
+    app_channel_env_summary(&s.report, env, sizeof(env));
+    ui_banner_create(c, env, ui_c_accent());
 
     lv_obj_t *list = ui_list_create(c);
     for (int pos = 0; pos < APP_CHANNEL_COUNT; pos++) {
@@ -240,8 +281,11 @@ static void build_aps(void)
     for (int i = 0; i < s.ap_count; i++) {
         const app_channel_ap_t *ap = &s.report.aps[s.ap_idx[i]];
         const char *name = ap->ssid[0] ? ap->ssid : "隐藏网络";
-        char val[20];
-        snprintf(val, sizeof(val), "%d dBm", (int)ap->rssi);
+        // 右侧值带上安全模式（"WPA2 · -52 dBm"）：用户顺带能看出哪台是开放网络，
+        // 不用再点进去问。缓冲区按最长组合（中文"未知"+ dBm 三位数）留够。
+        char val[24];
+        snprintf(val, sizeof(val), "%s · %d dBm",
+                 app_channel_sec_text(ap->sec), (int)ap->rssi);
         s.rows[i] = ui_row_create(list, name, val);
         ui_row_set_title_color(s.rows[i], rssi_color(ap->rssi));
     }
@@ -258,6 +302,58 @@ static void aps_open(int channel)
     s.view = CH_APS;
     s.focus = 0;
     build_aps();
+}
+
+// ---------------------------------------------------------------------------
+// 热点总览：本次扫描到的全部 AP，跨信道按信号从强到弱一次列完
+// ---------------------------------------------------------------------------
+
+static void inventory_render_focus(void)
+{
+    for (int i = 0; i < s.inv_count; i++) ui_row_set_selected(s.rows[i], i == s.focus);
+    if (s.focus >= 0 && s.focus < s.inv_count) ui_scroll_into_view(s.rows[s.focus].obj);
+}
+
+static void build_inventory(void)
+{
+    lv_obj_t *c = s.page.content;
+    lv_obj_clean(c);
+    memset(s.rows, 0, sizeof(s.rows));
+
+    s.inv_count = app_channel_aps_sorted(&s.report, s.inv_idx, APP_CHANNEL_MAX_APS);
+
+    char right[24];
+    snprintf(right, sizeof(right), "共 %d 个", s.inv_count);
+    ui_header_create(c, "热点总览", right, NULL, NULL);
+
+    if (s.inv_count <= 0) {
+        ui_empty_create(c, "这次没扫到热点",
+                        "附近可能没有 2.4G 路由器，或不在覆盖范围内。按 OK 或长按 OK 返回结论。");
+        ui_page_set_hint("OK/长按OK 返回");
+        return;
+    }
+
+    // 频段如实标注：本机是单射频 2.4G，扫不到 5G，别让用户以为漏扫了。
+    char tip[64];
+    snprintf(tip, sizeof(tip), "按信号从强到弱排列；本机只扫到 %s",
+             app_channel_band_text());
+    ui_banner_create(c, tip, ui_c_accent());
+
+    lv_obj_t *list = ui_list_create(c);
+    for (int i = 0; i < s.inv_count; i++) {
+        const app_channel_ap_t *ap = &s.report.aps[s.inv_idx[i]];
+        const char *name = ap->ssid[0] ? ap->ssid : "隐藏网络";
+        char val[24];
+        snprintf(val, sizeof(val), "%s · %d dBm",
+                 app_channel_sec_text(ap->sec), (int)ap->rssi);
+        s.rows[i] = ui_row_create(list, name, val);
+        ui_row_set_title_color(s.rows[i], rssi_color(ap->rssi));
+    }
+
+    if (s.focus < 0) s.focus = 0;
+    if (s.focus >= s.inv_count) s.focus = s.inv_count - 1;
+    inventory_render_focus();
+    ui_page_set_hint("↑↓ 查看热点   OK/长按OK 返回结论");
 }
 
 // ---------------------------------------------------------------------------
@@ -300,6 +396,29 @@ void page_channel_key(bsp_btn_t btn, bsp_btn_ev_t ev)
 {
     if (!s.active || !s.page.scr) return;
 
+    if (s.view == CH_INVENTORY) {
+        // OK 或长按 OK 都返回结论屏：这是只读一览，没有更深一层可进。
+        if ((ev == BSP_BTN_CLICK || ev == BSP_BTN_LONG) && btn == BSP_BTN_OK) {
+            s.view = CH_MAIN;
+            s.focus = 0;
+            build_main();
+            return;
+        }
+        if (ev != BSP_BTN_CLICK) return;
+        if (btn == BSP_BTN_UP) {
+            if (s.inv_count > 0) {
+                s.focus = (s.focus + s.inv_count - 1) % s.inv_count;
+                inventory_render_focus();
+            }
+        } else if (btn == BSP_BTN_DOWN) {
+            if (s.inv_count > 0) {
+                s.focus = (s.focus + 1) % s.inv_count;
+                inventory_render_focus();
+            }
+        }
+        return;
+    }
+
     if (s.view == CH_APS) {
         if (ev == BSP_BTN_LONG && btn == BSP_BTN_OK) {
             s.view = CH_DETAIL;
@@ -327,6 +446,7 @@ void page_channel_key(bsp_btn_t btn, bsp_btn_ev_t ev)
     if (s.view == CH_DETAIL) {
         if (ev == BSP_BTN_LONG && btn == BSP_BTN_OK) {
             s.view = CH_MAIN;
+            s.focus = 0;
             build_main();
             return;
         }
@@ -359,14 +479,31 @@ void page_channel_key(bsp_btn_t btn, bsp_btn_ev_t ev)
         return;
     }
     if (ev != BSP_BTN_CLICK) return;
+
+    // 结论屏两个条目：↑↓ 挪焦点，OK 进当前焦点对应的视图。
+    if (btn == BSP_BTN_UP || btn == BSP_BTN_DOWN) {
+        if (!s.have_report) {
+            ui_hint_flash("还在扫描，请稍候", 1500);
+            return;
+        }
+        s.focus = s.focus == 0 ? 1 : 0;
+        main_render_focus();
+        return;
+    }
     if (btn == BSP_BTN_OK) {
         if (!s.have_report) {
             ui_hint_flash("还在扫描，请稍候", 1500);
             return;
         }
-        s.view = CH_DETAIL;
-        s.focus = 0;
-        build_detail();
+        if (s.focus == 1) {
+            s.view = CH_INVENTORY;
+            s.focus = 0;
+            build_inventory();
+        } else {
+            s.view = CH_DETAIL;
+            s.focus = 0;
+            build_detail();
+        }
     }
 }
 

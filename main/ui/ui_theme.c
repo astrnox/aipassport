@@ -11,6 +11,8 @@
 //    与渐变，避免大面积重绘掉帧。
 #include "ui_theme.h"
 
+#include "ui_pet.h"
+
 #include "app_state.h"
 
 #include <string.h>
@@ -204,6 +206,11 @@ ui_page_t ui_page_create(const char *hint_text)
     s_status.batt_lbl = lv_label_create(right);
     lv_obj_set_style_text_font(s_status.batt_lbl, ui_font_hint, 0);
     s_status_ready = true;
+
+    // 桌宠：状态栏正中一只极小的火柴人剪影。它与主页桌宠卡共享同一份状态（见 ui_pet.h），
+    // 于是切到任何页面都能看到"同一只"在活动，情绪还会通过线色表达出来。26px 高的条里
+    // 放不下台词，所以 speech_font 传 NULL；装置随本屏一起销毁，不需要单独清理。
+    ui_pet_rig_create(bar, UI_W / 2 - 12, 1, 24, 24, NULL, 0);
 
     // 内容区：可滚动。
     lv_obj_t *content = lv_obj_create(scr);

@@ -1,23 +1,26 @@
-// main/ui/ui_home.c —— 主页：电子工牌 + 模块轮播。
+// main/ui/ui_home.c —— 主页：电子工牌 + 桌宠 + 模块轮播。
 //
-// 按用户要求，主页第一眼就是本人的电子工牌：大头像居中偏上，昵称与一行补充信息排在
+// 按用户要求，主页第一眼就是本人的电子工牌：头像居中偏上，昵称与一行补充信息排在
 // 头像正下方。头像优先播放手机端上传的动图（GIF 由配置页解码、按最多 24 帧缩到
 // 96x96 的 RGB565 序列存进 assets 分区），没有动图时退回首字占位。动图帧不复制进
 // RAM，而是用 app_assets_map() 把 assets 分区零拷贝映射出来，LVGL 直接把它们当图源
 // 渲染；因此映射必须在整个播放期内保持有效，只有删掉 animimg 之后才允许解映射。
 //
-// 工牌下方留一张紧凑的模块轮播卡进入各功能：UP 看上一个、DOWN 看下一个，到两端再按
-// 会循环回另一端，OK 进入当前模块。轮播卡内用左右箭头、页码与圆点同时表达"还有其它
-// 模块"，不让用户以为只有一张卡。
+// 工牌下面放一张桌宠卡（见 ui_pet.h）：这只火柴人与状态栏里的小剪影共享同一份状态，
+// 所以不论停在哪个页面，用户看到的都是同一只，会自己走动、发呆、偶尔"捣乱"。
 //
-// 快捷面板挂在主页屏幕之上，承载静音 / 主题 / 亮度 / 开始番茄钟四项。面板打开时
-// 由控制器把按键转交 home_quick_key()，关闭后恢复主页按键。
+// 最下方是紧凑的模块轮播卡：UP 看上一个、DOWN 看下一个，到两端再按会循环回另一端，
+// OK 进入当前模块。轮播卡内用左右箭头与页码表达"还有其它模块"，不让用户以为只有一张卡。
+//
+// 快捷面板挂在主页屏幕之上，承载静音 / 主题 / 亮度 / 开始番茄钟 / 免打扰 / 桌宠捣乱
+// 六项。面板打开时由控制器把按键转交 home_quick_key()，关闭后恢复主页按键。
 #include <stdbool.h>
 
 #include "ui_pages.h"
 
 #include "ui_theme.h"
 #include "ui_app.h"
+#include "ui_pet.h"
 #include "ui_sound.h"
 
 #include "app_assets.h"
@@ -34,23 +37,26 @@
 #include <string.h>
 
 #define HOME_CW        (UI_W - 2 * UI_MARGIN_X)   // 224
-#define HOME_QUICK_N   5
+#define HOME_QUICK_N   6
 
-// 电子工牌卡几何：头像是主角，做成整屏最大的一枚 96x96 正方形（也是手机端动图
-// 允许的最大边长），水平居中、明显偏上；昵称与一行补充信息居中排在头像正下方。
-// 高度按"上留白 10 + 头像 96 + 昵称行 31 + 信息行 23 + 下留白 8"取 170。
-#define HOME_AVATAR    96
-#define HOME_CARD_H    170
+// 电子工牌卡几何：头像 64x64、水平居中。相比最初独占整屏的大头像，这里让出一块纵向
+// 空间给桌宠卡——但头像仍是卡片里最大的一枚元素，第一眼还是"自己的工牌"。
+// 高度按"上留白 8 + 头像 64 + 昵称行 24 + 信息行 16 + 下留白 8"取 120。
+#define HOME_AVATAR    64
+#define HOME_CARD_H    120
 
-// 模块轮播卡。工牌占了大头，这里压到 66：一行左右箭头夹模块名，下面一行页码，
-// 足够表达"还有其它模块"即可，把纵向空间让给工牌。
-#define HOME_CAROUSEL_H  66
+// 桌宠卡：火柴人站在卡片左侧 h×h 的方块里，右侧留给台词。
+#define HOME_PET_H     70
+
+// 模块轮播卡。工牌与桌宠占了大头，这里压到 54：一行左右箭头夹模块名，下面一行页码，
+// 足够表达"还有其它模块"即可，把纵向空间让给工牌与桌宠。
+#define HOME_CAROUSEL_H  54
 #define HOME_MODULE_MAX  8
 
-enum { QUIET_MUTE = 0, QUIET_THEME, QUIET_BRIGHT, QUIET_POMO, QUIET_DND };
+enum { QUIET_MUTE = 0, QUIET_THEME, QUIET_BRIGHT, QUIET_POMO, QUIET_DND, QUIET_PET };
 
 static const char *const QUIET_NAMES[HOME_QUICK_N] = {
-    "静音", "主题", "亮度", "开始番茄钟", "免打扰"
+    "静音", "主题", "亮度", "开始番茄钟", "免打扰", "桌宠捣乱"
 };
 
 static struct {
@@ -191,11 +197,11 @@ static void build_badge_card(void)
     lv_obj_t *card = ui_card_create(s.page.content, 0, 0, HOME_CW, HOME_CARD_H,
                                     ui_c_accent());
 
-    // 头像：96x96、水平居中、上边留 10，是整张工牌的视觉重心。
+    // 头像：64x64、水平居中、上边留 8，是整张工牌的视觉重心。
     lv_obj_t *box = lv_obj_create(card);
     lv_obj_remove_flag(box, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_size(box, HOME_AVATAR, HOME_AVATAR);
-    lv_obj_align(box, LV_ALIGN_TOP_MID, 0, 10);
+    lv_obj_align(box, LV_ALIGN_TOP_MID, 0, 8);
     lv_obj_set_style_bg_color(box, lv_color_hex(ui_c_accent()), 0);
     lv_obj_set_style_bg_opa(box, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(box, 16, 0);
@@ -216,9 +222,9 @@ static void build_badge_card(void)
         ui_font_body, ui_c_text());
     lv_obj_set_width(nick, HOME_CW - 16);
     lv_obj_set_style_text_align(nick, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(nick, LV_ALIGN_TOP_MID, 0, 10 + HOME_AVATAR + 2);
+    lv_obj_align(nick, LV_ALIGN_TOP_MID, 0, 8 + HOME_AVATAR + 2);
 
-    // 补充信息：取第一条非空文本行，居中排在昵称下方（16px 行高 31）。
+    // 补充信息：取第一条非空文本行，居中排在昵称下方（16px 行高 24）。
     const char *sub = NULL;
     if (b) {
         for (int i = 0; i < APP_BADGE_MAX_LINES; i++) {
@@ -230,7 +236,21 @@ static void build_badge_card(void)
     lv_obj_t *sub_lbl = ui_label_create(card, sub, ui_font_hint, ui_c_dim());
     lv_obj_set_width(sub_lbl, HOME_CW - 16);
     lv_obj_set_style_text_align(sub_lbl, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(sub_lbl, LV_ALIGN_TOP_MID, 0, 10 + HOME_AVATAR + 2 + 31);
+    lv_obj_align(sub_lbl, LV_ALIGN_TOP_MID, 0, 8 + HOME_AVATAR + 2 + 24);
+}
+
+// ---------------------------------------------------------------------------
+// 桌宠卡
+// ---------------------------------------------------------------------------
+
+// 建桌宠卡：火柴人画在左侧 h×h 的方块里，右侧显示它当下的颜文字/短句。这只桌宠与
+// 状态栏里的小剪影共用同一份状态（见 ui_pet.h），不是每页各画一只。
+static void build_pet_card(void)
+{
+    lv_obj_t *card = ui_card_create(s.page.content, 0, 0, HOME_CW, HOME_PET_H,
+                                    ui_c_accent());
+    // 装置数超出上限时返回 NULL：跳过桌宠即可，主页不能因此失败。
+    ui_pet_rig_create(card, 0, 0, HOME_CW, HOME_PET_H, ui_font_hint, ui_c_text());
 }
 
 // ---------------------------------------------------------------------------
@@ -277,12 +297,12 @@ static void build_module_carousel(void)
     lv_obj_set_width(s.mod_title, HOME_CW - 40);
     lv_obj_set_style_text_align(s.mod_title, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_long_mode(s.mod_title, LV_LABEL_LONG_WRAP);
-    lv_obj_align(s.mod_title, LV_ALIGN_CENTER, 0, -10);
+    lv_obj_align(s.mod_title, LV_ALIGN_CENTER, 0, -8);
 
-    // 页码替代原先的一排圆点：卡片压到 66 高后，圆点会和页码挤在一起，而"n / m"
+    // 页码替代原先的一排圆点：卡片压到 54 高后，圆点会和页码挤在一起，而"n / m"
     // 已经能同时说明"当前第几个"和"一共几个"，信息不重复。
     s.mod_page = ui_label_create(s.mod_card, "", ui_font_hint, ui_c_dim());
-    lv_obj_align(s.mod_page, LV_ALIGN_CENTER, 0, 16);
+    lv_obj_align(s.mod_page, LV_ALIGN_CENTER, 0, 14);
 
     int focus = app_state_settings()->home_focus;
     if (focus < 0 || focus >= s.module_count) focus = 0;
@@ -325,6 +345,12 @@ static void quick_update_values(void)
         lv_label_set_text(s.quick_values[QUIET_DND], p->do_not_disturb ? "开" : "关");
         lv_obj_set_style_text_color(s.quick_values[QUIET_DND],
             lv_color_hex(p->do_not_disturb ? ui_c_ok() : ui_c_dim()), 0);
+    }
+    if (s.quick_values[QUIET_PET]) {
+        bool on = ui_pet_mischief();
+        lv_label_set_text(s.quick_values[QUIET_PET], on ? "开" : "关");
+        lv_obj_set_style_text_color(s.quick_values[QUIET_PET],
+            lv_color_hex(on ? ui_c_ok() : ui_c_dim()), 0);
     }
 }
 
@@ -435,13 +461,20 @@ static void quick_activate(void)
         ui_hint_flash("番茄钟已启动", 1500);
         break;
     }
-    default: {   // QUIET_DND：免打扰只改开关，不动计时与时长。
+    case QUIET_DND: {   // 免打扰只改开关，不动计时与时长。
         app_pomodoro_t *p = app_state_pomodoro();
         bool on = !p->do_not_disturb;
         app_pomodoro_set_dnd(p, on);
         app_state_save_pomodoro();
         quick_update_values();
         ui_hint_flash(on ? "专注时免打扰已开启" : "专注时免打扰已关闭", 1500);
+        break;
+    }
+    default: {   // QUIET_PET：捣乱模式，只影响桌宠自身的动作调度。
+        bool on = !ui_pet_mischief();
+        ui_pet_set_mischief(on);
+        quick_update_values();
+        ui_hint_flash(on ? "桌宠捣乱模式已开启" : "桌宠捣乱模式已关闭", 1500);
         break;
     }
     }
@@ -474,7 +507,10 @@ void page_home_enter(void)
     // 个人名片卡排在最前：开机第一眼先看到自己的身份。
     build_badge_card();
 
-    // 模块轮播卡：六个模块入口。
+    // 桌宠卡：与状态栏小剪影同一只，主页只是给了它更大的舞台与台词。
+    build_pet_card();
+
+    // 模块轮播卡：各模块入口。
     build_module_carousel();
 }
 

@@ -22,6 +22,7 @@
 
 #include "ui_pages.h"
 
+#include "ui_pet.h"
 #include "ui_theme.h"
 
 #include "net/app_ble.h"
@@ -50,6 +51,8 @@ typedef enum {
 typedef struct {
     uint8_t addr[6];
     char    name[APP_FINDER_NAME_LEN];
+    app_finder_cat_t category;   // 启发式类别；UNKNOWN 表示没有可显示的判断
+    app_finder_trend_t trend;    // 信号趋势；present 时才有意义
     bool    saved;
     bool    present;    // 本次快照里是否搜到
     int     rssi;       // present 时有效
@@ -74,6 +77,8 @@ static struct {
     bool    sel_valid;
 
     uint8_t  track_addr[6];   // 追踪屏正在看的设备
+    bool     track_alerted;   // 追踪屏：本轮"在远离"是否已提醒过，避免每帧刷屏
+    bool     pet_tracker_done; // 本次进页是否已经为"追踪到防丢器"让桌宠反应过
     lv_obj_t *t_pct;
     lv_obj_t *t_level;
     lv_obj_t *t_bar;
@@ -139,6 +144,8 @@ static int build_entries(void)
             e->present = true;
             e->rssi = s.snap.devs[di].rssi;
             e->closeness = app_finder_closeness(e->rssi);
+            e->category = s.snap.devs[di].category;   // 搜到了才有类别可显示
+            e->trend = app_finder_trend(&s.snap.devs[di]);
             if (!e->name[0] && s.snap.devs[di].has_name) {
                 snprintf(e->name, sizeof(e->name), "%s", s.snap.devs[di].name);
             }
@@ -157,8 +164,36 @@ static int build_entries(void)
         e->present = true;
         e->rssi = s.snap.devs[i].rssi;
         e->closeness = app_finder_closeness(e->rssi);
+        e->category = s.snap.devs[i].category;
+        e->trend = app_finder_trend(&s.snap.devs[i]);
     }
     return n;
+}
+
+// 按类别计数的汇总文案。只讲"有几台像什么"，不讲是谁的：MAC 会随机化、多数设备
+// 不广播名字，这里永远只是启发式归类。只输出计数非零的类别，顺序固定，便于扫读。
+static void category_summary(char *out, size_t cap)
+{
+    int counts[APP_FINDER_CAT_COUNT];
+    app_finder_category_counts(&s.snap, counts);
+
+    static const app_finder_cat_t order[] = {
+        APP_FINDER_CAT_PHONE, APP_FINDER_CAT_EARBUDS, APP_FINDER_CAT_WATCH,
+        APP_FINDER_CAT_TRACKER, APP_FINDER_CAT_AUDIO, APP_FINDER_CAT_COMPUTER,
+        APP_FINDER_CAT_OTHER, APP_FINDER_CAT_UNKNOWN,
+    };
+
+    size_t used = 0;
+    out[0] = '\0';
+    for (size_t i = 0; i < sizeof(order) / sizeof(order[0]); i++) {
+        int cnt = counts[order[i]];
+        if (cnt <= 0) continue;
+        int w = snprintf(out + used, cap - used, "%s%s %d",
+                         used == 0 ? "" : " · ",
+                         app_finder_category_text(order[i]), cnt);
+        if (w < 0 || (size_t)w >= cap - used) break;   // 放不下就停，宁可少显示也不溢出
+        used += (size_t)w;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -177,7 +212,14 @@ static void entry_text(const fd_entry_t *e, char *out, size_t cap)
         snprintf(out, cap, "没搜到");
         return;
     }
-    snprintf(out, cap, "%d%% %s", e->closeness, app_finder_level(e->closeness));
+    // 已知趋势时把"在靠近/在远离"接在档位后面：找东西时它比多一位百分比更管用。
+    // 趋势未知（刚发现、样本不足）就不显示，避免给一个没有依据的判断。
+    if (e->trend != APP_FINDER_TREND_UNKNOWN) {
+        snprintf(out, cap, "%d%% %s · %s", e->closeness,
+                 app_finder_level(e->closeness), app_finder_trend_text(e->trend));
+    } else {
+        snprintf(out, cap, "%d%% %s", e->closeness, app_finder_level(e->closeness));
+    }
 }
 
 static void build_list(void)
@@ -194,6 +236,21 @@ static void build_list(void)
     if (failed) {
         const char *why = app_ble_finder_error_text();
         ui_banner_create(c, why ? why : "蓝牙没能打开，请稍后重试", ui_c_warn());
+    }
+
+    // 类别计数汇总：放在标题下方作为副标题。措辞刻意只说"像什么"，不暗示设备归属。
+    if (s.count > 0) {
+        char summary[128];
+        category_summary(summary, sizeof(summary));
+        if (summary[0]) {
+            char line[160];
+            snprintf(line, sizeof(line), "类别统计：%s", summary);
+            lv_obj_t *lbl = ui_label_create(c, line, ui_font_hint, ui_c_dim());
+            if (lbl) {
+                lv_obj_set_width(lbl, FD_CW);
+                lv_label_set_long_mode(lbl, LV_LABEL_LONG_WRAP);
+            }
+        }
     }
 
     if (s.count > 0) {
@@ -213,9 +270,18 @@ static void build_list(void)
 
             char title[40];
             display_name(s.entries[i].addr, s.entries[i].name, title, sizeof(title));
-            char val[32];
+            // 已知类别时把短标签拼在名字后（"AirPods · 耳机"）；未知则只显示名字，
+            // 不给用户一个无意义的"未知"后缀。
+            char title_cat[48];
+            const char *cat_text = (s.entries[i].category != APP_FINDER_CAT_UNKNOWN)
+                                       ? app_finder_category_text(s.entries[i].category)
+                                       : NULL;
+            if (cat_text) {
+                snprintf(title_cat, sizeof(title_cat), "%s · %s", title, cat_text);
+            }
+            char val[48];   // 百分比 + 档位 + 趋势，中文按字节算长度，留足余量
             entry_text(&s.entries[i], val, sizeof(val));
-            s.rows[i] = ui_row_create(list, title, val);
+            s.rows[i] = ui_row_create(list, cat_text ? title_cat : title, val);
 
             uint32_t col = s.entries[i].present ? closeness_color(s.entries[i].closeness)
                                                 : ui_c_dim();
@@ -272,15 +338,41 @@ static void track_update(void)
     }
 
     int cl = s.entries[ti].closeness;
+    app_finder_trend_t tr = s.entries[ti].trend;
     uint32_t col = closeness_color(cl);
     lv_label_set_text_fmt(s.t_pct, "%d%%", cl);
     lv_obj_set_style_text_color(s.t_pct, lv_color_hex(col), 0);
-    lv_label_set_text(s.t_level, app_finder_level(cl));
+    // 档位后面接上趋势：一边走一边看"在靠近/在远离"，比只看绝对值更知道方向。
+    if (tr != APP_FINDER_TREND_UNKNOWN) {
+        lv_label_set_text_fmt(s.t_level, "%s · %s", app_finder_level(cl),
+                              app_finder_trend_text(tr));
+    } else {
+        lv_label_set_text(s.t_level, app_finder_level(cl));
+    }
     lv_obj_set_style_text_color(s.t_level, lv_color_hex(col), 0);
     ui_progress_set(s.t_bar, cl * 10);
+
+    // 防丢提醒：正在追踪的是一台已收藏的设备，而它的信号开始持续变弱时提醒一次，
+    // 免得用户边走边找却已经走反方向。只在"进入远离"的那一刻提示，并在信号重新变强
+    // 后重新武装——既不每帧刷屏，也不会一路走远都一声不吭。
+    if (tr == APP_FINDER_TREND_RECEDING) {
+        if (!s.track_alerted) {
+            s.track_alerted = true;
+            ui_hint_flash(s.entries[ti].saved ? "信号在变弱，可能走反了方向" :
+                                                "信号在变弱，试着回头看看", 1800);
+        }
+    } else if (tr == APP_FINDER_TREND_APPROACHING) {
+        s.track_alerted = false;
+    }
     if (s.t_addr) {
+        // 被动盘点能给出的最"硬"的一条信息就是设备地址本身：它来自广播里公开的发送方
+        // 地址，不涉及任何连接或探测。这里把完整地址显示出来，方便用户把屏幕上这一行
+        // 与其它设备的扫描结果对上号。现代手机会轮换地址，所以它只标识"这一次广播的
+        // 发送方"，不代表设备身份。
+        const uint8_t *ad = s.entries[ti].addr;
         char buf[40];
-        snprintf(buf, sizeof(buf), "信号 %d dBm", s.entries[ti].rssi);
+        snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X  %d dBm",
+                 ad[0], ad[1], ad[2], ad[3], ad[4], ad[5], s.entries[ti].rssi);
         lv_label_set_text(s.t_addr, buf);
     }
 }
@@ -291,6 +383,7 @@ static void build_track(void)
     lv_obj_clean(c);
     memset(s.rows, 0, sizeof(s.rows));
     s.t_pct = s.t_level = s.t_bar = s.t_addr = NULL;
+    s.track_alerted = false;   // 换到新设备/新进入追踪屏，允许再提醒一次
 
     int ti = focus_of_addr(s.track_addr);
     char name[40];
@@ -324,7 +417,18 @@ static void build_track(void)
     lv_obj_set_style_text_align(s.t_addr, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_pos(s.t_addr, 0, 146);
 
-    ui_banner_create(c, "边走边看百分比：越接近 100% 说明越近", ui_c_ok());
+    // 已归为追踪器（防丢器）的设备额外说明：这正是用户拿它找 AirTag/防丢器的场景。
+    bool is_tracker = (ti >= 0 && s.entries[ti].category == APP_FINDER_CAT_TRACKER);
+    // 桌宠反应：首次追踪到防丢器时惊讶一下，坐实"这确实是一台防丢器"。每次进页只反应
+    // 一次，免得在列表里来回切设备时反复触发。
+    if (is_tracker && !s.pet_tracker_done) {
+        s.pet_tracker_done = true;
+        ui_pet_event(APP_PET_EV_TRACKER);
+    }
+    ui_banner_create(c, is_tracker
+                            ? "像防丢器：走近信号变强，趋势会显示在档位后面"
+                            : "边走边看百分比：越接近 100% 说明越近",
+                     ui_c_ok());
     ui_page_set_hint("↑↓ 换设备   OK 返回列表   长按OK 退出");
 
     track_update();
@@ -357,6 +461,8 @@ static void toggle_save(const uint8_t addr[6])
             return;
         }
         ui_hint_flash("已存为我的设备", 1400);
+        // 桌宠为"把自己的设备收进收藏"高兴一下，和防丢器被追踪到时的惊讶区分开。
+        ui_pet_event(APP_PET_EV_FOUND_DEVICE);
     }
     refresh();   // 立刻重排：收藏项要挪进"我的设备"区，用户马上看到结果
 }

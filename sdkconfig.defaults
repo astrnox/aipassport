@@ -41,6 +41,13 @@ CONFIG_LV_USE_ANIMIMG=y
 # --- 系统 ---
 CONFIG_FREERTOS_HZ=1000
 
+# --- 功耗管理 ---
+# 只启用动态调频（DFS）：空闲时自动把 CPU/APB 降到 40MHz，减少空转功耗。
+# 刻意不启用自动 light sleep（CONFIG_FREERTOS_USE_TICKLESS_IDLE）：light sleep 会牵扯
+# USB-Serial/JTAG 控制台、SPI/DMA 与 I2S 音频通路，必须先在真机上逐项验证才能开，
+# 理由与验证清单见 docs/development/engineering/memory-and-power-optimization.md。
+CONFIG_PM_ENABLE=y
+
 # --- Bluetooth LE / NimBLE ---
 # ESP32-C3 仅支持 BLE。角色按实际功能开：
 #   * PERIPHERAL / BROADCASTER —— BLE 配网与"万能遥控"（HID 外设）都要对外广播并被连接。

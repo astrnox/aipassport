@@ -456,10 +456,35 @@ static int finder_gap_event(struct ble_gap_event *event, void *arg)
         name_len = fields.name_len;
     }
 
+    // 类别线索：厂商数据的前两字节是小端的厂商 ID（长度不足 2 就没有可信的厂商 ID）。
+    uint16_t company_id = 0;
+    if (fields.mfg_data && fields.mfg_data_len >= 2) {
+        company_id = (uint16_t)(fields.mfg_data[0] | (fields.mfg_data[1] << 8));
+    }
+
+    // 厂商自定义数据里紧跟厂商 ID 的第一个字节。Apple 用它区分用途：0x12 是 Find My
+    // 网络（AirTag 与第三方 Find My 防丢器），0x07 是 AirPods 一类音频配件。长度不足
+    // 3 字节时没有这个字节，记 0 表示"未提供"，绝不猜。
+    uint8_t mfg_type = 0;
+    if (fields.mfg_data && fields.mfg_data_len >= 3) {
+        mfg_type = fields.mfg_data[2];
+    }
+
+    // 16 位服务 UUID 列表。分类逻辑只关心"有没有出现某个标准 UUID"，条数上限很小
+    // （广播长度有限），固定数组足够；超出部分直接忽略，不影响判断。
+    uint16_t uuids[8];
+    int nuuids = 0;
+    if (fields.uuids16 && fields.num_uuids16 > 0) {
+        for (int i = 0; i < fields.num_uuids16 &&
+                        nuuids < (int)(sizeof(uuids) / sizeof(uuids[0])); i++) {
+            uuids[nuuids++] = fields.uuids16[i].value;
+        }
+    }
+
     uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000);
     ble_lock();
-    app_finder_feed(&s_finder, event->disc.addr.val, name, name_len,
-                    event->disc.rssi, now_ms);
+    app_finder_feed(&s_finder, event->disc.addr.val, company_id, mfg_type, uuids, nuuids,
+                    name, name_len, event->disc.rssi, now_ms);
     ble_unlock();
     return 0;
 }

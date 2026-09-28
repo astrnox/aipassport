@@ -84,6 +84,17 @@ Upload only `build/FoloToy-AI-Passport-full.bin`; the similarly named app-only
 `build/FoloToy-AI-Passport.bin` does not contain the bootloader or partition
 table.
 
+The merged image contains the bootloader, the partition table, and the
+application. The `assets` partition is deliberately **not** part of it: it holds
+per-device animation frames that the user uploads on the device itself, so a
+release image neither ships nor needs any preloaded data image. The product
+generates its sounds at runtime and has no preloaded sound partition. If a
+derivative ever adds a partition that must ship preloaded (a factory resource or
+sound image), generate its image, list it in `flash_args`, and re-run
+`./tools/validate.sh --firmware` — the check then requires that image to be merged
+and byte-identical at its configured offset, so an accidental omission fails the
+gate instead of shipping silently.
+
 ## Flashing and stored data
 
 > **No backup of the firmware already installed on the device is required

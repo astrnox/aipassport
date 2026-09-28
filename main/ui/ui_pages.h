@@ -99,7 +99,7 @@ void page_home_exit(void);
 void page_home_key(bsp_btn_t btn, bsp_btn_ev_t ev);
 void page_home_tick(void);
 
-// 快捷面板（主页长按 UP）：静音 / 主题 / 亮度 / 开始番茄钟
+// 快捷面板（主页长按 UP）：静音 / 主题 / 亮度 / 开始番茄钟 / 免打扰 / 桌宠捣乱
 void home_quick_open(void);
 void home_quick_close(void);
 void home_quick_key(bsp_btn_t btn, bsp_btn_ev_t ev);

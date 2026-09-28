@@ -4,10 +4,15 @@
 
 # Memory and Power Optimization Plan
 
-Status: **Stage 2 memory work partly implemented; measurement and power work
-pending.** The low-risk memory reductions below now ship; the Stage 1
-measurement harness and every power change are still to do. Every number marked
-"estimate" must be replaced by a measured value before a change is accepted.
+Status: **Memory Stage 1 and Power Stage 1 implemented; Power Stage 2 enabled for
+dynamic frequency scaling only.** The low-risk memory reductions below ship, the
+Stage 1 measurement harness is now wired into the application
+([`app_metrics.c`](../../../main/app_metrics.c)), and the "stop redrawing while
+asleep" change is in. Dynamic frequency scaling (DFS) is enabled; automatic light
+sleep is deliberately **not** enabled and stays deferred until the on-device
+checks under "Power optimization plan" pass. Every number still marked "estimate"
+must be replaced by a measured value from a device run before it is treated as a
+result.
 
 ## Implemented so far
 
@@ -27,9 +32,24 @@ channel scan, and time sync / provisioning:
 - `app_input` task stack raised 4 → 8 KB, and `ui_theme.c` helpers NULL-check
   widget creation.
 
-Measurement is still required to confirm these are sufficient: without
-`lv_mem_monitor()` and internal-heap watermarks from a device, the headroom is
-an estimate, not a result.
+Measurement harness (Memory Stage 1) and Power Stage 1:
+
+- [`app_metrics.c`](../../../main/app_metrics.c) logs one line per sample point:
+  LVGL pool free / fragmentation / peak use, internal heap free / largest block,
+  and the `app_input` and LVGL task stack high-water marks. It is called on
+  module enter and exit, on every routine tab switch, every 60 s while awake, and
+  each transient network worker logs its own stack watermark on exit.
+- While the screen is asleep, the 1 s tick no longer runs the periodic battery /
+  status-bar refresh; `wake_now()` refreshes once on wake so the bar is not stale.
+  The one place that used to open an alert while asleep without waking first
+  (`report_missed_reminders()`) now wakes the screen, keeping the invariant
+  "nothing touches the hidden screen while asleep" true.
+- Dynamic frequency scaling: `CONFIG_PM_ENABLE=y` and an `esp_pm_configure()` call
+  in [`main.c`](../../../main/main.c) with a 40–160 MHz range. Light sleep stays
+  off (see Stage 2).
+
+Collecting a device run is still required to turn the estimates into numbers:
+the values logged by the harness must be recorded on a real board.
 
 ## Scope and method
 
@@ -89,18 +109,21 @@ estimate alone is not a result.
 
 ## Memory optimization plan
 
-### Stage 1 — measure (do first)
+### Stage 1 — measure (do first) — **harness implemented, device run pending**
 
-- Log `lv_mem_monitor()` (free, used, fragmentation, max used) after entering
-  and after leaving each module page, and after each tab switch in the routine
-  page.
+The logging described below is implemented in
+[`app_metrics.c`](../../../main/app_metrics.c) and wired into the call sites:
+
+- Log `lv_mem_monitor()` (free, fragmentation, max used) after entering and after
+  leaving each module page, and after each tab switch in the routine page.
 - Log `heap_caps_get_free_size(MALLOC_CAP_INTERNAL)` and
   `heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)` at the same points.
-- Log `uxTaskGetStackHighWaterMark()` for `app_input`, the LVGL port task, and
-  the network workers after a representative session.
-- Record the values reached during the exact action sequences that used to
-  crash: applying/clearing templates and switching routine tabs, entering and
-  leaving module pages, repeated OK/UP/DOWN, and after provisioning/network use.
+- Log `uxTaskGetStackHighWaterMark()` for `app_input` and the LVGL task on a 60 s
+  cadence, and for the network workers when each one exits.
+- **Still to do:** record the values reached on a real board during the exact
+  action sequences that used to crash: applying/clearing templates and switching
+  routine tabs, entering and leaving module pages, repeated OK/UP/DOWN, and after
+  provisioning/network use. The harness is the input; the run is the result.
 
 ### Stage 2 — remove peak usage (low risk)
 
@@ -140,12 +163,16 @@ estimate alone is not a result.
   flag ([`ui_app.c`](../../../main/ui/ui_app.c)). The panel keeps being driven
   and the 1-second `app_tick` keeps running (it must, for reminders, the
   Pomodoro timer, and routine node changes).
-- The 1-second tick still calls `ui_app_refresh_status()` every 15 ticks even
-  while asleep, which invalidates widgets and forces a redraw of a backlight-off
-  panel.
+- The 1-second tick used to call `ui_app_refresh_status()` every 15 ticks even
+  while asleep, invalidating widgets and forcing a redraw of a backlight-off
+  panel. **Fixed in Power Stage 1** — the periodic refresh is now skipped while
+  asleep and runs once on wake.
+- Dynamic frequency scaling is now enabled (Power Stage 2, DFS only): the CPU/APB
+  drop to 40 MHz when idle instead of staying at 160 MHz.
 - `CONFIG_LV_DEF_REFR_PERIOD=20` makes the LVGL refresh timer wake 50 times per
   second. It does little work when nothing is invalidated, but the wakeups still
-  cost CPU time and prevent deep idle.
+  cost CPU time and prevent deep idle; raising it is still an open, measure-first
+  item.
 - `CONFIG_FREERTOS_HZ=1000` gives a 1 kHz tick.
 - Wi-Fi and Bluetooth are opened on demand and released on exit — already a good
   baseline. See the [hardware guide](../../hardware-design/AI_HARDWARE_DEVELOPMENT_GUIDE.md)
@@ -157,29 +184,33 @@ it is off. The realistic wins are therefore (a) stop redrawing while asleep and
 
 ## Power optimization plan
 
-### Stage 1 — stop wasted work while asleep (low risk)
+### Stage 1 — stop wasted work while asleep (low risk) — **done**
 
 1. In `app_tick`, skip the periodic `ui_app_refresh_status()` while `s_asleep`;
    refresh once on wake. This removes a redraw of an invisible panel every 15 s.
-2. Ensure nothing else invalidates the screen while asleep. Audit page `tick()`
-   functions: they are already skipped when asleep, which is correct — keep that
-   invariant explicit.
-3. Evaluate raising `CONFIG_LV_DEF_REFR_PERIOD` from 20 ms to 30–40 ms. Fewer
-   refresh wakeups; only acceptable if animated screens (identity animation,
-   metronome) still look smooth. Measure before/after.
+   Implemented in [`ui_app.c`](../../../main/ui/ui_app.c).
+2. Ensure nothing else invalidates the screen while asleep. Page `tick()`
+   functions are skipped when asleep (kept explicit). The audit found one gap:
+   `report_missed_reminders()` opened an alert without waking; it now wakes first,
+   matching `check_reminders()`.
+3. **Still open (measure first).** Raising `CONFIG_LV_DEF_REFR_PERIOD` from 20 ms
+   to 30–40 ms reduces refresh wakeups, but is only acceptable if animated screens
+   (identity animation, metronome) still look smooth. Needs an on-device
+   before/after comparison; not changed.
 
-### Stage 2 — low-power idle (moderate risk)
+### Stage 2 — low-power idle (moderate risk) — **DFS enabled, light sleep deferred**
 
-- Enable ESP-IDF power management with dynamic frequency scaling:
-  `CONFIG_PM_ENABLE`, `CONFIG_FREERTOS_USE_TICKLESS_IDLE`, and an appropriate
-  `esp_pm_configure()` frequency range for the C3. This lowers CPU frequency and
-  allows automatic light sleep between events.
-- Risks to resolve before adopting: interactions with the USB-Serial/JTAG
-  console (it can drop during light sleep), the SPI/DMA path, and the I2S audio
-  path. These must be validated on device, not assumed.
-- Consider `CONFIG_FREERTOS_HZ=1000 → 100`. Check every consumer of tick timing
-  (button debounce windows, `lv_tick` source, network timeouts) first; do not
-  change it speculatively.
+- **Enabled:** dynamic frequency scaling via `CONFIG_PM_ENABLE=y` and
+  `esp_pm_configure()` in [`main.c`](../../../main/main.c) with a 40–160 MHz
+  range and `light_sleep_enable = false`.
+- **Deferred:** automatic light sleep (`CONFIG_FREERTOS_USE_TICKLESS_IDLE`). It
+  changes the USB-Serial/JTAG console, the SPI/DMA path, and the I2S audio path,
+  and the plan requires these to be validated on device, not assumed. Turn it on
+  only after confirming on a real board: the USB console survives idle, the panel
+  refreshes without tearing, and playback/capture do not glitch.
+- **Still open:** `CONFIG_FREERTOS_HZ=1000 → 100`. Check every consumer of tick
+  timing (button debounce windows, `lv_tick` source, network timeouts) first; do
+  not change it speculatively.
 
 ### Stage 3 — real sleep (product decision)
 
