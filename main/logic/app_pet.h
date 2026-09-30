@@ -20,22 +20,69 @@
 #include <stdint.h>
 
 // 动作表。枚举值即动作 id，动作名字符串只用于调试与测试断言。
+//
+// 分四类便于挑选与维护：
+//   基础/日常 —— 站立与常见姿态；
+//   情绪表达 —— 喜怒哀乐，多半是非循环的一次性动作；
+//   手势/社交 —— 明确的"肢体对白"，读起来像在和用户说话；
+//   运动/舞蹈 —— 循环动作，幅度大、存在感强。
 typedef enum {
+    // 基础与日常
     APP_PET_ACT_IDLE = 0,   // 站着轻微呼吸（默认）
     APP_PET_ACT_LOOK,       // 左右张望
     APP_PET_ACT_WAVE,       // 挥手打招呼
     APP_PET_ACT_JUMP,       // 原地跳一下
-    APP_PET_ACT_DANCE,      // 摇摆舞（"跳鸡舞"）
     APP_PET_ACT_WALK,       // 原地踏步
-    APP_PET_ACT_SIT,        // 坐下
+    APP_PET_ACT_RUN,        // 原地小跑
+    APP_PET_ACT_SIT,        // 抱膝坐下
+    APP_PET_ACT_SQUAT,      // 下蹲起立
     APP_PET_ACT_SLEEP,      // 打盹
+    APP_PET_ACT_YAWN,       // 打哈欠
     APP_PET_ACT_STRETCH,    // 伸懒腰
-    APP_PET_ACT_THINK,      // 抱胸思考
+    APP_PET_ACT_PACE,       // 来回踱步
+    APP_PET_ACT_TIPTOE,     // 踮脚张望
+    APP_PET_ACT_TAP_FOOT,   // 抖腿（不耐烦）
+    // 情绪表达
+    APP_PET_ACT_THINK,      // 托腮思考
     APP_PET_ACT_CHEER,      // 欢呼
+    APP_PET_ACT_VICTORY,    // 双拳上举的胜利姿势
+    APP_PET_ACT_LAUGH,      // 捧腹大笑
+    APP_PET_ACT_CRY,        // 揉眼哭
+    APP_PET_ACT_ANGRY,      // 生气跺脚
     APP_PET_ACT_FACEPALM,   // 捂脸
-    APP_PET_ACT_DAB,        // dab
-    APP_PET_ACT_KICK,       // 踢腿
+    APP_PET_ACT_SIGH,       // 长叹一口气
+    APP_PET_ACT_SHRUG,      // 耸肩摊手
     APP_PET_ACT_SHAKE,      // 发抖
+    APP_PET_ACT_SNEEZE,     // 打喷嚏
+    APP_PET_ACT_HEAD_SHAKE, // 摇头
+    // 手势与社交
+    APP_PET_ACT_CLAP,       // 鼓掌
+    APP_PET_ACT_SALUTE,     // 敬礼
+    APP_PET_ACT_POINT,      // 抬手比划
+    APP_PET_ACT_BECKON,     // 招手叫过来
+    APP_PET_ACT_FLEX,       // 秀肌肉
+    APP_PET_ACT_ARMS_CROSSED, // 抱臂
+    APP_PET_ACT_HANDS_ON_HIPS, // 叉腰
+    APP_PET_ACT_PHONE,      // 打电话
+    APP_PET_ACT_DRINK,      // 喝水
+    APP_PET_ACT_KNOCK,      // 敲门
+    APP_PET_ACT_READ,       // 低头看书
+    APP_PET_ACT_WATCH,      // 抬手看表
+    // 舞蹈
+    APP_PET_ACT_DANCE,      // 摇摆舞（"跳鸡舞"）
+    APP_PET_ACT_DAB,        // dab
+    APP_PET_ACT_ROBOT,      // 机械舞
+    APP_PET_ACT_DISCO,      // 迪斯科指天
+    APP_PET_ACT_MOONWALK,   // 太空步
+    // 运动与格斗
+    APP_PET_ACT_JUMP_ROPE,  // 跳绳
+    APP_PET_ACT_JUMPING_JACK, // 开合跳
+    APP_PET_ACT_HULA,       // 扭胯
+    APP_PET_ACT_KICK,       // 踢腿
+    APP_PET_ACT_HIGH_KICK,  // 高位侧踢
+    APP_PET_ACT_PUNCH,      // 左右出拳
+    APP_PET_ACT_KARATE,     // 空手道劈掌
+    APP_PET_ACT_CRANE,      // 白鹤亮翅
     APP_PET_ACT_COUNT
 } app_pet_action_id_t;
 
@@ -62,9 +109,12 @@ typedef enum {
     APP_PET_EV_COUNT
 } app_pet_event_t;
 
-// 姿态：9 个绝对角度 + 根偏移。全部由关键帧插值得到。
+// 姿态：10 个绝对角度 + 根偏移。全部由关键帧插值得到。
+// head 是头部相对躯干方向的偏角：0 表示头随躯干（正常），正/负表示头向左右歪，
+// 用来表达"张望/歪头/低头"，这是没有五官的火柴人唯一能读出"在看"的通道。
 typedef struct {
     int16_t torso;
+    int16_t head;
     int16_t arm_l_up, arm_l_fore;
     int16_t arm_r_up, arm_r_fore;
     int16_t leg_l_thigh, leg_l_shin;
@@ -97,6 +147,7 @@ typedef struct {
     uint64_t action_dur_ms;    // 本次动作名义总时长（非循环动作按它判结束）
     uint64_t next_idle_ms;     // 下次自发随机动作的时刻
     uint64_t next_mischief_ms; // 捣乱模式下下次"冒头"的时刻
+    int      last_pick;        // 上一次自发选中的动作，用来避免连着做同一个动作
 
     const char *speech;          // 当前台词（静态字符串），可为 NULL
     uint64_t    speech_until_ms;
