@@ -25,6 +25,7 @@
 #include "esp_wifi.h"
 
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 
 #include "mbedtls/aes.h"
@@ -56,6 +57,18 @@ static volatile bool s_ble_connected;   // 手机是否已连上，决定要不�
 static bool s_bt_up;                    // BT 控制器与 NimBLE 主机是否已就绪
 static bool s_ctrl_up;                  // BT 控制器已 init+enable（失败回滚要用，见 app_ble_prov_start）
 static bool s_events_on;                // Wi-Fi 事件回调是否已注册
+
+// NimBLE / BLUFI 各阶段的就绪标志。拆停机时必须按"实际走到了哪一步"来决定释放什么：
+// 主机任务没起来的中间态直接调用 profile/btc deinit 会踩空指针，重启就是这么来的。
+static bool s_host_inited;              // esp_nimble_init 成功
+static bool s_host_running;             // 主机任务已启动，需要 nimble_port_stop 才能停
+static bool s_gatt_ready;               // BLUFI GATT 服务已注册
+static bool s_profile_ready;            // 主机 sync 后 BLUFI profile 已初始化
+static bool s_btc_ready;                // BLUFI BTC 任务已创建
+// nimble_port_stop() 是异步的：它只是往主机事件队列塞一个退出事件。必须等主机任务真正
+// 从 nimble_port_run() 返回后才能 nimble_port_deinit()，否则会一边销毁事件队列、一边还有
+// 主机任务在跑——这正是"用着用着直接闪退重启"的根因。
+static SemaphoreHandle_t s_host_stopped;
 
 // 手机下发的凭证先存这里，等对方发出"请求连接"再一次性交给 app_net，
 // 避免只收到 SSID 就急着重连。
@@ -489,14 +502,20 @@ static void nimble_on_sync(void)
 {
     // 主机就绪才能初始化 BLUFI profile，初始化完成会回调 INIT_FINISH 去开广播。
     esp_blufi_profile_init();
+    s_profile_ready = true;
 }
 
 static void nimble_host_task(void *arg)
 {
     (void)arg;
     nimble_port_run();   // 直到 nimble_port_stop() 才返回
+    // 先放行正在等待的停机方，再让端口层回收本任务。等待方收到信号后才敢销毁主机资源，
+    // 顺序反了就会在主机任务还在跑时拆掉事件队列。
+    if (s_host_stopped) xSemaphoreGive(s_host_stopped);
     nimble_port_freertos_deinit();
 }
+
+static void host_deinit(void);
 
 static esp_err_t host_init(void)
 {
@@ -504,6 +523,15 @@ static esp_err_t host_init(void)
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "NimBLE 初始化失败: %s", esp_err_to_name(err));
         return err;
+    }
+    s_host_inited = true;
+
+    s_host_stopped = xSemaphoreCreateBinary();
+    if (!s_host_stopped) {
+        ESP_LOGE(TAG, "停机信号量创建失败");
+        esp_nimble_deinit();
+        s_host_inited = false;
+        return ESP_ERR_NO_MEM;
     }
 
     ble_hs_cfg.reset_cb = nimble_on_reset;
@@ -515,37 +543,73 @@ static esp_err_t host_init(void)
     int rc = esp_blufi_gatt_svr_init();
     if (rc != 0) {
         ESP_LOGE(TAG, "BLUFI GATT 服务初始化失败: %d", rc);
-        return ESP_FAIL;
+        goto fail;
     }
+    s_gatt_ready = true;
 
     rc = ble_svc_gap_device_name_set(BLE_PROV_NAME);
     if (rc != 0) {
         ESP_LOGE(TAG, "设置设备名失败: %d", rc);
-        return ESP_FAIL;
+        goto fail;
     }
 
     ble_store_config_init();
     esp_blufi_btc_init();
+    s_btc_ready = true;
 
     err = esp_nimble_enable(nimble_host_task);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "启动 NimBLE 主机任务失败: %s", esp_err_to_name(err));
-        esp_blufi_btc_deinit();
-        esp_blufi_gatt_svr_deinit();
-        return err;
+        goto fail;
     }
+    s_host_running = true;
     return ESP_OK;
+
+fail:
+    // 失败点可能落在任意一步，按已置位的就绪标志逐层回滚，绝不能留下"主机在跑但没记录"
+    // 或"GATT 已注册但 BTC 未起"这种半拉子状态。
+    host_deinit();
+    return err != ESP_OK ? err : ESP_FAIL;
 }
 
 static void host_deinit(void)
 {
-    esp_blufi_gatt_svr_deinit();
-    if (nimble_port_stop() != 0) {
-        ESP_LOGW(TAG, "停止 NimBLE 主机失败");
+    // 顺序与 BLUFI 官方示例一致：先摘 GATT 服务，再停主机并等它真正退出，之后才能销毁
+    // 主机资源，最后才轮到 profile / BTC 任务。
+    if (s_gatt_ready) {
+        esp_blufi_gatt_svr_deinit();
+        s_gatt_ready = false;
     }
-    esp_nimble_deinit();
-    esp_blufi_profile_deinit();
-    esp_blufi_btc_deinit();
+
+    bool host_stopped = !s_host_running;
+    if (s_host_running) {
+        if (s_host_stopped && nimble_port_stop() == 0) {
+            // 阻塞等待主机任务从 nimble_port_run() 返回。不等待直接 deinit 就是重启根因。
+            xSemaphoreTake(s_host_stopped, portMAX_DELAY);
+            host_stopped = true;
+        } else {
+            ESP_LOGW(TAG, "停止 NimBLE 主机失败");
+        }
+        s_host_running = false;
+    }
+
+    if (host_stopped && s_host_inited) {
+        esp_nimble_deinit();
+        s_host_inited = false;
+    }
+
+    if (s_profile_ready) {
+        esp_blufi_profile_deinit();
+        s_profile_ready = false;
+    }
+    if (s_btc_ready) {
+        esp_blufi_btc_deinit();
+        s_btc_ready = false;
+    }
+    if (s_host_stopped) {
+        vSemaphoreDelete(s_host_stopped);
+        s_host_stopped = NULL;
+    }
 }
 
 // ---------------------------------------------------------------------------

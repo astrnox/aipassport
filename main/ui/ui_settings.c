@@ -24,9 +24,11 @@
 #include "net/app_blufi.h"
 #include "net/app_net.h"
 
+#include "bsp_audio.h"
 #include "bsp_display.h"
 
 #include "esp_log.h"
+#include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -431,6 +433,11 @@ static void manual_time_open(void)
 static void prov_start_task(void *arg)
 {
     (void)arg;
+    // 热点 + httpd 需要一块较大的连续内存，而无 PSRAM 的 C3 上音频子系统
+    // (I2S DMA + ES8311 对象)从开机起就常驻，是最大的一块可再生占用。先把它还给
+    // 系统堆再拉热点；提示音/节拍器下次发声时由 bsp_audio_set_format() 按需重建，
+    // 用户感知不到。这是"清理内存"真正能回收的那部分，避免配网反复报内存不足。
+    bsp_audio_deinit();
     esp_err_t err = app_net_prov_start();
     // 任务启动期间用户关了浮层：把刚开起来的热点收掉。取消优先，覆盖启动结果。
     if (s_prov_cancel) {
@@ -717,7 +724,9 @@ static void ble_open(void)
         s_ble_busy = true;
         s_ble_cancel = false;
         s_ble_err = 0;
-        if (xTaskCreate(ble_start_task, "ble_start", 4096, NULL, 5, NULL) != pdPASS) {
+        // 启动任务里要依次初始化 BT 控制器、Wi-Fi 射频和 NimBLE/BLUFI 协议栈，4KB 栈不
+        // 够用会直接栈溢出复位。与重试路径统一用 6144，避免"首次进入闪退、重试反而能起"。
+        if (xTaskCreate(ble_start_task, "ble_start", 6144, NULL, 5, NULL) != pdPASS) {
             s_ble_busy = false;
             s_ble_err = (int)ESP_ERR_NO_MEM;
         }
@@ -890,8 +899,16 @@ static void activate(void)
         if (!app_net_has_credentials()) {
             ui_hint_flash("未配置 Wi-Fi，先开启热点配网", 1800);
         } else if (!app_net_wifi_connected()) {
-            if (app_net_wifi_start() == ESP_OK) ui_hint_flash("正在连接 Wi-Fi…", 1500);
-            else ui_hint_flash("Wi-Fi 启动失败", 1500);
+            // 无 PSRAM 的 C3 上，Wi-Fi 射频初始化要一块较大的连续内存；音频子系统
+            // (I2S DMA + ES8311 对象)从开机起常驻、多数时间空闲，是最大的一块可再生占用。
+            // 不先归还它时 esp_wifi_start() 常因连续块不足报内存错误，界面只能显示
+            // "Wi-Fi 启动失败"。与热点配网同源处理：先释放音频再拉射频；音频下次发声时
+            // 由 bsp_audio_set_format() 按需重建，用户感知不到。
+            bsp_audio_deinit();
+            esp_err_t werr = app_net_wifi_start();
+            if (werr == ESP_OK) ui_hint_flash("正在连接 Wi-Fi…", 1500);
+            else if (werr == ESP_ERR_NO_MEM) ui_hint_flash("设备内存不足，请先清理内存后重试", 1800);
+            else ui_hint_flash("Wi-Fi 启动失败，请重试", 1500);
         } else {
             ui_hint_flash("已连接到 Wi-Fi", 1200);
         }
@@ -1074,6 +1091,12 @@ void page_settings_key(bsp_btn_t btn, bsp_btn_ev_t ev)
                 ui_hint_flash("正在开启热点，请稍候…", 1500);
             } else {
                 size_t freed = app_net_prov_reclaim_memory();
+                // 音频子系统才是这里真正能回收的大块内存；释放后由
+                // bsp_audio_set_format() 在下次发声时按需重建。把它计入提示字节数，
+                // "清理内存"显示的就是真实回收量，而不是原来的 +0 字节。
+                uint32_t before = esp_get_free_heap_size();
+                bsp_audio_deinit();
+                freed += (size_t)(esp_get_free_heap_size() - before);
                 prov_kick_off();
                 prov_refresh();
                 char msg[64];

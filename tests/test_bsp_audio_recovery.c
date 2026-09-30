@@ -366,6 +366,14 @@ int main(void) {
     assert(bsp_audio_init() == ESP_OK);
     assert(bsp_audio_set_format(16000, 16, 1) == ESP_OK);
     assert_active();
+    // 配网前释放音频内存：deinit 必须真正丢弃全部句柄并停掉两条 I2S；释放是幂等的，
+    // 且下一次设置采样格式能按需重建，提示音/节拍器无需手动恢复。
+    assert(bsp_audio_deinit() == ESP_OK);
+    assert(!s_initialized && !s_dev && !s_codec && !s_ctrl && !s_data && !s_gpio);
+    assert(!s_tx && !s_rx && !tx_channel.running && !rx_channel.running);
+    assert(bsp_audio_deinit() == ESP_OK);
+    assert(bsp_audio_set_format(16000, 16, 1) == ESP_OK);
+    assert_active();
     // Failure to release a dependency reference is distinct from an I2C fault:
     // public delete has freed the object, so fail closed until reboot instead of
     // constructing against an uncertain reference count and reporting success.

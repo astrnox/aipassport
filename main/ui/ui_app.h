@@ -25,6 +25,11 @@ typedef struct {
 // 创建主页、启动 1 秒全局节拍。必须在 bsp_lvgl_init() 之后调用一次（持锁）。
 void ui_app_start(void);
 
+// 把持久化设置真正落到硬件与全局状态上：主题、屏幕亮度、音量。开机调一次，每次重建
+// 主页前再调一次——设置页/快捷面板只负责写值，否则会出现"改了亮度，重启就回到 100%"
+// 和"切换主题提示返回后生效，却一直没变"这类设置不全局的问题。要求持 LVGL 锁。
+void ui_app_apply_settings(void);
+
 // 由输入任务调用：分发按键、处理熄屏唤醒。内部自行加解锁。
 void ui_app_handle_key(bsp_btn_t btn, bsp_btn_ev_t ev);
 

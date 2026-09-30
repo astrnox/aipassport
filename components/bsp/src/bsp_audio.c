@@ -430,8 +430,35 @@ fail:
     return e;
 }
 
+// 释放音频子系统占用的全部资源(codec 对象、接口对象、I2S channel 与 DMA 缓冲)，
+// 把内存还给系统堆。无 PSRAM 的 C3 上，热点配网/HTTP 服务需要一块较大的连续内存，
+// 而音频从开机起就常驻且多数时间空闲，是最大的一块可再生占用，所以配网前先把它放掉。
+//
+// 与休眠接口同一约定：调用前必须停止所有 PCM 读写。函数幂等，未初始化或已释放时
+// 直接成功。释放不是终态——下一次设置采样格式时会在内部按需重建，调用方无需手动恢复。
+esp_err_t bsp_audio_deinit(void)
+{
+    if (!s_initialized && !s_tx && !s_rx && !s_ctrl && !s_data && !s_codec && !s_gpio) {
+        return ESP_OK;
+    }
+
+    s_io_error = ESP_CODEC_DEV_OK;
+    // 先在硬件层面进入低功耗，避免只删对象时 I2S 仍在输出、产生爆音。
+    if (s_ctrl) (void)es8311_force_sleep();
+    audio_cleanup();
+
+    // 释放前后的堆/最大连续块由 app_net 的配网阶段日志统一记录，这里只报告动作本身。
+    ESP_LOGI(TAG, "音频子系统已释放，内存已还给系统堆");
+    return ESP_OK;
+}
+
 esp_err_t bsp_audio_set_format(uint32_t hz, uint8_t bits, uint8_t ch) {
-    if (!s_initialized) return ESP_ERR_INVALID_STATE;
+    // 音频可能已被 bsp_audio_deinit() 主动释放过内存(例如热点配网前)；这里按需重建，
+    // 提示音/节拍器等调用方无需关心音频当前是否已初始化。
+    if (!s_initialized) {
+        esp_err_t init_err = bsp_audio_init();
+        if (init_err != ESP_OK) return init_err;
+    }
     if (s_sleeping) return ESP_ERR_INVALID_STATE;
     if (s_opened && s_hz == hz && s_bits == bits && s_ch == ch) return ESP_OK;   // 同格式复用
 
