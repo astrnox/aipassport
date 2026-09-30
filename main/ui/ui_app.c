@@ -162,6 +162,32 @@ void ui_app_refresh_home(void)
 // 导航
 // ---------------------------------------------------------------------------
 
+// 设置页与快捷面板只把新值写进 NVS，真正"全局生效"落在这一处：主题调色板、屏幕
+// 亮度、音量。开机与每次重建主页都会调用，因此改完设置重启或返回主页后都一致。
+void ui_app_apply_settings(void)
+{
+    app_settings_t *st = app_state_settings();
+
+    // 主题：固定明/暗直接用，自动档按当前本地小时判断。页面配色是构建时从调色板取的，
+    // 所以调用方必须紧接着重建页面（见 ui_app_go_home 与快捷面板关闭处）。
+    if (st->theme == APP_THEME_FIXED_LIGHT) {
+        ui_theme_set(UI_THEME_LIGHT);
+    } else if (st->theme == APP_THEME_AUTO) {
+        ui_theme_apply_auto(true, app_state_now().hour);
+    } else {
+        ui_theme_set(UI_THEME_DARK);
+    }
+
+    // 亮度：越界值（损坏或旧版本的 blob）回落到全亮——屏幕是唯一界面载体，
+    // 存成 0 会让人以为设备坏了。正常值域是 10..100。
+    uint8_t bl = st->backlight;
+    if (bl < 10 || bl > 100) bl = 100;
+    bsp_display_backlight(bl);
+
+    // 静音/音量平时由每次发声前应用，这里开机也落一次，保证第一条提示音就守设置。
+    ui_sound_apply_volume();
+}
+
 static void teardown_current(void)
 {
     // 弹层挂在当前页面的屏幕上，页面屏幕删除前必须先收掉，否则 s_alert 会留下悬空指针。
@@ -182,6 +208,8 @@ void ui_app_go_home(void)
 {
     if (s_current < 0) return;
     teardown_current();
+    // 重建主页之前先应用设置：设置页里改过的主题与亮度在这一刻才真正生效。
+    ui_app_apply_settings();
     page_home_enter();
     ui_app_refresh_status();
 }
@@ -486,6 +514,10 @@ void ui_app_start(void)
     if (s_started) return;
     s_started = true;
 
+    // 开机先按设置落主题与亮度，再建主页：主页是第一个可见页面，必须一开始就是
+    // 用户设置的样子（以前亮度固定 100%，重启后设置就丢了）。
+    ui_app_apply_settings();
+
     page_home_enter();
     ui_app_refresh_status();
 
@@ -527,7 +559,16 @@ void ui_app_handle_key(bsp_btn_t btn, bsp_btn_ev_t ev)
         return;
     }
     if (home_quick_active()) {
+        app_theme_choice_t theme_before = app_state_settings()->theme;
         home_quick_key(btn, ev);
+        // 快捷面板挂在主页上，切主题只写了设置值；面板关掉后必须重建主页才会出现新
+        // 配色——面板不是页面，主页不会自己重建，"返回后生效"就永远等不到。
+        if (!home_quick_active() && app_state_settings()->theme != theme_before) {
+            ui_app_apply_settings();
+            page_home_exit();
+            page_home_enter();
+            ui_app_refresh_status();
+        }
         bsp_lvgl_unlock();
         return;
     }

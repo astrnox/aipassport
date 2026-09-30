@@ -92,25 +92,8 @@ static void vault_random(void *ctx, void *out, size_t len)
     esp_fill_random(out, len);
 }
 
-// 按设置决定开机主题：固定明/暗直接用，自动模式按本地时段判断。
-static void apply_theme(void)
-{
-    app_settings_t *st = app_state_settings();
-    switch (st->theme) {
-    case APP_THEME_FIXED_LIGHT:
-        ui_theme_set(UI_THEME_LIGHT);
-        break;
-    case APP_THEME_AUTO: {
-        app_datetime_t now = app_state_now();
-        ui_theme_apply_auto(true, now.hour);
-        break;
-    }
-    case APP_THEME_FIXED_DARK:
-    default:
-        ui_theme_set(UI_THEME_DARK);
-        break;
-    }
-}
+// 主题、亮度、音量这些持久化设置统一由 ui_app_apply_settings() 落到硬件上（开机与
+// 返回主页各一次），入口这里不再自己拼一份，避免两处实现走偏。
 
 void app_main(void)
 {
@@ -195,7 +178,6 @@ void app_main(void)
 
     if (bsp_lvgl_lock(1000)) {
         ui_fonts_init();
-        apply_theme();
         ui_app_start();
         bsp_lvgl_unlock();
         s_input_ready = true;
