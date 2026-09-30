@@ -56,3 +56,9 @@
 - Updated software-design and project README references for the new documentation structure.
 - Added the documentation catalog and task-triggered routing based on the earlier repository model.
 - Added bilingual contribution, code-of-conduct, security, and support documents tailored to this ESP-IDF and fork workflow.
+
+## v1.1.0-passport-toolbox - 2026-09-30
+
+- Added a stick-figure desktop pet on the home screen and deepened passive beacon/tracker detection in the finder.
+- Expanded the desktop pet's stick-figure action library and smoothed its motion.
+- Restored Bluetooth and Wi-Fi availability on ESP32-C3.
