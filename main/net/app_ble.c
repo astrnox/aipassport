@@ -74,6 +74,11 @@ static ble_mode_t s_mode = BLE_MODE_IDLE;
 static bool s_stack_up;              // BT 控制器 + NimBLE 主机是否已拉起
 static uint8_t s_own_addr_type;
 
+// nimble_port_stop() 是异步的：它只往主机事件队列塞一个退出事件。必须等主机任务真正从
+// nimble_port_run() 返回后，才能 deinit 主机资源、关 BT 控制器；否则就是"一边拆事件队列
+// 一边还有主机任务在跑"，会直接崩溃复位（与 app_blufi 的同名修复同源）。
+static SemaphoreHandle_t s_host_stopped;
+
 static SemaphoreHandle_t s_lock;     // 保护 s_finder（扫描回调 vs 界面快照）
 static bool s_lock_ready;
 static portMUX_TYPE s_init_mux = portMUX_INITIALIZER_UNLOCKED;
@@ -498,6 +503,9 @@ static void host_task(void *arg)
 {
     (void)arg;
     nimble_port_run();          // 直到 nimble_port_stop() 才返回
+    // 先放行正在等待的停机方，再让端口层回收本任务：等待方收到信号后才敢 deinit 主机资源，
+    // 顺序反了就会在主机任务还在跑时拆掉事件队列。
+    if (s_host_stopped) xSemaphoreGive(s_host_stopped);
     nimble_port_freertos_deinit();
 }
 
@@ -602,6 +610,15 @@ static esp_err_t stack_up(void)
 
     ble_store_config_init();
 
+    // 停机信号量必须在启动主机之前建好：主机任务一旦跑起来就可能随时需要它来同步退出。
+    if (!s_host_stopped) {
+        s_host_stopped = xSemaphoreCreateBinary();
+        if (!s_host_stopped) {
+            ESP_LOGE(TAG, "停机信号量创建失败");
+            goto fail;
+        }
+    }
+
     err = esp_nimble_enable(host_task);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "启动 NimBLE 主机任务失败: %s", esp_err_to_name(err));
@@ -615,16 +632,33 @@ fail:
     esp_nimble_deinit();
     esp_bt_controller_disable();
     esp_bt_controller_deinit();
+    if (s_host_stopped) {
+        vSemaphoreDelete(s_host_stopped);
+        s_host_stopped = NULL;
+    }
     return ESP_FAIL;
 }
 
 static void stack_down(void)
 {
     if (!s_stack_up) return;
-    if (nimble_port_stop() != 0) ESP_LOGW(TAG, "停止 NimBLE 主机失败");
-    esp_nimble_deinit();
+
+    // 等主机任务真正退出后才能 deinit 主机并关控制器（见 s_host_stopped 的说明）。
+    bool stopped = false;
+    if (s_host_stopped && nimble_port_stop() == 0) {
+        xSemaphoreTake(s_host_stopped, portMAX_DELAY);
+        stopped = true;
+    } else {
+        ESP_LOGW(TAG, "停止 NimBLE 主机失败");
+    }
+
+    if (stopped) esp_nimble_deinit();
     esp_bt_controller_disable();
     esp_bt_controller_deinit();
+    if (s_host_stopped) {
+        vSemaphoreDelete(s_host_stopped);
+        s_host_stopped = NULL;
+    }
     s_stack_up = false;
 }
 
@@ -873,7 +907,9 @@ static void ensure_ctrl(void)
     if (s_req_q) return;
     s_req_q = xQueueCreate(8, sizeof(ble_req_t));
     if (!s_req_q) return;
-    if (xTaskCreate(ble_ctrl_task, "ble_ctrl", 4096, NULL, 5, &s_req_task) != pdPASS) {
+    // worker 里要拉起整套 BT 控制器 + NimBLE 主机（与蓝牙配网同一批调用），4KB 栈不够用
+    // 会直接栈溢出复位——用户看到的就是"找设备一打开就闪退"。与配网启动任务统一用 6144。
+    if (xTaskCreate(ble_ctrl_task, "ble_ctrl", 6144, NULL, 5, &s_req_task) != pdPASS) {
         vQueueDelete(s_req_q);
         s_req_q = NULL;
     }

@@ -10,7 +10,15 @@
 // 失败会释放本次已创建的 codec 接口和 I2S channel，修正故障后可重试。
 esp_err_t bsp_audio_init(void);
 
-// 设置采样格式。同格式重复调用是廉价的(直接复用已打开的 codec)。
+// 释放音频子系统占用的全部资源(codec 对象、接口对象、I2S channel 与 DMA 缓冲),
+// 把内存还给系统堆。无 PSRAM 的 C3 上，热点配网/HTTP 服务需要一块较大的连续内存，
+// 此接口用于在拉热点前放掉这份常驻占用。函数幂等，未初始化时直接成功。
+// 释放后 bsp_audio_set_format() 会在下次发声/录音时按需重建，调用方无需手动恢复。
+// 与 bsp_audio_sleep() 同一约定：调用前必须停止所有 PCM 读写。
+esp_err_t bsp_audio_deinit(void);
+
+// 设置采样格式。同格式重复调用是廉价的(直接复用已打开的 codec)。未初始化时会先
+// 调用 bsp_audio_init() 按需重建，因此 bsp_audio_deinit() 之后无需手动重新初始化。
 //
 // ⚠ 这里有个必须绕开的坑:esp_codec_dev_open() 在 codec【已打开】时会直接返回 OK 且
 //   【不重新配置采样率】。若不先 close,16kHz 播完再播 8kHz 会以 16k 时钟送出 ——
