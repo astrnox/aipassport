@@ -132,7 +132,7 @@ static void build_consent(void)
         lv_label_set_long_mode(lbl, LV_LABEL_LONG_WRAP);
     }
 
-    ui_page_set_hint("OK 我已知晓并授权    长按OK 返回主页");
+    ui_page_set_hint("OK 我已知晓并授权    长按OK 返回");
 }
 
 // ---------------------------------------------------------------------------

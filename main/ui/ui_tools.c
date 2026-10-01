@@ -38,7 +38,7 @@ typedef enum {
 } tool_t;
 
 static const char *const TOOL_NAMES[TOOL_COUNT] = {
-    "动态口令", "密码本", "找设备", "万能遥控", "信道体检", "节拍器", "BLE 实验", "BLE 检测", "WiFi 实验",
+    "动态口令", "密码本", "找设备", "万能遥控", "信道体检", "节拍器", "BLE 实验", "BLE 检测", "Wi-Fi 实验",
 };
 
 // 右侧一句话说明：普通用户先看懂"这能干嘛"，再决定要不要打开。
