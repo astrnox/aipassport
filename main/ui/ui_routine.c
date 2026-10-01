@@ -7,9 +7,9 @@
 //   设置  套用走读/住校模板、清空今日或全部，以及从手机配置页导入的入口说明
 //
 // 按键（与全局约定一致）：
-//   短按 UP/DOWN  今日=滚动时间轴  一周=选择星期  设置=选择条目
-//   短按 OK       今日=定位当前节点 一周=读出该天概要 设置=执行选中项
-//   长按 UP       今日=刷新  一周=刷新  设置=执行选中项
+//   短按 UP/DOWN  今日=滚动时间轴  一周=选择星期  编辑=选择条目  设置=选择条目
+//   短按 OK       今日=看所选节点的时间段（再按切回倒计时）  一周=读出该天概要  编辑=换天/编辑  设置=执行选中项
+//   长按 UP       今日=定位当前节点  一周=刷新  编辑=删除  设置=执行选中项
 //   长按 DOWN     切换标签页
 //   长按 OK       返回主页
 //
@@ -78,6 +78,7 @@ static struct {
     ui_row_t  nodes[APP_ROUTINE_MAX_NODES];
     int       node_count;
     int       focus;          // -1 表示"自动定位到当前节点"
+    int       pin;            // 0=左下角显示"距下一节"倒计时；n>0 表示显示第 n-1 个节点的时间段
     int       built_weekday;  // 已构建的星期，跨天时重建
 
     // 一周
@@ -157,40 +158,60 @@ static void render_countdown(void)
     app_routine_status(&*day, now.hour * 60 + now.minute, now.second, &st);
     char cd[16];
 
-    if (st.pos == APP_ROUTINE_IN_NODE && st.current_index >= 0) {
-        const app_routine_node_t *cur = &day->nodes[st.current_index];
+    // 左下角（提示行的下一行）：默认显示"离下一节开始还有多久"，按 OK 后改为显示
+    // 所选节点的时间段。两种内容都写在这一行里，位置不跳。
+    // 64 字节：最坏情况"距"+最长节点名(23)+空格+最长倒计时(23)+NUL 约 51 字节，
+    // 48 会被编译器判为可能截断（-Werror=format-truncation）。
+    char sub[64];
+    sub[0] = '\0';
+    if (s.pin > 0 && s.pin <= day->count) {
+        const app_routine_node_t *p = &day->nodes[s.pin - 1];
         char t1[8], t2[8];
-        app_fmt_hhmm(t1, sizeof(t1), cur->start_min);
-        app_fmt_hhmm(t2, sizeof(t2), cur->end_min);
-        if (st.next_index >= 0) {
-            char title[40];
-            snprintf(title, sizeof(title), "距离%s", day->nodes[st.next_index].name);
-            lv_label_set_text(s.cd_title, title);
-            app_fmt_countdown(cd, sizeof(cd), st.seconds_to_next);
-        } else {
-            lv_label_set_text(s.cd_title, "距离本节结束");
-            app_fmt_countdown(cd, sizeof(cd), st.seconds_to_end);
-        }
+        app_fmt_hhmm(t1, sizeof(t1), p->start_min);
+        app_fmt_hhmm(t2, sizeof(t2), p->end_min);
+        snprintf(sub, sizeof(sub), "%s-%s %s", t1, t2, p->name);
+    }
+
+    if (st.pos == APP_ROUTINE_IN_NODE && st.current_index >= 0) {
+        // 大字始终回答"本节还剩多久"：上课时用户最关心的是还有多久下课，
+        // 而不是离下一节还有多久。
+        const app_routine_node_t *cur = &day->nodes[st.current_index];
+        char title[40];
+        snprintf(title, sizeof(title), "%s 剩余", cur->name);
+        lv_label_set_text(s.cd_title, title);
+        app_fmt_countdown(cd, sizeof(cd), st.seconds_to_end);
         lv_label_set_text(s.cd_value, cd);
-        char sub[48];
-        snprintf(sub, sizeof(sub), "%s %s - %s", cur->name, t1, t2);
+        if (sub[0] == '\0') {
+            if (st.next_index >= 0) {
+                char nx[24];
+                app_fmt_countdown(nx, sizeof(nx), st.seconds_to_next);
+                snprintf(sub, sizeof(sub), "距%s %s", day->nodes[st.next_index].name, nx);
+            } else {
+                char t2[8];
+                app_fmt_hhmm(t2, sizeof(t2), cur->end_min);
+                snprintf(sub, sizeof(sub), "%s 放学", t2);
+            }
+        }
         lv_label_set_text(s.cd_sub, sub);
     } else if (st.pos == APP_ROUTINE_BETWEEN && st.next_index >= 0) {
+        // 空档期：大字回答"离下一节还有多久"，左下角给出下一节的时间段。
         const app_routine_node_t *nx = &day->nodes[st.next_index];
         char title[40];
-        snprintf(title, sizeof(title), "距离%s", nx->name);
+        snprintf(title, sizeof(title), "距%s", nx->name);
         lv_label_set_text(s.cd_title, title);
         app_fmt_countdown(cd, sizeof(cd), st.seconds_to_next);
         lv_label_set_text(s.cd_value, cd);
-        char sub[48];
-        char t1[8];
-        app_fmt_hhmm(t1, sizeof(t1), nx->start_min);
-        snprintf(sub, sizeof(sub), "下一个 %s %s", nx->name, t1);
+        if (sub[0] == '\0') {
+            char t1[8], t2[8];
+            app_fmt_hhmm(t1, sizeof(t1), nx->start_min);
+            app_fmt_hhmm(t2, sizeof(t2), nx->end_min);
+            snprintf(sub, sizeof(sub), "%s-%s %s", t1, t2, nx->name);
+        }
         lv_label_set_text(s.cd_sub, sub);
     } else {
         lv_label_set_text(s.cd_title, "今日作息已结束");
         lv_label_set_text(s.cd_value, "--:--");
-        lv_label_set_text(s.cd_sub, "好好休息，明天见");
+        lv_label_set_text(s.cd_sub, sub[0] ? sub : "好好休息，明天见");
     }
 }
 
@@ -253,6 +274,11 @@ static void today_focus(int index)
         ui_row_set_selected(s.nodes[i], i == index);
     }
     ui_scroll_into_view(s.nodes[index].obj);
+    // 焦点在第一行时补一次"滚到最顶"：scroll_into_view 只保证该行可见，顶部的倒计时
+    // 卡片仍会被裁掉，用户按 ↑ 到 0 就再也上不去，看不到"还剩多久"。
+    if (index == 0 && s.page.content) {
+        lv_obj_scroll_to_y(s.page.content, 0, LV_ANIM_OFF);
+    }
 }
 
 // 今日视图没有节点时（空状态）没有可选行，↑↓ 改为滚动内容：空状态说明比可见区高，
@@ -326,9 +352,10 @@ static void build_today(void)
         s.nodes[i] = ui_row_create(s.today_list, "", "");
     }
     if (s.focus < 0) s.focus = current_node_index(day);
+    if (s.pin > s.node_count) s.pin = 0;
     render_today_rows();
     today_focus(s.focus);
-    ui_page_set_hint("↑↓ 滚动  OK 定位当前  长按↓ 换页  长按OK 返回");
+    ui_page_set_hint("↑↓ 选择  OK 看该节时间  长按↑ 定位  长按↓ 换页  长按OK 返回");
 }
 
 // ---------------------------------------------------------------------------
@@ -365,6 +392,7 @@ static void week_select(int index)
         ui_row_set_selected(s.week[i], i == index);
     }
     ui_scroll_into_view(s.week[index].obj);
+    if (index == 0 && s.page.content) lv_obj_scroll_to_y(s.page.content, 0, LV_ANIM_OFF);
 }
 
 static void build_week(void)
@@ -399,6 +427,7 @@ static void opt_select(int index)
         ui_row_set_selected(s.opts[i], i == index);
     }
     ui_scroll_into_view(s.opts[index].obj);
+    if (index == 0 && s.page.content) lv_obj_scroll_to_y(s.page.content, 0, LV_ANIM_OFF);
 }
 
 static void opt_refresh(void)
@@ -457,6 +486,7 @@ static void edit_select(int index)
         ui_row_set_selected(s.edit_rows[i], i == index);
     }
     ui_scroll_into_view(s.edit_rows[index].obj);
+    if (index == 0 && s.page.content) lv_obj_scroll_to_y(s.page.content, 0, LV_ANIM_OFF);
 }
 
 static void build_edit(void)
@@ -776,8 +806,12 @@ void page_routine_key(bsp_btn_t btn, bsp_btn_ev_t ev)
                 apply_template(false);
             } else {
                 s.focus = current_node_index(day);
+                // 定位回"当前节点"意味着回到实时视图：左下角也随之恢复默认的
+                // "距下一节倒计时"，否则会继续停在上一次 OK 钉住的节点时间上。
+                s.pin = 0;
                 render_today_rows();
                 today_focus(s.focus);
+                render_countdown();
                 flash_located();
             }
             return;
@@ -800,10 +834,16 @@ void page_routine_key(bsp_btn_t btn, bsp_btn_ev_t ev)
                 ui_hint_flash("今日无作息，长按↑ 套用模板", 1800);
                 return;
             }
-            s.focus = current_node_index(day);
-            render_today_rows();
-            today_focus(s.focus);
-            flash_located();
+            // OK 不再把光标拽回"当前节点"（那样永远选不到别的节），而是把左下角的
+            // "距下一节倒计时"换成所选节点的时间段；再按一次恢复。定位当前节点仍是长按↑。
+            if (s.pin == s.focus + 1) {
+                s.pin = 0;
+                ui_hint_flash("已恢复下一节倒计时", 1400);
+            } else {
+                s.pin = s.focus + 1;
+                ui_hint_flash("已显示该节时间，再按恢复倒计时", 1800);
+            }
+            render_countdown();
         }
         return;
     }

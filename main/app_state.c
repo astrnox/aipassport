@@ -8,6 +8,8 @@
 // 时间约定：设备没有 RTC 电池，重启后时钟会丢失。这里用"单调时钟 + 基准偏移"表达
 // 墙钟：epoch_base 是 uptime 为 0 时对应的 Unix 秒。重启后从 NVS 恢复上次已知时间，
 // 但标记为未同步，直到 NTP 或手机/手动再次校准，避免把过期时间伪装成已同步。
+// 重启后的误差等于"上次落盘到断电"的时长，所以运行期由 ui_app 的 1 秒节拍每分钟调用
+// app_state_save_clock() 落盘一次，把误差压到一分钟以内；联网时开机还会自动校时一次。
 //
 // 密钥约定：动态口令的密钥必须在开机后自动可用（用户不可能每次开机先解一次锁），
 // 因此不能像密码本那样用口令加密，只能用"设备绑定"：eFuse MAC 与本机随机种子一起喂进
@@ -504,9 +506,17 @@ void app_state_set_time(const app_datetime_t *dt, const char *source)
             sizeof(s.settings.time_source) - 1);
     s.settings.time_source[sizeof(s.settings.time_source) - 1] = '\0';
 
-    int64_t stored = s.epoch_base + uptime_seconds();
-    blob_save("clock", &stored, sizeof(stored));
+    app_state_save_clock();
     app_state_save_settings();
+}
+
+bool app_state_save_clock(void)
+{
+    if (!app_state_time_known()) return false;
+
+    int64_t stored = s.epoch_base + uptime_seconds();
+    if (stored <= DEFAULT_EPOCH) return false;
+    return blob_save("clock", &stored, sizeof(stored)) == ESP_OK;
 }
 
 // ---------------------------------------------------------------------------

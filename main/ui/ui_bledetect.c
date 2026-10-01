@@ -39,12 +39,14 @@ static struct {
     ui_page_t page;
 
     app_finder_t snap;        // 最近的 finder 快照，喂分类器用（约 1KB，放静态区）
+    app_bledetect_report_t rep;  // 最近一次分类报告，渲染与指纹都基于它
 
     lv_obj_t *verdict_lbl;    // 主导判定（大字）
     lv_obj_t *counts_lbl;     // 计数行
     ui_row_t  rows[APP_BLEDETECT_EG_MAX];  // 样例地址列表行
 
     uint32_t  last_ms;
+    uint32_t  sig;            // 上次渲染时的报告指纹，用于避免每拍重建
 } s;
 
 static void feed_classifier(void)
@@ -71,9 +73,48 @@ static void feed_classifier(void)
     }
 }
 
+// 渲染结果指纹：把"会显示在屏幕上的东西"揉成一个整数。只有它变了才重建页面——
+// 以前每 800ms 无脑重建，每次都把滚动位置拉回顶部，用户按 ↑↓ 根本滚不动。
+static uint32_t report_sig(void)
+{
+    uint32_t h = 2166136261u;
+    const int fields[] = { (int)s.rep.verdict, s.rep.total_advertisers,
+                           s.rep.apple_continuity_spam, s.rep.airtag, s.rep.other,
+                           s.rep.example_count,
+                           (int)app_ble_finder_last_error() != ESP_OK,
+                           (int)app_ble_finder_running() };
+    for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); i++) {
+        h = (h ^ (uint32_t)fields[i]) * 16777619u;
+    }
+    for (int i = 0; i < s.rep.example_count; i++) {
+        for (int b = 0; b < 6; b++) h = (h ^ s.rep.eg_addr[i][b]) * 16777619u;
+        h = (h ^ s.rep.eg_kind[i]) * 16777619u;
+    }
+    return h;
+}
+
+// 每拍都收最新快照并喂分类器（滑动窗口才会随时间回落），返回本次报告指纹。
+static uint32_t poll_report(void)
+{
+    app_ble_finder_snapshot(&s.snap);
+    feed_classifier();
+    app_bledetect_report(&s.rep);
+    return report_sig();
+}
+
+// 内容上下滚动。三键设备没有触摸和手势，短按 ↑↓ 是唯一的滚动途径
+// （本页没有可选行，短按不会被选择动作占用）。
+static void scroll_content(int dy)
+{
+    if (s.page.content) lv_obj_scroll_by(s.page.content, 0, dy, LV_ANIM_OFF);
+}
+
 static void build_page(void)
 {
     lv_obj_t *c = s.page.content;
+    // 监听中报告会随附近设备进出生效而频繁刷新（每 800ms 一次），重建时若不保住滚动
+    // 位置，用户刚滚下去看样例列表就会被下一次重建拽回顶部——正是"按键滚不动"的观感。
+    int keep_y = c ? lv_obj_get_scroll_y(c) : 0;
     lv_obj_clean(c);
     memset(s.rows, 0, sizeof(s.rows));
     s.verdict_lbl = NULL;
@@ -84,17 +125,13 @@ static void build_page(void)
     // 被动声明：本页不发射任何广播，放在最显眼处，避免被误认为攻击工具。
     ui_banner_create(c, "被动监听，不发送任何广播", ui_c_ok());
 
-    // 先收最新快照并喂分类器，再渲染报告——保证判定与当前屏幕同步。
-    app_ble_finder_snapshot(&s.snap);
-    feed_classifier();
+    // 报告由 poll_report() 在本函数之前刷新，渲染与判定保持同一拍。
+    const app_bledetect_report_t *rep = &s.rep;
 
-    app_bledetect_report_t rep;
-    app_bledetect_report(&rep);
-
-    uint32_t vcol = (rep.verdict == APP_BLEDETECT_SPAM)   ? ui_c_warn()
-                  : (rep.verdict == APP_BLEDETECT_AIRTAG) ? ui_c_accent()
+    uint32_t vcol = (rep->verdict == APP_BLEDETECT_SPAM)   ? ui_c_warn()
+                  : (rep->verdict == APP_BLEDETECT_AIRTAG) ? ui_c_accent()
                   : ui_c_ok();
-    s.verdict_lbl = ui_label_create(c, app_bledetect_verdict_text(rep.verdict),
+    s.verdict_lbl = ui_label_create(c, app_bledetect_verdict_text(rep->verdict),
                                     ui_font_title, vcol);
     if (s.verdict_lbl) {
         lv_obj_set_width(s.verdict_lbl, BD_CW);
@@ -104,22 +141,22 @@ static void build_page(void)
     char counts[128];
     snprintf(counts, sizeof(counts),
              "广播源 %d · 疑似轰炸 %d · AirTag %d · 其它 %d",
-             rep.total_advertisers, rep.apple_continuity_spam,
-             rep.airtag, rep.other);
+             rep->total_advertisers, rep->apple_continuity_spam,
+             rep->airtag, rep->other);
     s.counts_lbl = ui_label_create(c, counts, ui_font_hint, ui_c_dim());
     if (s.counts_lbl) lv_obj_set_width(s.counts_lbl, BD_CW);
 
     // 小列表：展示几条样例地址，让"判定"落到具体设备上（地址会随机化，只代表这一次广播）。
-    if (rep.example_count > 0) {
+    if (rep->example_count > 0) {
         lv_obj_t *list = ui_list_create(c);
-        for (int i = 0; i < rep.example_count; i++) {
-            const uint8_t *ad = rep.eg_addr[i];
+        for (int i = 0; i < rep->example_count; i++) {
+            const uint8_t *ad = rep->eg_addr[i];
             char addr[40];
             snprintf(addr, sizeof(addr), "%02X:%02X:%02X:%02X:%02X:%02X",
                      ad[0], ad[1], ad[2], ad[3], ad[4], ad[5]);
-            s.rows[i] = ui_row_create(list, addr, app_bledetect_kind_text((app_bledetect_kind_t)rep.eg_kind[i]));
-            uint32_t col = (rep.eg_kind[i] == APP_BLEDETECT_KIND_AIRTAG) ? ui_c_accent()
-                        : (rep.eg_kind[i] == APP_BLEDETECT_KIND_SPAM)   ? ui_c_warn()
+            s.rows[i] = ui_row_create(list, addr, app_bledetect_kind_text((app_bledetect_kind_t)rep->eg_kind[i]));
+            uint32_t col = (rep->eg_kind[i] == APP_BLEDETECT_KIND_AIRTAG) ? ui_c_accent()
+                        : (rep->eg_kind[i] == APP_BLEDETECT_KIND_SPAM)   ? ui_c_warn()
                         : ui_c_dim();
             if (s.rows[i].value) lv_obj_set_style_text_color(s.rows[i].value, lv_color_hex(col), 0);
         }
@@ -128,18 +165,26 @@ static void build_page(void)
                         "打开耳机盒盖、让手机进入蓝牙设置，或走到有人群的地方，这里会出现设备。");
     }
 
-    // 提示与长按 OK 的"返回"严格对应；监听中可短按 OK 暂停（再按恢复）。
+    // 提示与长按 OK 的"返回"严格对应；监听中可短按 OK 暂停（再按恢复），短按 ↑↓ 滚动内容。
     if (app_ble_finder_last_error() != ESP_OK) {
-        ui_page_set_hint("长按OK 返回工具页");
+        ui_page_set_hint("↑↓ 滚动   长按OK 返回工具页");
     } else if (app_ble_finder_running()) {
-        ui_page_set_hint("OK 暂停监听   长按OK 返回工具页");
+        ui_page_set_hint("OK 暂停监听   ↑↓ 滚动   长按OK 返回工具页");
     } else {
-        ui_page_set_hint("OK 开始监听   长按OK 返回工具页");
+        ui_page_set_hint("OK 开始监听   ↑↓ 滚动   长按OK 返回工具页");
     }
+    // 恢复重建前的滚动位置（内容为空时会被 LVGL 夹到 0，等价于回到顶部）。
+    if (c) {
+        lv_obj_update_layout(c);
+        lv_obj_scroll_to_y(c, keep_y, LV_ANIM_OFF);
+    }
+    s.sig = report_sig();
 }
 
 static void refresh(void)
 {
+    // 只在报告真的变了时重建；否则不动页面，滚动位置得以保留。
+    if (poll_report() == s.sig) return;
     build_page();
 }
 
@@ -152,6 +197,7 @@ static void toggle_scan(void)
         app_ble_finder_request_start();
         ui_hint_flash("正在打开蓝牙…", 1200);
     }
+    poll_report();
     build_page();
 }
 
@@ -168,6 +214,7 @@ void page_bledetect_enter(void)
     app_bledetect_reset();
     // 复用 finder 的被动扫描（异步请求，避免拉起协议栈卡住 LVGL）。
     app_ble_finder_request_start();
+    poll_report();
     build_page();
     ui_hint_flash("正在打开蓝牙…", 1200);
 }
@@ -191,6 +238,12 @@ void page_bledetect_key(bsp_btn_t btn, bsp_btn_ev_t ev)
         return;
     }
     if (ev != BSP_BTN_CLICK) return;
+
+    // 短按 ↑↓ 滚动内容。
+    if (btn == BSP_BTN_UP || btn == BSP_BTN_DOWN) {
+        scroll_content(btn == BSP_BTN_UP ? 40 : -40);
+        return;
+    }
 
     // 短按 OK：监听中暂停、未监听则开始（不做任何发射，只控制接收）。
     if (btn == BSP_BTN_OK) {

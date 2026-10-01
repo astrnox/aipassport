@@ -53,6 +53,7 @@ static struct {
     lv_obj_t *status_lbl;
 
     uint32_t last_ms;
+    int      lab_sig;            // 上次构建实验室页时的状态指纹，用于避免每拍重建
 } s;
 
 // 当前选中模式（focus 越界时退回 0）。
@@ -60,6 +61,22 @@ static app_blelab_mode_t cur_mode(void)
 {
     if (s.focus < 0 || s.focus >= APP_BLELAB_MODE_COUNT) return APP_BLELAB_MODE_APPLE_AUDIO;
     return (app_blelab_mode_t)s.focus;
+}
+
+// 内容上下滚动。三键设备没有触摸和手势，长按 ↑↓ 是唯一的滚动途径。
+static void scroll_content(int dy)
+{
+    if (s.page.content) lv_obj_scroll_by(s.page.content, 0, dy, LV_ANIM_OFF);
+}
+
+// 实验室页的状态指纹：只有它变了才重建。以前每 500ms 无脑重建，每次都会把滚动位置
+// 和高亮拉回选中行，用户看到的正是"按键滚不动、页面自己弹回去"。
+static int lab_sig(void)
+{
+    bool failed = app_ble_adv_last_error() != ESP_OK;
+    bool running = app_ble_adv_running() && !failed;
+    return (failed ? 1 : 0) | (running ? 2 : 0) | ((int)app_ble_adv_mode() << 2)
+           | (s.focus << 6);
 }
 
 // ---------------------------------------------------------------------------
@@ -89,7 +106,9 @@ static void build_consent(void)
         lv_label_set_long_mode(lbl, LV_LABEL_LONG_WRAP);
     }
 
-    ui_page_set_hint("OK 我已知晓并授权    长按OK 返回");
+    // 授权说明比一屏长，且此视图没有可选行：短按 ↑↓ 用来上下阅读。
+    ui_page_set_hint("↑↓ 上下阅读  OK 授权  长按OK 返回工具页");
+    if (s.page.content) lv_obj_scroll_to_y(s.page.content, 0, LV_ANIM_OFF);
 }
 
 // ---------------------------------------------------------------------------
@@ -142,13 +161,15 @@ static void build_lab(void)
         ui_scroll_into_view(s.rows[s.focus].obj);
     }
 
+    // 提示与实际按键严格对应：长按 ↑↓ 上下滚动；失败时短按 OK 重新尝试启动。
     if (failed) {
-        ui_page_set_hint("长按OK 返回工具页");
+        ui_page_set_hint("OK 重试  长按↑↓ 滚动  长按OK 返回工具页");
     } else if (app_ble_adv_running()) {
-        ui_page_set_hint("↑↓ 选模式  OK 停止广播    长按OK 返回");
+        ui_page_set_hint("↑↓ 选模式  OK 停止广播  长按↑↓ 滚动  长按OK 返回工具页");
     } else {
-        ui_page_set_hint("↑↓ 选模式  OK 开始广播    长按OK 返回");
+        ui_page_set_hint("↑↓ 选模式  OK 开始广播  长按↑↓ 滚动  长按OK 返回工具页");
     }
+    s.lab_sig = lab_sig();
 }
 
 static void render_focus(void)
@@ -159,11 +180,15 @@ static void render_focus(void)
     if (s.focus >= 0 && s.focus < APP_BLELAB_MODE_COUNT && s.rows[s.focus].obj) {
         ui_scroll_into_view(s.rows[s.focus].obj);
     }
+    s.lab_sig = lab_sig();
 }
 
 static void refresh(void)
 {
-    if (s.view == BL_LAB) build_lab();
+    if (s.view != BL_LAB) return;
+    // 只在状态真正变化时重建；帧数/运行状态没变就不动页面，滚动位置因此得以保留。
+    if (lab_sig() == s.lab_sig) return;
+    build_lab();
 }
 
 static void toggle_run(void)
@@ -213,8 +238,11 @@ void page_blelab_key(bsp_btn_t btn, bsp_btn_ev_t ev)
     }
 
     if (s.view == BL_CONSENT) {
+        // 本视图没有可选行：短按 ↑↓ 用来上下阅读这段比一屏长的授权说明，
         // 仅 OK 确认授权；未确认前不允许做任何广播。
-        if (ev == BSP_BTN_CLICK && btn == BSP_BTN_OK) {
+        if (ev == BSP_BTN_CLICK && (btn == BSP_BTN_UP || btn == BSP_BTN_DOWN)) {
+            scroll_content(btn == BSP_BTN_UP ? 40 : -40);
+        } else if (ev == BSP_BTN_CLICK && btn == BSP_BTN_OK) {
             s.consent = true;
             s.view = BL_LAB;
             build_lab();
@@ -223,6 +251,13 @@ void page_blelab_key(bsp_btn_t btn, bsp_btn_ev_t ev)
     }
 
     // ---- 实验室视图 ----
+    // 长按 ↑↓ 上下滚动内容：三键设备没有触摸/手势，这是唯一的滚动途径。放在短按
+    // 分支之前，避免被下面的 `ev != CLICK` 直接丢掉（此前 scroll_content 没有被调用，
+    // 提示里写的"长按↑↓ 滚动"实际无效）。
+    if (ev == BSP_BTN_LONG && (btn == BSP_BTN_UP || btn == BSP_BTN_DOWN)) {
+        scroll_content(btn == BSP_BTN_UP ? 40 : -40);
+        return;
+    }
     if (ev != BSP_BTN_CLICK) return;
 
     if (btn == BSP_BTN_UP || btn == BSP_BTN_DOWN) {

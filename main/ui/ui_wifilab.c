@@ -75,6 +75,7 @@ static struct {
     lv_obj_t   *status_lbl;
 
     uint32_t    last_ms;
+    int         lab_sig;            // 上次构建实验室页时的状态指纹，用于避免每拍重建
 } s;
 
 // 当前选中模式（mode_focus 越界时退回 0）。
@@ -82,6 +83,41 @@ static app_wifilab_mode_t cur_mode(void)
 {
     if (s.mode_focus < 0 || s.mode_focus >= APP_WIFILAB_MODE_COUNT) return APP_WIFILAB_DEAUTH;
     return (app_wifilab_mode_t)s.mode_focus;
+}
+
+// 内容上下滚动。三键设备没有触摸和手势，长按 ↑↓ 是唯一的滚动途径。
+static void scroll_content(int dy)
+{
+    if (s.page.content) lv_obj_scroll_by(s.page.content, 0, dy, LV_ANIM_OFF);
+}
+
+// 实验室页状态指纹：只包含"会改变页面结构/文字"的状态。已发帧数每拍都在变，
+// 故意不计入——它只更新状态行文本。若把它算进来，页面会每 500ms 重建一次，
+// 滚动位置与高亮被反复重置，用户就会觉得"按键滚不动、页面自己弹回去"。
+static int lab_sig(void)
+{
+    bool failed = app_net_wifilab_last_error() != ESP_OK;
+    bool running = app_net_wifilab_running() && !failed;
+    return (failed ? 1 : 0) | (running ? 2 : 0)
+           | (s.mode_focus << 2) | (s.beacon_sub << 5)
+           | ((s.target.valid ? 1 : 0) << 8) | ((s.target.channel & 0x1F) << 9)
+           | (s.focus << 14);
+}
+
+// 只更新"状态：发射中 / 已发 N 帧"这一行，不重建页面。
+static void update_status(void)
+{
+    if (!s.status_lbl) return;
+    char stat[48];
+    if (app_net_wifilab_last_error() != ESP_OK) {
+        snprintf(stat, sizeof(stat), "状态：未开启");
+    } else if (app_net_wifilab_running()) {
+        snprintf(stat, sizeof(stat), "状态：发射中  已发 %u 帧",
+                 (unsigned)app_net_wifilab_packets_sent());
+    } else {
+        snprintf(stat, sizeof(stat), "状态：已停止");
+    }
+    lv_label_set_text(s.status_lbl, stat);
 }
 
 // 目标是否需要（DEAUTH/EAPOL/SAE 需要选一个 AP；BEACON 不需要）。
@@ -132,7 +168,9 @@ static void build_consent(void)
         lv_label_set_long_mode(lbl, LV_LABEL_LONG_WRAP);
     }
 
-    ui_page_set_hint("OK 我已知晓并授权    长按OK 返回");
+    // 授权说明比一屏长，且此视图没有可选行：短按 ↑↓ 用来上下阅读。
+    ui_page_set_hint("↑↓ 上下阅读  OK 授权  长按OK 返回工具页");
+    if (s.page.content) lv_obj_scroll_to_y(s.page.content, 0, LV_ANIM_OFF);
 }
 
 // ---------------------------------------------------------------------------
@@ -185,18 +223,11 @@ static void build_lab(void)
     const char *act = app_net_wifilab_running() ? "停止发射" : "开始发射";
     s.rows[n++] = ui_row_create(list, act, NULL);
 
-    // 状态行：把"在发什么、发了多少"讲清楚，避免用户误以为已经停下来。
-    char stat[48];
-    if (failed) {
-        snprintf(stat, sizeof(stat), "状态：未开启");
-    } else if (app_net_wifilab_running()) {
-        snprintf(stat, sizeof(stat), "状态：发射中  已发 %u 帧",
-                 (unsigned)app_net_wifilab_packets_sent());
-    } else {
-        snprintf(stat, sizeof(stat), "状态：已停止");
-    }
-    s.status_lbl = ui_label_create(c, stat, ui_font_hint, ui_c_dim());
+    // 状态行：把"在发什么、发了多少"讲清楚，避免用户误以为已经停下来。已发帧数每拍
+    // 变化，由 update_status() 原地更新，不触发整页重建。
+    s.status_lbl = ui_label_create(c, "", ui_font_hint, ui_c_dim());
     if (s.status_lbl) lv_obj_set_width(s.status_lbl, WL_CW);
+    update_status();
 
     // 应用选中高亮并滚动到选中行。
     for (int i = 0; i < n; i++) {
@@ -206,13 +237,15 @@ static void build_lab(void)
         ui_scroll_into_view(s.rows[s.focus].obj);
     }
 
+    // 长按 ↑↓ 在整页里滚动；失败时短按 OK 重新尝试启动。
     if (failed) {
-        ui_page_set_hint("长按OK 返回工具页");
+        ui_page_set_hint("OK 重试  长按↑↓ 滚动  长按OK 返回");
     } else if (app_net_wifilab_running()) {
-        ui_page_set_hint("↑↓ 选择  OK 停发/切换  长按OK 返回");
+        ui_page_set_hint("↑↓ 选择  OK 停发/切换  长按↑↓ 滚动  长按OK 返回");
     } else {
-        ui_page_set_hint("↑↓ 选择  OK 开始/扫描  长按OK 返回");
+        ui_page_set_hint("↑↓ 选择  OK 开始/扫描  长按↑↓ 滚动  长按OK 返回");
     }
+    s.lab_sig = lab_sig();
 }
 
 static void render_focus(void)
@@ -225,12 +258,21 @@ static void render_focus(void)
     if (s.focus >= 0 && s.focus < max && s.rows[s.focus].obj) {
         ui_scroll_into_view(s.rows[s.focus].obj);
     }
+    s.lab_sig = lab_sig();
 }
 
 static void refresh(void)
 {
-    if (s.view == WL_LAB) build_lab();
-    else if (s.view == WL_TARGET) build_target();
+    if (s.view == WL_LAB) {
+        if (lab_sig() != s.lab_sig) {
+            build_lab();
+        } else {
+            // 结构不变：只刷新帧数，保住用户的滚动位置。
+            update_status();
+        }
+    }
+    // 目标视图不在这里重建：扫描完成由 page_wifilab_tick() 触发，避免每拍把
+    // 列表滚动位置拉回选中行。
 }
 
 // 切换开始/停止。
@@ -296,7 +338,7 @@ static void build_target(void)
         ui_scroll_into_view(s.rows[s.focus].obj);
     }
 
-    ui_page_set_hint("↑↓ 选择  OK 选 AP/扫描  长按OK 返回");
+    ui_page_set_hint("↑↓ 选择  OK 选 AP/扫描  长按↑↓ 滚动  长按OK 返回");
 }
 
 // 触发一次信道体检扫描（复用 app_net 的扫描能力，结果缓存供本页与 AP_LIST 复用）。
@@ -367,13 +409,22 @@ void page_wifilab_key(bsp_btn_t btn, bsp_btn_ev_t ev)
     }
 
     if (s.view == WL_CONSENT) {
+        // 本视图没有可选行：短按 ↑↓ 用来上下阅读这段比一屏长的授权说明，
         // 仅 OK 确认授权；未确认前不允许做任何发射。
-        if (ev == BSP_BTN_CLICK && btn == BSP_BTN_OK) {
+        if (ev == BSP_BTN_CLICK && (btn == BSP_BTN_UP || btn == BSP_BTN_DOWN)) {
+            scroll_content(btn == BSP_BTN_UP ? 40 : -40);
+        } else if (ev == BSP_BTN_CLICK && btn == BSP_BTN_OK) {
             s.consent = true;
             s.view = WL_LAB;
             s.focus = 0;
             build_lab();
         }
+        return;
+    }
+
+    // 长按 ↑↓ 在任意视图里上下滚动内容：三键设备没有触摸/手势，这是唯一的滚动途径。
+    if (ev == BSP_BTN_LONG && (btn == BSP_BTN_UP || btn == BSP_BTN_DOWN)) {
+        scroll_content(btn == BSP_BTN_UP ? 40 : -40);
         return;
     }
 
