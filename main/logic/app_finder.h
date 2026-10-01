@@ -13,6 +13,14 @@
 
 // 屏幕上最多同时列这么多台。再多也翻不完，且每台都要占 RAM。
 #define APP_FINDER_MAX 16
+// 每台设备额外保存的厂商自定义数据（manufacturer specific data）前导字节数。蓝牙检测工具
+// （app_bledetect）需要按厂商数据前缀识别"苹果连续广播轰炸 / AirTag"，而"广播扫描回调"
+// 拿到的厂商数据可能长达 31 字节——这里只存前导若干字节就够匹配已知前缀（最长 6 字节），
+// 既满足检测需要，又不让设备表过度膨胀。存的是 NimBLE 的 fields.mfg_data（含 2 字节小端
+// 厂商 ID 在前），不含 AD 长度/类型头。
+#define APP_FINDER_MFG_BYTES 8
+// 每台设备保存的 16 位服务 UUID 数量上限。厂商数据里能带的服务 UUID 条数很少，固定数组够用。
+#define APP_FINDER_SVC_MAX 8
 // 设备名缓冲。BLE 广播里的名字是 UTF-8，超长截断（截断点可能切断多字节字符，
 // 界面按字节显示顶多出现一个方块，不影响其它条目）。
 #define APP_FINDER_NAME_LEN 24
@@ -67,6 +75,15 @@ typedef struct {
     int      rssi_slow;    // 更慢的平滑值，作为"静止基线"用于判断靠近/远离
     uint8_t  samples;      // 收到过的广播条数，用于判断趋势是否有足够历史
     uint64_t last_ms;      // 最近一次收到广播的时刻
+
+    // 以下字段把"识别蓝牙检测（AirTag / 苹果连续广播）所需的公开标识"也随设备表带出来，
+    // 供 main/logic/app_bledetect 在界面节拍里做被动分类——不重复扫描、不另开协议栈。
+    uint16_t company_id;   // 厂商 ID（小端 16 位，来自厂商数据的头两字节）；0 表示本次无厂商数据
+    uint8_t  mfg_type;     // 厂商数据里紧跟厂商 ID 之后的第一个字节（0 表示没有）
+    uint8_t  mfg_data[APP_FINDER_MFG_BYTES];  // 厂商数据的前导字节（含 2 字节厂商 ID 在前）
+    uint8_t  mfg_data_len; // 实际保存的厂商数据前导字节数（≤ APP_FINDER_MFG_BYTES）
+    uint16_t svc16[APP_FINDER_SVC_MAX];        // 本次广播里的 16 位服务 UUID 列表
+    uint8_t  svc16_count;  // svc16 的有效条数
 } app_finder_dev_t;
 
 typedef struct {
@@ -97,6 +114,13 @@ int app_finder_feed(app_finder_t *f, const uint8_t addr[6],
                     uint16_t company_id, uint8_t mfg_type,
                     const uint16_t *uuid16, int uuid16_count,
                     const char *name, int name_len, int rssi, uint64_t now_ms);
+
+// 把一条广播的完整厂商数据（NimBLE 的 fields.mfg_data，含 2 字节小端厂商 ID 在前）的前导
+// 字节追加保存到表中对应设备。feed 之后单独调用一次即可，避免改动 feed 的公开签名。
+// mfg 为 NULL 或 mfg_len 为 0 时忽略；超出 APP_FINDER_MFG_BYTES 的部分截断。地址不在表中
+// （尚未 feed 过）时忽略——调用方应先 feed 再 attach。
+void app_finder_attach_mfg(app_finder_t *f, const uint8_t addr[6],
+                           const uint8_t *mfg, uint8_t mfg_len);
 
 // 依据广播内容保守地推断设备类别。只使用可核实的公开标识；信息不足返回
 // APP_FINDER_CAT_UNKNOWN。这是启发式归类而非身份识别，详见实现里的逐条注释。

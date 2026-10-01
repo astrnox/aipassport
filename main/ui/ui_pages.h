@@ -81,6 +81,27 @@ void page_metronome_key(bsp_btn_t btn, bsp_btn_ev_t ev);
 void page_metronome_tick(void);
 bool page_metronome_active(void);
 
+// 5.7 BLE 实验（工具页子页：仅广播 broadcaster，见 net/app_ble 的 advertiser 角色）
+void page_blelab_enter(void);
+void page_blelab_exit(void);
+void page_blelab_key(bsp_btn_t btn, bsp_btn_ev_t ev);
+void page_blelab_tick(void);
+bool page_blelab_active(void);
+
+// 5.8 BLE 检测（工具页子页：被动侦测 AirTag / 苹果连续广播轰炸，复用 finder 扫描，绝不发射）
+void page_bledetect_enter(void);
+void page_bledetect_exit(void);
+void page_bledetect_key(bsp_btn_t btn, bsp_btn_ev_t ev);
+void page_bledetect_tick(void);
+bool page_bledetect_active(void);
+
+// 5.9 Wi-Fi 实验（工具页子页：仅自有 / 授权环境，复刻 GhostESP 的 CTF 无线测试报文）
+void page_wifilab_enter(void);
+void page_wifilab_exit(void);
+void page_wifilab_key(bsp_btn_t btn, bsp_btn_ev_t ev);
+void page_wifilab_tick(void);
+bool page_wifilab_active(void);
+
 // 6 英雄联盟赛事中心
 void page_esports_enter(void);
 void page_esports_exit(void);

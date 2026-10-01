@@ -320,6 +320,20 @@ int app_finder_feed(app_finder_t *f, const uint8_t addr[6],
     f->devs[idx].raw_rssi = rssi;
     f->devs[idx].last_ms = now_ms;
 
+    // 把识别蓝牙检测所需的公开标识也记下来：厂商 ID、厂商类型字节、服务 UUID 列表。
+    // 这些是"广播里愿意公开的信息"，每一次广播都可能携带（也可能分片），因此每次都
+    // 用最新一次的覆盖——与类别的保守覆盖不同，这里直接覆盖不会引入闪烁问题，因为
+    // 同一台设备的厂商 ID 不会变。mfg_data 的完整前导字节由 attach_mfg 在 feed 之后写入。
+    f->devs[idx].company_id = company_id;
+    f->devs[idx].mfg_type = mfg_type;
+    int ns = 0;
+    if (uuid16 && uuid16_count > 0) {
+        for (int i = 0; i < uuid16_count && ns < APP_FINDER_SVC_MAX; i++) {
+            f->devs[idx].svc16[ns++] = uuid16[i];
+        }
+    }
+    f->devs[idx].svc16_count = (uint8_t)ns;
+
     // 类别用本次广播的线索重新推断。广播是分片发送的：名字、厂商数据、服务 UUID
     // 往往不在同一条报文里，因此"这次推断不出来"不代表之前的判断失效——只在推断
     // 到已知类别时才覆盖，避免列表里的类别在相邻两次刷新间忽有忽无地闪烁。
@@ -333,6 +347,19 @@ int app_finder_feed(app_finder_t *f, const uint8_t addr[6],
         f->devs[idx].has_name = true;
     }
     return idx;
+}
+
+void app_finder_attach_mfg(app_finder_t *f, const uint8_t addr[6],
+                           const uint8_t *mfg, uint8_t mfg_len)
+{
+    if (!f || !addr || !mfg || mfg_len == 0) return;
+    int idx = app_finder_find(f, addr);
+    if (idx < 0) return;   // 还没 feed 过：调用方应先 feed 再 attach
+
+    uint8_t n = mfg_len;
+    if (n > APP_FINDER_MFG_BYTES) n = APP_FINDER_MFG_BYTES;
+    memcpy(f->devs[idx].mfg_data, mfg, n);
+    f->devs[idx].mfg_data_len = n;
 }
 
 void app_finder_prune(app_finder_t *f, uint64_t now_ms)
