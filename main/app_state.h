@@ -87,6 +87,10 @@ esp_err_t app_state_init(void);
 app_datetime_t app_state_now(void);
 uint64_t       app_state_now_unix(void);
 void           app_state_set_time(const app_datetime_t *dt, const char *source);
+// 把当前墙钟落盘。设备没有 RTC 备份电池，重启后只能从上次落盘时刻接着走，
+// 因此运行期需要周期调用（见 ui_app 的 1 秒节拍）来把断电期间的时间误差压到
+// 落盘间隔以内。时间从未校准过时不做任何事。返回是否真正写入。
+bool           app_state_save_clock(void);
 // 设备是否"曾经知道过时间"：NVS 里恢复过时钟或手动/NTP 设置过。false 表示从未校准，
 // app_state_now() 给出的只是占位基准（2026-01-01 00:00），不能当作"现在几点"来定位。
 // time_synced 用于判断"是否权威"，本函数用于区分"完全没设过"与"设过但重启后未同步"。

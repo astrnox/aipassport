@@ -57,6 +57,13 @@
 - Added the documentation catalog and task-triggered routing based on the earlier repository model.
 - Added bilingual contribution, code-of-conduct, security, and support documents tailored to this ESP-IDF and fork workflow.
 
+## v1.2.0-passport-toolbox - 2026-10-02
+
+- Added three laboratory tools to the toolbox: BLE Lab, BLE Detect, and Wi-Fi Lab (a faithfully reproduced, byte-for-byte port of the publicly released GhostESP frame templates), each behind an explicit authorization prompt.
+- Reworked the tool pages' refresh and scrolling: lists scroll with the buttons, and the selection and scroll position are no longer reset on every refresh tick.
+- Fixed the routine and countdown page: content scrolls to the top, and OK now shows the selected node's time slot in place of the next-node countdown.
+- Persisted the wall clock with a periodic NVS flush and added an automatic time sync on boot, so the clock stays accurate across power cycles.
+
 ## v1.1.0-passport-toolbox - 2026-09-30
 
 - Added a stick-figure desktop pet on the home screen and deepened passive beacon/tracker detection in the finder.

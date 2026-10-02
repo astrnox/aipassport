@@ -54,6 +54,13 @@
 - 参考 cindy 仓库文档组织完善索引：新增 `docs/README.md` 根总索引；AGENTS.md 规则索引按触发场景改写（附触发条件）；`docs/contribution/` 与 `docs/development/` 的 README 补充收录标准。
 - 引入社区治理文档（参照 cindy 改写，放仓库根目录）：新增 `CONTRIBUTING.md` / `.zh_CN.md`（贡献指南，针对 ESP-IDF/AI agent/fork 场景改写）、`CODE_OF_CONDUCT.md` / `.zh_CN.md`（贡献者公约）、`SECURITY.md` / `.zh_CN.md`（安全报告流程）、`SUPPORT.md` / `.zh_CN.md`（支持渠道）；AGENTS.md 与 docs/README.md 同步引用。
 
+## v1.2.0-passport-toolbox - 2026-10-02
+
+- 工具箱新增三个实验室工具：BLE 实验、BLE 检测与 Wi-Fi 实验（逐字节复刻公开发布的 GhostESP 报文模板），每个都带明确的授权确认页。
+- 重做工具页的刷新与滚动：列表可用按键上下滚动，选中项与滚动位置不再被每次刷新重置。
+- 修复作息与倒计时页：内容可滚到顶部，OK 键显示所选节点的时间段以替代下一节倒计时。
+- 落盘墙钟（周期性写入 NVS）并支持开机自动校时，断电重启后时间仍然准确。
+
 ## v1.1.0-passport-toolbox - 2026-09-30
 
 - 主页新增火柴人桌宠，并深化查找器的被动信标/追踪器探测能力。

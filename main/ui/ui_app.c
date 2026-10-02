@@ -18,6 +18,8 @@
 #include "app_state.h"
 #include "logic/app_esports.h"
 
+#include "net/app_net.h"
+
 #include "bsp_display.h"
 
 #include "esp_log.h"
@@ -54,6 +56,10 @@ static bool s_missed_reported;
 
 // 低电量只在本次开机第一次跌破阈值时告诉桌宠一次，避免电量在阈值附近抖动时反复触发。
 static bool s_low_batt_reported;
+
+// 上次把墙钟落盘时所处的分钟。设备无 RTC 备份电池，运行期必须周期性把当前时间写回
+// NVS，否则重启后时钟会停在上一次写盘的时刻（= 上次校时那一刻），关机时长全部丢失。
+static int s_clock_saved_minute = -1;
 
 int ui_app_module_count(void) { return MODULE_COUNT; }
 
@@ -480,6 +486,16 @@ static void app_tick(lv_timer_t *timer)
     // 冲突时它需要等界面空下来再报。
     if (!dnd_active()) dnd_report_held();
 
+    // 每分钟把墙钟落盘一次：设备没有 RTC 备份电池，重启后只能从上次落盘时刻接着走，
+    // 落盘间隔直接决定重启后的最大时间误差。只在时间已知时写，避免把占位基准写进 NVS。
+    if (app_state_time_known()) {
+        int clock_minute = (int)(app_state_now_unix() / 60);
+        if (clock_minute != s_clock_saved_minute) {
+            s_clock_saved_minute = clock_minute;
+            app_state_save_clock();
+        }
+    }
+
     if (!s_asleep) {
         int limit = timeout_seconds();
         if (limit > 0 && ++s_idle_seconds >= limit) {
@@ -526,6 +542,12 @@ void ui_app_start(void)
     }
 
     s_tick = lv_timer_create(app_tick, 1000, NULL);
+
+    // 重启后墙钟只到"上次落盘时刻"，关机时长不计入，因此只要有 Wi-Fi 凭证就开机自动
+    // 校时一次，让时间在联网后自我纠正。校时在 app_net 的 worker 里执行，不阻塞界面，
+    // 且结束即释放射频，不构成常驻联网。失败时设置页会照常显示"上次校时失败"。
+    if (app_net_has_credentials()) app_net_time_sync_request();
+
     ESP_LOGI(TAG, "界面控制器就绪");
 }
 

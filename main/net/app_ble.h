@@ -17,6 +17,7 @@
 #include "esp_err.h"
 #include "logic/app_finder.h"
 #include "logic/app_remote.h"
+#include "logic/app_blelab.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -71,6 +72,34 @@ void      app_ble_remote_request_stop(void);
 esp_err_t app_ble_remote_last_error(void);
 // 失败原因，语义与 app_ble_finder_error_text() 一致。
 const char *app_ble_remote_error_text(void);
+
+// ---------------------------------------------------------------------------
+// BLE 实验（仅广播 broadcaster：不连接，只向外发原始广播数据）
+// ---------------------------------------------------------------------------
+// 选择广播模式（见 logic/app_blelab.h 的 app_blelab_mode_t）。运行中改模式会立即生效，
+// 下一轮换就用新模式。越界值被忽略，保持当前模式。
+void      app_ble_adv_set_mode(app_blelab_mode_t mode);
+app_blelab_mode_t app_ble_adv_mode(void);
+// 随机静态地址的 PRNG 种子（由 logic/app_blelab 的确定性 PRNG 使用，不依赖 esp_random）。
+// 每次 start 都用该种子重新派生地址与轮换序列，便于复现。0 视为无效，会被忽略。
+void      app_ble_adv_set_seed(uint32_t seed);
+uint32_t  app_ble_adv_seed(void);
+// 轮换间隔（毫秒），钳制到 [200, 10000]。仅广播模式下才有意义。
+void      app_ble_adv_set_interval_ms(uint32_t ms);
+uint32_t  app_ble_adv_interval_ms(void);
+
+// 开始仅广播。阻塞式，须在 worker 中调用。已开启时直接返回。与 finder/remote 共用 s_mode
+// 互斥，并同样拒绝配网、信道体检进行中。失败原因通过 app_ble_adv_error_text() 暴露。
+esp_err_t app_ble_adv_start(void);
+void      app_ble_adv_stop(void);
+bool      app_ble_adv_running(void);
+
+// 异步请求开启 / 停止，语义与 app_ble_finder_request_* 一致。
+void      app_ble_adv_request_start(void);
+void      app_ble_adv_request_stop(void);
+esp_err_t app_ble_adv_last_error(void);
+// 失败原因，语义与 app_ble_finder_error_text() 一致。
+const char *app_ble_adv_error_text(void);
 
 // ---------------------------------------------------------------------------
 // 通用

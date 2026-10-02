@@ -31,11 +31,14 @@ typedef enum {
     TOOL_REMOTE,
     TOOL_CHANNEL,
     TOOL_METRONOME,
+    TOOL_BLELAB,
+    TOOL_BLEDETECT,
+    TOOL_WIFILAB,
     TOOL_COUNT,
 } tool_t;
 
 static const char *const TOOL_NAMES[TOOL_COUNT] = {
-    "动态口令", "密码本", "找设备", "万能遥控", "信道体检", "节拍器",
+    "动态口令", "密码本", "找设备", "万能遥控", "信道体检", "节拍器", "BLE 实验", "BLE 检测", "Wi-Fi 实验",
 };
 
 // 右侧一句话说明：普通用户先看懂"这能干嘛"，再决定要不要打开。
@@ -46,6 +49,9 @@ static const char *const TOOL_HINTS[TOOL_COUNT] = {
     "当电脑电视遥控",
     "家里 Wi-Fi 卡不卡",
     "练琴打拍子",
+    "向周围广播测试报文",
+    "附近蓝牙在刷屏吗",
+    "CTF/实验室无线测试",
 };
 
 static struct {
@@ -68,6 +74,9 @@ static bool subpage_active(int tool)
     case TOOL_REMOTE:    return page_remote_active();
     case TOOL_CHANNEL:   return page_channel_active();
     case TOOL_METRONOME: return page_metronome_active();
+    case TOOL_BLELAB:    return page_blelab_active();
+    case TOOL_BLEDETECT: return page_bledetect_active();
+    case TOOL_WIFILAB:   return page_wifilab_active();
     default:             return false;
     }
 }
@@ -81,6 +90,9 @@ static void subpage_enter(int tool)
     case TOOL_REMOTE:    page_remote_enter();    break;
     case TOOL_CHANNEL:   page_channel_enter();   break;
     case TOOL_METRONOME: page_metronome_enter(); break;
+    case TOOL_BLELAB:    page_blelab_enter();    break;
+    case TOOL_BLEDETECT: page_bledetect_enter(); break;
+    case TOOL_WIFILAB:   page_wifilab_enter();   break;
     default: break;
     }
 }
@@ -94,6 +106,9 @@ static void subpage_key(int tool, bsp_btn_t btn, bsp_btn_ev_t ev)
     case TOOL_REMOTE:    page_remote_key(btn, ev);    break;
     case TOOL_CHANNEL:   page_channel_key(btn, ev);   break;
     case TOOL_METRONOME: page_metronome_key(btn, ev); break;
+    case TOOL_BLELAB:    page_blelab_key(btn, ev);    break;
+    case TOOL_BLEDETECT: page_bledetect_key(btn, ev); break;
+    case TOOL_WIFILAB:   page_wifilab_key(btn, ev);   break;
     default: break;
     }
 }
@@ -107,6 +122,9 @@ static void subpage_tick(int tool)
     case TOOL_REMOTE:    page_remote_tick();    break;
     case TOOL_CHANNEL:   page_channel_tick();   break;
     case TOOL_METRONOME: page_metronome_tick(); break;
+    case TOOL_BLELAB:    page_blelab_tick();    break;
+    case TOOL_BLEDETECT: page_bledetect_tick(); break;
+    case TOOL_WIFILAB:   page_wifilab_tick();   break;
     default: break;
     }
 }
@@ -120,6 +138,9 @@ static void subpage_exit(int tool)
     case TOOL_REMOTE:    page_remote_exit();    break;
     case TOOL_CHANNEL:   page_channel_exit();   break;
     case TOOL_METRONOME: page_metronome_exit(); break;
+    case TOOL_BLELAB:    page_blelab_exit();    break;
+    case TOOL_BLEDETECT: page_bledetect_exit(); break;
+    case TOOL_WIFILAB:   page_wifilab_exit();   break;
     default: break;
     }
 }

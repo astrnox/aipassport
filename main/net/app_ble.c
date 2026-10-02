@@ -30,6 +30,7 @@
 
 #include "host/ble_gap.h"
 #include "host/ble_hs.h"
+#include "nimble/ble.h"            // BLE_OWN_ADDR_RANDOM 等裸地址常量
 #include "host/ble_hs_adv.h"
 #include "host/ble_hs_mbuf.h"
 #include "host/ble_sm.h"
@@ -64,6 +65,7 @@ typedef enum {
     BLE_MODE_IDLE = 0,
     BLE_MODE_FINDER,
     BLE_MODE_REMOTE,
+    BLE_MODE_ADV,        // BLE 实验：仅广播（broadcaster），不连接
 } ble_mode_t;
 
 // ---------------------------------------------------------------------------
@@ -103,17 +105,40 @@ typedef enum {
     BLE_REQ_FINDER_STOP,
     BLE_REQ_REMOTE_START,
     BLE_REQ_REMOTE_STOP,
+    BLE_REQ_ADV_START,
+    BLE_REQ_ADV_STOP,
 } ble_req_t;
 
 static QueueHandle_t s_req_q;
 static TaskHandle_t s_req_task;
 static volatile esp_err_t s_finder_err = ESP_OK;
 static volatile esp_err_t s_remote_err = ESP_OK;
+static volatile esp_err_t s_adv_err = ESP_OK;
 
 // 失败时给普通用户看的一句话原因。只在 worker（唯一写入者）里改；界面在 last_error()
 // 非 ESP_OK 时读，与 s_finder_err/s_remote_err 用同样的"单写者 + 无锁读"约定。
 static char s_finder_reason[72];
 static char s_remote_reason[72];
+static char s_adv_reason[72];
+
+// ---------------------------------------------------------------------------
+// BLE 实验：仅广播（broadcaster）角色
+// ---------------------------------------------------------------------------
+// 与 finder/remote 共用同一份协议栈与同一套互斥判定（s_mode 单一角色），但只向外广播、
+// 不建立连接。载荷完全由 logic/app_blelab 计算，本模块只负责"设随机静态地址 + 周期性
+// 重设广播数据"。地址与轮换都用 app_blelab 的确定性 PRNG（不依赖 esp_random）。
+static app_blelab_mode_t s_adv_mode = APP_BLELAB_MODE_APPLE_AUDIO;
+static uint32_t s_adv_seed = 0x12345678u;     // 随机地址的种子，页可改
+static uint32_t s_adv_seed_state;             // 运行期 PRNG 状态（每次 start 重置为 seed）
+static uint32_t s_adv_index;                  // 轮换设备索引（苹果模式每轮换一台）
+static uint8_t  s_adv_buf[31];               // 原始广播数据缓冲（最长 31 字节）
+static int      s_adv_len;
+static struct ble_gap_adv_params s_adv_params;  // 广播参数，供 ADV_COMPLETE 时重启
+static esp_timer_handle_t s_adv_timer;
+static uint32_t s_adv_interval_us = 1500000;    // 轮换间隔，默认 1.5s；setter 钳制到 [200ms, 10s]
+
+// 周期轮换回调：在 esp_timer 任务里执行，重新算一包数据并推送。仅在广播模式下做事。
+static void adv_cycle(void *arg);
 
 static void set_reason(char *dst, size_t cap, const char *text)
 {
@@ -133,6 +158,16 @@ static void ensure_init(void)
         s_lock_ready = (s_lock != NULL);
     }
     portEXIT_CRITICAL(&s_init_mux);
+
+    // 广播轮换定时器只建一次；它会在广播启动时按当前间隔启动，停止时关停。
+    if (!s_adv_timer) {
+        const esp_timer_create_args_t targs = {
+            .callback = adv_cycle,
+            .arg = NULL,
+            .name = "ble_adv_cycle",
+        };
+        esp_timer_create(&targs, &s_adv_timer);
+    }
 }
 
 static inline void ble_lock(void)
@@ -388,6 +423,9 @@ static void remote_tx_task(void *arg)
 // ---------------------------------------------------------------------------
 
 static int remote_gap_event(struct ble_gap_event *event, void *arg);
+static int adv_gap_event(struct ble_gap_event *event, void *arg);
+static void adv_start_late(void);
+static void adv_cycle(void *arg);
 
 static void start_adv(void)
 {
@@ -490,6 +528,12 @@ static int finder_gap_event(struct ble_gap_event *event, void *arg)
     ble_lock();
     app_finder_feed(&s_finder, event->disc.addr.val, company_id, mfg_type, uuids, nuuids,
                     name, name_len, event->disc.rssi, now_ms);
+    // 把厂商数据的完整前导字节也带进设备表，供蓝牙检测（AirTag / 苹果连续广播轰炸）
+    // 在界面节拍里做被动分类用——只存前导若干字节，不动 feed 的公开签名。
+    if (fields.mfg_data && fields.mfg_data_len > 0) {
+        uint8_t ml = (fields.mfg_data_len > 255) ? 255 : (uint8_t)fields.mfg_data_len;
+        app_finder_attach_mfg(&s_finder, event->disc.addr.val, fields.mfg_data, ml);
+    }
     ble_unlock();
     return 0;
 }
@@ -549,7 +593,106 @@ static void on_sync(void)
             return;
         }
         start_adv();
+    } else if (s_mode == BLE_MODE_ADV) {
+        adv_start_late();
     }
+}
+
+// ---------------------------------------------------------------------------
+// BLE 实验：仅广播（broadcaster）
+// ---------------------------------------------------------------------------
+
+// 由 on_sync（已处 NimBLE 主机任务上下文）调用：设随机静态地址、推首包、启动非连接广播。
+// 这里的"late"指它发生在协议栈同步完成之后，与 finder/remote 的启动路径一致。
+static void adv_start_late(void)
+{
+    // 用 app_blelab 的确定性 PRNG 派生一个随机静态地址（首字节高两位 11）。
+    uint8_t addr[6];
+    app_blelab_random_addr(&s_adv_seed_state, addr);
+    int rc = ble_hs_id_set_rnd(addr);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "设置随机地址失败 rc=%d", rc);
+        set_reason(s_adv_reason, sizeof(s_adv_reason), "蓝牙地址设置失败，请长按↑ 重试");
+        s_adv_err = ESP_FAIL;
+        return;
+    }
+    s_own_addr_type = BLE_OWN_ADDR_RANDOM;
+
+    // 推首包原始广播数据。
+    size_t len = 0;
+    if (app_blelab_build_packet(s_adv_mode, s_adv_index, s_adv_buf,
+                               sizeof(s_adv_buf), &len) != APP_BLELAB_OK) {
+        ESP_LOGE(TAG, "构造广播载荷失败");
+        set_reason(s_adv_reason, sizeof(s_adv_reason), "广播载荷构造失败，请重试");
+        s_adv_err = ESP_FAIL;
+        return;
+    }
+    s_adv_len = (int)len;
+    rc = ble_gap_adv_set_data(s_adv_buf, s_adv_len);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "设置广播数据失败 rc=%d", rc);
+        set_reason(s_adv_reason, sizeof(s_adv_reason), "广播数据设置失败，请重试");
+        s_adv_err = ESP_FAIL;
+        return;
+    }
+
+    // 非连接、通用可发现；间隔交回栈默认值（~100ms）。广播完成事件出现时自行重启。
+    memset(&s_adv_params, 0, sizeof(s_adv_params));
+    s_adv_params.conn_mode = BLE_GAP_CONN_MODE_NON;
+    s_adv_params.disc_mode = BLE_GAP_DISC_MODE_GEN;
+    rc = ble_gap_adv_start(s_own_addr_type, NULL, BLE_HS_FOREVER,
+                          &s_adv_params, adv_gap_event, NULL);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "开始广播失败 rc=%d", rc);
+        set_reason(s_adv_reason, sizeof(s_adv_reason), "蓝牙广播启动失败，请重试");
+        s_adv_err = ESP_FAIL;
+        return;
+    }
+
+    // 周期轮换载荷（苹果模式每轮换一台设备；其余模式保持身份不变）。
+    if (s_adv_timer) {
+        esp_timer_stop(s_adv_timer);
+        esp_timer_start_periodic(s_adv_timer, s_adv_interval_us);
+    }
+    ESP_LOGI(TAG, "BLE 实验广播已启动（模式 %d）", (int)s_adv_mode);
+}
+
+// 广播完成（非连接广播偶发）后重启，参数沿用 s_adv_params。
+static void adv_restart(void)
+{
+    if (s_mode != BLE_MODE_ADV) return;
+    int rc = ble_gap_adv_start(s_own_addr_type, NULL, BLE_HS_FOREVER,
+                              &s_adv_params, adv_gap_event, NULL);
+    if (rc != 0) ESP_LOGW(TAG, "重启广播失败 rc=%d", rc);
+}
+
+static int adv_gap_event(struct ble_gap_event *event, void *arg)
+{
+    (void)arg;
+    switch (event->type) {
+    case BLE_GAP_EVENT_ADV_COMPLETE:
+        adv_restart();
+        return 0;
+    default:
+        return 0;
+    }
+}
+
+// 周期轮换：仅广播模式下重算一包并推送（不重启广播，地址保持）。
+static void adv_cycle(void *arg)
+{
+    (void)arg;
+    if (s_mode != BLE_MODE_ADV || s_adv_len == 0) return;
+
+    s_adv_index++;
+    size_t len = 0;
+    if (app_blelab_build_packet(s_adv_mode, s_adv_index, s_adv_buf,
+                               sizeof(s_adv_buf), &len) != APP_BLELAB_OK) {
+        return;
+    }
+    s_adv_len = (int)len;
+    int rc = ble_gap_adv_set_data(s_adv_buf, s_adv_len);
+    if (rc != 0) ESP_LOGD(TAG, "轮换广播数据失败 rc=%d", rc);
 }
 
 // ---------------------------------------------------------------------------
@@ -690,6 +833,13 @@ esp_err_t app_ble_finder_start(void)
                    "信道体检正在扫描 Wi-Fi，请等几秒后重试");
         return ESP_ERR_INVALID_STATE;
     }
+    // 射频互斥：Wi-Fi 实验正在发射，同样占着 2.4G 射频。
+    if (app_net_wifilab_running()) {
+        ESP_LOGW(TAG, "Wi-Fi 实验正在发射，暂不能开启找设备");
+        set_reason(s_finder_reason, sizeof(s_finder_reason),
+                   "Wi-Fi 实验正在发射，请先退出该页");
+        return ESP_ERR_INVALID_STATE;
+    }
 
     ble_lock();
     if (!s_saved_loaded) {
@@ -801,6 +951,13 @@ esp_err_t app_ble_remote_start(void)
                    "信道体检正在扫描 Wi-Fi，请等几秒后重试");
         return ESP_ERR_INVALID_STATE;
     }
+    // 射频互斥：Wi-Fi 实验正在发射，同样占着 2.4G 射频。
+    if (app_net_wifilab_running()) {
+        ESP_LOGW(TAG, "Wi-Fi 实验正在发射，暂不能开启遥控");
+        set_reason(s_remote_reason, sizeof(s_remote_reason),
+                   "Wi-Fi 实验正在发射，请先退出该页");
+        return ESP_ERR_INVALID_STATE;
+    }
 
     s_connected = false;
     s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
@@ -873,6 +1030,127 @@ bool app_ble_remote_press(app_remote_mode_t mode, app_remote_btn_t btn, app_remo
 }
 
 // ---------------------------------------------------------------------------
+// BLE 实验：仅广播（broadcaster）
+// ---------------------------------------------------------------------------
+
+void app_ble_adv_set_mode(app_blelab_mode_t mode)
+{
+    if (mode >= APP_BLELAB_MODE_COUNT) return;
+    // 运行中改模式：立即生效——下一轮换就会用新模式（地址保持不变）。
+    s_adv_mode = mode;
+}
+
+app_blelab_mode_t app_ble_adv_mode(void)
+{
+    return s_adv_mode;
+}
+
+void app_ble_adv_set_seed(uint32_t seed)
+{
+    // 0 会让 xorshift32 永远产出 0，视为无效：保持当前 seed。
+    if (seed == 0) return;
+    s_adv_seed = seed;
+}
+
+uint32_t app_ble_adv_seed(void)
+{
+    return s_adv_seed;
+}
+
+void app_ble_adv_set_interval_ms(uint32_t ms)
+{
+    // 钳制到 [200ms, 10s]，避免过快刷屏把主机事件队列压垮，也避免过慢失去"轮换"意义。
+    if (ms < 200) ms = 200;
+    if (ms > 10000) ms = 10000;
+    s_adv_interval_us = (uint32_t)ms * 1000u;
+}
+
+uint32_t app_ble_adv_interval_ms(void)
+{
+    return s_adv_interval_us / 1000u;
+}
+
+esp_err_t app_ble_adv_start(void)
+{
+    ensure_init();
+    s_adv_reason[0] = '\0';
+    s_adv_err = ESP_OK;
+
+    if (s_mode == BLE_MODE_ADV) return ESP_OK;
+    if (s_mode != BLE_MODE_IDLE) {
+        set_reason(s_adv_reason, sizeof(s_adv_reason),
+                   "蓝牙正被另一功能占用，请先退出那个页面");
+        s_adv_err = ESP_ERR_INVALID_STATE;
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (app_ble_prov_active()) {
+        ESP_LOGW(TAG, "蓝牙配网进行中，暂不能开启 BLE 实验");
+        set_reason(s_adv_reason, sizeof(s_adv_reason),
+                   "蓝牙配网正在使用，请先关闭配网");
+        s_adv_err = ESP_ERR_INVALID_STATE;
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (app_net_channel_scan_running()) {
+        ESP_LOGW(TAG, "信道体检正在扫描，暂不能开启 BLE 实验");
+        set_reason(s_adv_reason, sizeof(s_adv_reason),
+                   "信道体检正在扫描 Wi-Fi，请等几秒后重试");
+        s_adv_err = ESP_ERR_INVALID_STATE;
+        return ESP_ERR_INVALID_STATE;
+    }
+    // 射频互斥：Wi-Fi 实验正在发射，同样占着 2.4G 射频。
+    if (app_net_wifilab_running()) {
+        ESP_LOGW(TAG, "Wi-Fi 实验正在发射，暂不能开启 BLE 实验");
+        set_reason(s_adv_reason, sizeof(s_adv_reason),
+                   "Wi-Fi 实验正在发射，请先退出该页");
+        s_adv_err = ESP_ERR_INVALID_STATE;
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    // 每次启动都从配置的 seed 重新派生地址与轮换序列，保证可复现。
+    s_adv_seed_state = s_adv_seed;
+    s_adv_index = 0;
+    s_adv_len = 0;
+
+    s_mode = BLE_MODE_ADV;
+    esp_err_t err = stack_up();
+    if (err != ESP_OK) {
+        s_mode = BLE_MODE_IDLE;
+        set_reason(s_adv_reason, sizeof(s_adv_reason),
+                   "蓝牙协议栈启动失败，请长按↑ 重试");
+        s_adv_err = err;
+        return err;
+    }
+    return ESP_OK;
+}
+
+void app_ble_adv_stop(void)
+{
+    if (s_mode != BLE_MODE_ADV) return;
+
+    if (s_adv_timer) esp_timer_stop(s_adv_timer);
+    if (s_stack_up) ble_gap_adv_stop();
+    stack_down();
+    s_mode = BLE_MODE_IDLE;
+    s_adv_len = 0;
+}
+
+bool app_ble_adv_running(void)
+{
+    return s_mode == BLE_MODE_ADV;
+}
+
+static void post_req(ble_req_t req);
+
+void app_ble_adv_request_start(void) { post_req(BLE_REQ_ADV_START); }
+void app_ble_adv_request_stop(void)  { post_req(BLE_REQ_ADV_STOP); }
+esp_err_t app_ble_adv_last_error(void) { return s_adv_err; }
+
+const char *app_ble_adv_error_text(void)
+{
+    return s_adv_reason[0] ? s_adv_reason : NULL;
+}
+
+// ---------------------------------------------------------------------------
 // 异步请求（串行 worker）
 // ---------------------------------------------------------------------------
 
@@ -895,6 +1173,13 @@ static void ble_ctrl_task(void *arg)
         case BLE_REQ_REMOTE_STOP:
             app_ble_remote_stop();
             s_remote_err = ESP_OK;
+            break;
+        case BLE_REQ_ADV_START:
+            s_adv_err = app_ble_adv_start();
+            break;
+        case BLE_REQ_ADV_STOP:
+            app_ble_adv_stop();
+            s_adv_err = ESP_OK;
             break;
         }
     }

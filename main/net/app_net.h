@@ -10,6 +10,7 @@
 
 #include "esp_err.h"
 #include "logic/app_channel.h"
+#include "logic/app_wifilab.h"
 
 #include <stdbool.h>
 
@@ -91,6 +92,41 @@ app_fetch_state_t app_net_esports_state(void);
 const char       *app_net_esports_error(void);
 // 主动结束拉取并释放 Wi-Fi（退出赛事中心时调用）。
 void              app_net_esports_stop(void);
+
+// ---------------------------------------------------------------------------
+// Wi-Fi 实验（仅自有 / 授权环境：CTF / 实验室无线测试）
+// ---------------------------------------------------------------------------
+// 本角色把 logic/app_wifilab 算好的原始 802.11 帧通过 esp_wifi_80211_tx 发射出去。危险来自
+// "对谁发"，所以必须由上层界面先把用户挡在授权/法律告知之后（见 ui/ui_wifilab.c），本模块
+// 只负责"按要求发射"与严格的状态机。
+//
+// 射频互斥：与"信道体检"、任意蓝牙角色、热点配网共用一路 2.4G 射频，硬互斥——本角色开启前
+// 会拒绝（这些角色都已在跑时），反之信道体检 / 蓝牙角色 / 配网开启前也会用
+// app_net_wifilab_running() 拒绝本角色。用户侧表现为"告诉你去退出另一个页面"。
+//
+// 与蓝牙层一致：start/stop 阻塞式，必须由异步请求 worker 调用，界面只发请求、读状态。
+esp_err_t app_net_wifilab_start(app_wifilab_mode_t mode, app_wifilab_beacon_t beacon,
+                                const uint8_t target_bssid[6], int target_channel,
+                                const char *target_ssid, size_t target_ssid_len,
+                                uint32_t seed);
+void      app_net_wifilab_stop(void);
+bool      app_net_wifilab_running(void);
+
+// 异步请求开启 / 停止，语义与 app_ble_*_request_* 一致（worker 串行处理，界面不阻塞）。
+void      app_net_wifilab_request_start(app_wifilab_mode_t mode, app_wifilab_beacon_t beacon,
+                                       const uint8_t target_bssid[6], int target_channel,
+                                       const char *target_ssid, size_t target_ssid_len,
+                                       uint32_t seed);
+void      app_net_wifilab_request_stop(void);
+
+// 最近一次开启请求的结果（ESP_OK 表示成功）。界面用它把失败原因显示给用户。
+esp_err_t app_net_wifilab_last_error(void);
+// 失败时给普通用户看的一句话原因，成功或尚未请求返回 NULL。
+const char *app_net_wifilab_error_text(void);
+
+// 当前模式与累计发射帧数，供界面状态行展示。
+app_wifilab_mode_t app_net_wifilab_mode(void);
+uint32_t  app_net_wifilab_packets_sent(void);
 
 // 异步拉取单场对局详情（阵容 / 经济 / 选手）写入 app_state_esports()->detail。
 // 需要 match_id（赛程里的比赛 id）。运行中重复调用会被忽略；若赛程拉取正在跑，
