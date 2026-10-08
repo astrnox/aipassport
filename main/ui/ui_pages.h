@@ -108,7 +108,13 @@ void page_esports_exit(void);
 void page_esports_key(bsp_btn_t btn, bsp_btn_ev_t ev);
 void page_esports_tick(void);
 
-// 6 系统设置与配网
+// 7 小说：离线阅读（正文由手机配置页上传）
+void page_novel_enter(void);
+void page_novel_exit(void);
+void page_novel_key(bsp_btn_t btn, bsp_btn_ev_t ev);
+void page_novel_tick(void);
+
+// 8 系统设置与配网
 void page_settings_enter(void);
 void page_settings_exit(void);
 void page_settings_key(bsp_btn_t btn, bsp_btn_ev_t ev);

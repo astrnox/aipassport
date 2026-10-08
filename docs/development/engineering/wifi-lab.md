@@ -153,8 +153,11 @@ Lifecycle in `wifilab_start_locked()`:
    started Wi-Fi itself (`s_wifilab_was_started`) — releases the radio with the usual rollback.
 
 Requested parameters are `app_net_wifilab_start(mode, beacon, target_bssid[6], target_channel,
-target_ssid, target_ssid_len, seed)`. `app_net_wifilab_packets_sent()` exposes the running frame
-counter; the UI status line shows it.
+target_ssid, target_ssid_len, seed)`. Every `esp_wifi_80211_tx()` return value is counted:
+`app_net_wifilab_packets_sent()` counts only frames the driver accepted (`ESP_OK`),
+`app_net_wifilab_packets_failed()` counts rejections, and `app_net_wifilab_tx_error_text()`
+returns the first rejection's error name. The UI status line shows all three, so the frame count
+can never be mistaken for proof that frames left the radio.
 
 ### Verified `esp_wifi` symbols (ESP-IDF 5.5.3)
 
@@ -170,8 +173,9 @@ Follows `ui_blelab.c`'s structure. Three views:
 1. **Consent view (`WL_CONSENT`)** — shows the Chinese authorization/legal notice and requires an
    explicit OK before anything is transmitted. Consent is a page-memory flag cleared on exit.
 2. **Lab view (`WL_LAB`)** — mode list (↑↓ to choose), beacon sub-mode / target line for the
-   relevant modes, OK to start/stop, and a status line showing packets sent via
-   `app_net_wifilab_packets_sent()`. All Wi-Fi work is async
+   relevant modes, OK to start/stop, and a status line showing driver-accepted frames, rejected
+   frames, and the first rejection's error name (`app_net_wifilab_packets_sent()` /
+   `_packets_failed()` / `_tx_error_text()`). All Wi-Fi work is async
    (`app_net_wifilab_request_start/stop`); no `esp_wifi` calls happen under the LVGL lock.
 3. **Target view (`WL_TARGET`)** — for target-taking modes, reuses `app_net_channel_scan_request()`
    to scan and present the discovered AP list (capped at `WL_MAX_APS = 7`) so the user can pick a
@@ -191,13 +195,19 @@ sequence, different seed differs), and the Rickroll lyric set (5 lines, modulo w
 only on the standard library and `logic/app_wifilab.h` — no ESP-IDF/LVGL — and is compiled and run
 by `tools/validate.sh --static` (added to the `wifilab` logic test entry).
 
+`tests/test_net_contract.py` additionally pins the transmit-counting contract: every
+`esp_wifi_80211_tx()` call site must route its result through `wifilab_count_tx()`, and both
+counters may only be incremented there — so a later edit cannot silently turn the sent-frame count
+back into a loop count.
+
 ## Build caveats — `esp_wifi` / `sdkconfig`
 
-- **802.11 raw TX** requires `esp_wifi_80211_tx`, which is available in IDF 5.5.3 but is gated by
-  the `CONFIG_ESP_WIFI_80211_TX_ENABLED` (formerly `CONFIG_ESP_WIFI_ENABLE_WIFI_TX`) option on
-  some targets. If it is not enabled in `sdkconfig.defaults`, the build links but the calls are
-  no-ops / return errors at runtime. **This port did not modify `sdkconfig.defaults`** — verify the
-  flag is present for the target SoC before flashing.
+- **802.11 raw TX** uses `esp_wifi_80211_tx`, which ESP-IDF 5.5.3 provides unconditionally on
+  ESP32-C3: the IDF 4.x options `CONFIG_ESP_WIFI_80211_TX_ENABLED` /
+  `CONFIG_ESP_WIFI_ENABLE_WIFI_TX` no longer exist anywhere under `components/` (only the
+  unrelated `ESP_WIFI_ENABLE_WIFI_TX_STATS` remains), so a constraining Kconfig gate is not a
+  possible cause here. Whether a given frame is accepted is a runtime property of the driver and
+  chip; the module records the `esp_wifi_80211_tx()` return value instead of assuming success.
 - **Wi-Fi mode support**: `WIFI_MODE_AP` and `WIFI_MODE_STA` must both be available. Targets that
   are STA-only (some low-end ESP32 variants / certain power configurations) cannot run the
   `WIFI_IF_AP` beacon/deauth paths. GhostESP restricts SAE flood to C5/C6-class chips; this port

@@ -62,8 +62,8 @@ run_static_checks() {
         "${test_dir}/test_demo_${demo}_runtime"
     done
     # 工具箱的纯逻辑层（不依赖 ESP-IDF/LVGL）：口令、作息、农历、番茄钟、提醒、赛事排序、
-    # 蓝牙查找器、信道体检、节拍器、遥控映射、桌宠火柴人。
-    for logic in anim badge bledetect blelab channel crypto esports finder metronome pet pomodoro qr remote reminder routine secret time totp vault vcard wifilab; do
+    # 蓝牙查找器、信道体检、节拍器、遥控映射、桌宠火柴人、离线小说。
+    for logic in anim badge bledetect blelab channel crypto esports finder metronome novel pet pomodoro qr remote reminder routine secret time totp vault vcard wifilab; do
         extra=""
         case "${logic}" in
         reminder) extra="main/logic/app_time.c" ;;
@@ -79,6 +79,7 @@ run_static_checks() {
     done
     PYTHONDONTWRITEBYTECODE=1 python3 tests/test_font_coverage.py
     PYTHONDONTWRITEBYTECODE=1 python3 tests/test_deep_sleep_contract.py
+    PYTHONDONTWRITEBYTECODE=1 python3 tests/test_net_contract.py
     PYTHONDONTWRITEBYTECODE=1 python3 tests/test_check_repo.py
     PYTHONDONTWRITEBYTECODE=1 python3 tests/test_verify_firmware.py
     PYTHONDONTWRITEBYTECODE=1 python3 tests/test_archive_firmware.py

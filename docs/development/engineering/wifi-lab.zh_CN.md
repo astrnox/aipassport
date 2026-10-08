@@ -97,7 +97,7 @@
 4. `BEACON_SPAM` 下循环遍历信道 1..11；`BEACON_AP_LIST` 复用上次扫描报告（`app_net_channel_report()`）的 SSID/BSSID/信道，而非随机值。
 5. `wifilab_stop_locked()` 停止任务、清除 active 标志，并仅在角色自身启动了 Wi-Fi（`s_wifilab_was_started`）时才按常规回滚释放射频。
 
-请求参数：`app_net_wifilab_start(mode, beacon, target_bssid[6], target_channel, target_ssid, target_ssid_len, seed)`。`app_net_wifilab_packets_sent()` 暴露运行中的帧计数，供界面状态行显示。
+请求参数：`app_net_wifilab_start(mode, beacon, target_bssid[6], target_channel, target_ssid, target_ssid_len, seed)`。每次 `esp_wifi_80211_tx()` 的返回值都会被统计：`app_net_wifilab_packets_sent()` 只计驱动接受（`ESP_OK`）的帧，`app_net_wifilab_packets_failed()` 计被拒的帧，`app_net_wifilab_tx_error_text()` 给出首个拒绝的错误名。界面状态行同时显示三者，帧数不会再被误当成"已经上了空口"。
 
 ### 已核实的 `esp_wifi` 符号（ESP-IDF 5.5.3）
 
@@ -108,7 +108,7 @@
 沿用 `ui_blelab.c` 的结构。三个视图：
 
 1. **授权视图（`WL_CONSENT`）** —— 展示中文法律/授权告知，要求显式确认 OK 后才允许发射。确认标志是页面内存标志，退出页面即清除。
-2. **实验室视图（`WL_LAB`）** —— 模式列表（↑↓ 选择）、相关模式下的信标子模式/目标行、OK 开始/停止、状态行显示已发帧数（`app_net_wifilab_packets_sent()`）。所有 Wi-Fi 工作均为异步（`app_net_wifilab_request_start/stop`）；`esp_wifi` 调用不会在 LVGL 锁内发生。
+2. **实验室视图（`WL_LAB`）** —— 模式列表（↑↓ 选择）、相关模式下的信标子模式/目标行、OK 开始/停止、状态行显示"驱动接受的帧数 / 被拒帧数 / 首个错误名"（`app_net_wifilab_packets_sent()`、`_packets_failed()`、`_tx_error_text()`）。所有 Wi-Fi 工作均为异步（`app_net_wifilab_request_start/stop`）；`esp_wifi` 调用不会在 LVGL 锁内发生。
 3. **目标视图（`WL_TARGET`）** —— 对需要目标的模式，复用 `app_net_channel_scan_request()` 扫描并展示发现的 AP 列表（上限 `WL_MAX_APS = 7`），供用户选择要作用的 BSSID/信道/SSID。行数已做截断，按键处理不会越界访问列表。
 
 在 `main/ui/ui_tools.c` 中注册为 `TOOL_WIFILAB`（名称 `WiFi 实验`，提示 `CTF/实验室无线测试`），加入全部五个 `subpage_*` switch，并在 `main/ui/ui_pages.h` 中声明。
@@ -117,9 +117,11 @@
 
 `tests/test_app_wifilab.c` 断言了每种模式的精确字节/长度（解除认证、解除关联、反向解除认证、EAPOL 下线、含确定性随机区的 SAE 提交、带随机 SSID/MAC 且信道为 6 的 beacon 及帧尾多带的 2 字节 `0x00`、以及 Rickroll 歌词 beacon）、"容量不足返回所需长度"行为、非法入参处理、xorshift32 确定性（同种子同序列、不同种子不同）、以及 Rickroll 歌词集合（5 句、取模回卷）。它仅依赖标准库与 `logic/app_wifilab.h`，不碰 ESP-IDF/LVGL，并由 `tools/validate.sh --static` 编译执行（已在 `wifilab` 逻辑测试条目中加入）。
 
+`tests/test_net_contract.py` 另外钉住发射统计契约：每一处 `esp_wifi_80211_tx()` 的返回值都必须交给 `wifilab_count_tx()`，两个计数器只允许在该函数内自增——后续改动不能再把"已发帧数"悄悄变回循环次数。
+
 ## 构建注意事项 —— `esp_wifi` / `sdkconfig`
 
-- **802.11 原始发射**依赖 `esp_wifi_80211_tx`，IDF 5.5.3 中可用，但在部分目标上受 `CONFIG_ESP_WIFI_80211_TX_ENABLED`（旧称 `CONFIG_ESP_WIFI_ENABLE_WIFI_TX`）选项门控。若该选项未在 `sdkconfig.defaults` 中开启，编译可链接，但运行时调用为空操作/返回错误。**本移植未修改 `sdkconfig.defaults`**——烧录前请确认目标 SoC 已开启该选项。
+- **802.11 原始发射**使用 `esp_wifi_80211_tx`。IDF 5.5.3 在 ESP32-C3 上无条件提供该接口：4.x 时代的 `CONFIG_ESP_WIFI_80211_TX_ENABLED` / `CONFIG_ESP_WIFI_ENABLE_WIFI_TX` 选项已从 `components/` 中整体移除（只余无关的 `ESP_WIFI_ENABLE_WIFI_TX_STATS`），因此"配置门控没开"不是可能的原因。某一帧是否被接受是驱动与芯片的运行时行为；本模块改为记录 `esp_wifi_80211_tx()` 的返回值，不再默认成功。
 - **Wi-Fi 模式支持**：`WIFI_MODE_AP` 与 `WIFI_MODE_STA` 须同时可用。仅支持 STA 的目标（部分低端 ESP32 变体 / 某些功耗配置）无法运行 `WIFI_IF_AP` 的 beacon/deauth 路径。GhostESP 把 SAE 洪泛限定在 C5/C6 级别芯片；本移植采用更通用的平台抽象，**未做按 SoC 的门控**，因此在无法作为 AP 运行的目标上，AP 模式相关模式会在 `esp_wifi_set_mode` 处失败。请确认目标支持 AP + STA 模式。
 - **区域 / 发射功率**：持续发射精心构造的帧可能超出当地的占空比或功率限制；这属于部署/合规问题，而非构建问题。
 - 本模块不调用 `esp_random`，因此逻辑层无需额外的熵源配置；主机测试只覆盖确定性 PRNG。

@@ -83,3 +83,14 @@ app_routine_day_t       *app_routine_day_mut(app_routine_t *r, int weekday, int 
 int app_routine_parse_table(app_routine_t *r, const char *text, bool *out_has_alt);
 
 const char *app_node_type_name(app_node_type_t type);
+
+// 节点名称预设：设备只有三个键、没有输入法，因此"自定义名称"做成从这份列表里循环选，
+// 而不是让用户在设备上打字。第 0 项是"跟随类型"（新节点按类型取名，编辑时保留原名）。
+// 预设里的科目名在配置页导入时也会被识别为"上课"类型（见 app_routine_parse_line），
+// 这样手机端写"08:00-08:45 语文"与设备上选"语文"得到的节点完全一致。
+#define APP_ROUTINE_NAME_PRESET_COUNT 18
+extern const char *const APP_ROUTINE_NAME_PRESETS[APP_ROUTINE_NAME_PRESET_COUNT];
+
+// 名称在预设表里的下标；不在表里（例如手机端自由写的名字）返回 -1。
+// 设备编辑器用它预选：不在表里时显示"跟随类型"，但保存时保留用户自己写的名字。
+int app_routine_name_preset_index(const char *name);

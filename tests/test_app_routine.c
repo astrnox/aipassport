@@ -28,7 +28,7 @@ static void test_templates(void)
     assert(r.days[0][1].nodes[1].start_min == 480);
     assert(r.days[0][1].nodes[1].end_min == 525);
     assert(r.days[0][1].nodes[1].type == APP_NODE_CLASS);
-    assert(strcmp(r.days[0][1].nodes[1].name, "第一节") == 0);
+    assert(strcmp(r.days[0][1].nodes[1].name, "上课") == 0);
     assert(r.days[0][1].nodes[13].type == APP_NODE_LEAVE);
 
     // 住校模板：在工作日基础上多两节晚自习。
@@ -343,6 +343,35 @@ static void test_parse_text(void)
     assert(d2.nodes[1].start_min == 540);
 }
 
+static void test_name_presets(void)
+{
+    // 第 0 项是"跟随类型"，其余是科目：设备端"名称"字段就是按这个顺序循环选的。
+    assert(APP_ROUTINE_NAME_PRESET_COUNT >= 10);
+    assert(strcmp(APP_ROUTINE_NAME_PRESETS[0], "跟随类型") == 0);
+
+    // 预设科目必须能被导入解析识别成"上课"，否则手机端与设备端会得到不同的节点类型。
+    for (int i = 1; i < APP_ROUTINE_NAME_PRESET_COUNT; i++) {
+        char line[64];
+        app_routine_node_t n;
+        snprintf(line, sizeof(line), "08:00-08:45 %s", APP_ROUTINE_NAME_PRESETS[i]);
+        assert(app_routine_parse_line(line, &n));
+        assert(strcmp(n.name, APP_ROUTINE_NAME_PRESETS[i]) == 0);
+        if (strcmp(APP_ROUTINE_NAME_PRESETS[i], "自习") == 0) {
+            assert(n.type == APP_NODE_STUDY);
+        } else {
+            assert(n.type == APP_NODE_CLASS);
+        }
+        // 预设名必须能在表里被查回原下标（设备编辑器靠它预选）。
+        assert(app_routine_name_preset_index(n.name) == i);
+    }
+
+    // 非预设名返回 -1：编辑器显示"跟随类型"，但保存时保留用户自己写的名字。
+    assert(app_routine_name_preset_index("阅读") == -1);
+    assert(app_routine_name_preset_index("") == -1);
+    assert(app_routine_name_preset_index(NULL) == -1);
+    assert(app_routine_name_preset_index("跟随类型") == -1);
+}
+
 int main(void)
 {
     test_templates();
@@ -353,6 +382,7 @@ int main(void)
     test_status();
     test_parse_line();
     test_parse_text();
+    test_name_presets();
     puts("test_app_routine: PASS");
     return 0;
 }

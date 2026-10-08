@@ -270,7 +270,7 @@ Key hardware constraints. The three buttons share a GPIO0 ADC resistor divider, 
 | # | Module | Feature description |
 |---|------|----------|
 | 1 | Home-page information cards | Three cards arranged vertically. The time card shows the current time and date; the routine card shows the name of and countdown to the next routine node, or today's date when there is no routine table; the esports card shows the live score of an in-progress match, or the start time and countdown of the next followed-team match when there is no in-progress match. When there is no esports data at all, this card shows copy guiding the user to provision. |
-| 2 | Home-page module list | Vertically lists six module entries; UP/DOWN moves and OK enters. The default focus stays on the last-used module. |
+| 2 | Home-page module entry | A module carousel presents the eight module entries vertically; UP/DOWN switches and OK enters. The default focus stays on the last-used module. |
 | 3 | Home-page status bar | Persistently shows the time, battery percentage (turns red below 20%), network status, and esports badge. The esports badge appears only when there is a followed match in progress or a followed match starting within 30 minutes. |
 | 4 | Perpetual calendar | Shows the Gregorian date and weekday; long-press UP switches to the Chinese calendar view, overlaying the lunar date, solar terms, and dos and don'ts; UP/DOWN flips months or days. All data is computed locally. |
 | 5 | Time progress | Shows the passage of time at five scales — today, this week, this month, this year, and life — as lit cells; OK cycles through the scales, and UP/DOWN adjusts cell granularity, with three levels per scale: overview, balanced, and fine. Birthday and life expectancy are set on first entry and can be skipped. |
@@ -290,13 +290,14 @@ Key hardware constraints. The three buttons share a GPIO0 ADC resistor divider, 
 | 19 | Teams and players | Shows basic team information and player rosters; supports following a team, with the follow state stored locally and driving schedule sorting, the home-page esports card, and the status-bar badge. |
 | 20 | Single-match detail | Enters the detail of a single match from the schedule or score list, showing second-level information such as lineups and bans, the gold curve, and player data. This page is a drill-down page and is not a default entry. |
 | 21 | Following and esports prompts | The user can follow several teams; matches of followed teams are shown first on the home-page esports card, the status-bar badge, and within the esports center. Follow relationships are stored offline. |
-| 22 | Provisioning | Provides two provisioning paths: BLE provisioning (BLUFI) and device-hotspot web-page provisioning. In hotspot web-page provisioning, the device opens a temporary hotspot; after the phone connects, it opens the configuration page to enter 2.4 GHz Wi-Fi information and personal configuration; after provisioning succeeds the entry closes, but hotspot mode can be reopened at any time (a local service, no internet needed) for configuration and backup. |
+| 22 | Provisioning | Provides two provisioning paths: BLE provisioning (BLUFI) and device-hotspot web-page provisioning. In hotspot web-page provisioning, the device opens a temporary hotspot; after the phone connects, it opens the configuration page to enter 2.4 GHz Wi-Fi information and personal configuration; after provisioning succeeds the entry closes, but hotspot mode can be reopened at any time (a local service, no internet needed) for configuration, novel upload and backup. |
 | 23 | Time and time sync | The time is set in the three-step first-boot guide (one-tap phone calibration preferred, manual setting as fallback); when online, time is synced automatically via NTP and the sync source and time are recorded; when offline, the time can be set manually or calibrated using the phone's time via the phone configuration page. Sync status is visible on the settings page and on time-dependent pages. |
 | 24 | Screen-off and power saving | The automatic screen-off duration can be always-on, 15 seconds, 30 seconds, 1 minute, 2 minutes, or 5 minutes; a key press wakes the device and restarts the timer. It enters light sleep when idle and can enter deep sleep during long standby. Always-on mode warns about power consumption; at low battery it gives advice, and only shortens the screen-off time automatically when the user has already enabled the power-saving option, without silently changing settings. |
 | 25 | Theme and display | Provides light and dark themes and an option to switch automatically by local time period (for example, dark from 19:00 to 07:00 the next day), saved after the user selects it; dark is only for night-time eye comfort and does not imply power saving. |
 | 26 | Sound and mute | Provides a mute switch and volume levels, covering alert tones, node-switching tones, and Pomodoro alert tones. Mute status is visible in the status bar. |
 | 27 | Data backup and clearing | Supports exporting badges, routines, dynamic-passcode secrets, and recovery codes to the phone configuration page as a backup; supports clearing data by category, with a second confirmation before clearing. |
 | 28 | Desktop stick-figure pet | A pet card on the home page, plus a tiny silhouette of the very same stick figure centered in the status bar on every page; both share one state, so the user sees one and the same character. It ships 51 actions in five groups - everyday poses (idle, look, wave, jump, walk, run, sit, squat, sleep, yawn, stretch, pace, tiptoe, tap-foot), emotions (think, cheer, victory, laugh, cry, angry, facepalm, sigh, shrug, shake, sneeze, head-shake), gestures (clap, salute, point, beckon, flex, arms-crossed, hands-on-hips, phone, drink, knock, read, watch), dance (dance, dab, robot, disco, moonwalk) and sport or martial arts (jump-rope, jumping-jack, hula, kick, high-kick, punch, karate, crane) - picks one at random while idle according to its current mood without repeating the previous one, and speaks in emoticons or short phrases. It reacts to Pomodoro focus start / focus end / break end, reminder due, low battery, a saved Bluetooth device, and a tracked tracker tag, and offers a "mischief mode". |
+| 29 | Offline novel | The phone configuration page can upload one UTF-8 plain-text novel (up to about 1 MB), stored in its own partition; the device reads it offline page by page: UP/DOWN turns pages, OK opens the table of contents (chapter headings that follow the usual Chinese pattern (an ordinal marker followed by the chapter / volume / section keyword) are detected automatically, and books without headings fall back to percentage jumps), long-press UP/DOWN jumps to the start/end of the book, long-press OK returns. The reading position is remembered as "text CRC + byte offset", so it survives both being offline and a restart. Characters outside the font's coverage are shown as □ instead of silently rendering as blank space. |
 
 ### 6.4 Module details and prototypes
 
@@ -310,21 +311,23 @@ Key hardware constraints. The three buttons share a GPIO0 ADC resistor divider, 
 │  Until class ends  12:36  3rd period                 │  ← C Routine card (countdown to next node)
 │  EDG 1:0 BLG  Game 2                                 │  ← D Esports card (in-progress takes priority)
 ├──────────────────────────────────────────────────────┤
-│  ▸ Time and calendar                                 │  ← E Module list
-│    Focus and productivity                            │
-│    Routine and countdown                             │
-│    Identity and tools                                │
+│  ▸ Time and calendar                                 │  ← E Module carousel (eight entries:
+│    Focus and productivity                            │     time and calendar / focus and productivity /
+│    Routine and countdown                             │     routine and countdown / identity / tools /
+│    Identity                                          │     LoL esports center / novel / system settings;
+│    Tools                                             │     UP/DOWN switches, OK enters)
 │    League of Legends esports center                  │
+│    Novel                                             │
 │    System settings                                   │
 ├──────────────────────────────────────────────────────┤
-│  ↑↓ Select  OK Enter  Long↑ Panel  LongOK Screen-off │  ← F Hint bar
+│  ↑↓ Switch  OK Enter  Long↑ Panel  LongOK Screen-off │  ← F Hint bar
 └──────────────────────────────────────────────────────┘
 ```
 
 - Business logic: after boot, it enters the home page and restores the last focused module. The status bar refreshes the time and battery every 30 seconds. The routine card computes the next node from the local routine table, and falls back to showing today's date when there is no routine table. The esports card selects content by the priorities in section 7: when there is a followed match in progress it shows the live score, otherwise it shows the countdown to the nearest followed match, and when there is neither it shows guiding copy.
 - Interaction logic: UP/DOWN moves the module focus and updates the highlight immediately; OK enters the selected module; long-press OK turns off the screen; long-press UP opens the quick panel (mute, theme, brightness, start Pomodoro, do-not-disturb, pet mischief). The three information cards do not take part in focus movement, and pressing OK only acts on the module list. This revision removes the home-page shortcut of long-pressing DOWN to directly start the Pomodoro timer: it is a hidden gesture and also accidentally starts a 25-minute timer that users often notice only seconds later; the Pomodoro timer can still be entered from the module list and the quick panel.
 - Pet: a pet card sits permanently on the home page, and a tiny silhouette of the same stick figure is centered in the status bar on every page (see 6.4.9). The pet takes no buttons and joins no focus movement; it moves on its own in the background and reacts to events such as the Pomodoro timer, reminders, and battery.
-- Rule constraints: the module list is fixed at six entries and cannot be added to or removed by the user. The focus position is saved locally and restored after a restart. The information-card height is fixed to keep the module list position from jumping with the content.
+- Rule constraints: the module list is fixed at eight entries (time and calendar, focus and productivity, routine and countdown, identity, tools, LoL esports center, novel, system settings) and cannot be added to or removed by the user. The focus position is saved locally and restored after a restart. The information-card height is fixed to keep the module list position from jumping with the content.
 - Boundaries and exceptions: when not provisioned, the network status shows "not provisioned" and the esports badge and card show guiding copy; when the battery reading fails it shows --% without blocking other features; when the routine table is empty the routine card does not occupy blank space and directly shows the date.
 
 #### 6.4.2 Time and calendar (features 4, 5, 6)
@@ -391,7 +394,17 @@ Key hardware constraints. The three buttons share a GPIO0 ADC resistor divider, 
 
 - Business logic: the routine table defines nodes by weekday and odd/even week, each node containing a name, start/end times, and a type (class, break, lunch break, evening study, dismissal, custom). The page locates the current node in real time and computes the remaining time to the next node; node switching can optionally play a tone and show a screen prompt. All computation is done locally on the device.
 - Interaction logic: UP/DOWN scrolls the timeline, OK switches between the today timeline and the week view, and long-press OK goes back. The current node scrolls automatically into view and is highlighted.
-- Rule constraints: nodes are ordered by ascending time and cannot overlap; node names are recommended to stay within 8 Chinese characters, and when they exceed that the font is automatically shrunk to display the full text, without silently truncating user input; two templates, day-student and boarding-student, are provided, and users can add or remove nodes on top of a template; importing structured text on the phone configuration page is supported, validating the time format and overlaps on import.
+- Rule constraints: nodes are ordered by ascending time and cannot overlap; node names are recommended to stay
+       within 8 Chinese characters, and when they exceed that the font is automatically shrunk to show them in full
+       instead of silently truncating user input; two templates (day student / boarding student) are provided and users
+       can add or remove nodes on top of them. Class nodes in the templates are only given the neutral name "Class";
+       no "1st period / 2nd period" numbering is preloaded. On the device, editing a node lets the user cycle through
+       preset names (follow type, Chinese, maths, English, physics, chemistry, biology, information technology, history,
+       geography, politics, science, PE, music, art, self-study, morning reading, class meeting): choosing "follow type"
+       names a new node after its type and keeps the existing name when editing, so a name imported from the phone is
+       never lost by editing the time. The phone configuration page can import arbitrary names as structured text
+       ("08:00-08:45 Chinese"); the import validates the time format and overlaps and infers the node type from the
+       name — preset subject names are classified as "class", so the phone and the device produce the same kind of node.
 - Boundaries and exceptions: when no routine table is defined, the page shows guidance and offers one-tap template application; crossing midnight (for example, evening study until 22:30) is treated as the same day and is not split into two days; when the device time is changed substantially, the countdown follows the current device time and warns that it may be distorted.
 
 #### 6.4.5 Identity and tools (features 12, 13, 14, 15)
@@ -506,7 +519,7 @@ flowchart TD
     I --> J["Close the provisioning entry and release Wi-Fi"]
 ```
 
-- Business logic: after provisioning succeeds, the device saves the credentials and syncs the time automatically, then fetches esports data on demand; the provisioning entry closes after success to avoid long-term exposure. The hotspot configuration page is a device-local service that does not need the internet, and the user can reopen hotspot mode from settings at any time to change the badge, import a routine table, write a passcode secret, or export a backup, so purely offline users are never stuck because "the entry is closed." The Wi-Fi and BLE protocol stacks are initialized only while the corresponding page is open and are released on exit, in line with the repository's constraint that Wi-Fi and BLE are on-demand services.
+- Business logic: after provisioning succeeds, the device saves the credentials and syncs the time automatically, then fetches esports data on demand; the provisioning entry closes after success to avoid long-term exposure. The hotspot configuration page is a device-local service that does not need the internet, and the user can reopen hotspot mode from settings at any time to change the badge, import a routine table, write a passcode secret, upload a novel, or export a backup, so purely offline users are never stuck because "the entry is closed." The Wi-Fi and BLE protocol stacks are initialized only while the corresponding page is open and are released on exit, in line with the repository's constraint that Wi-Fi and BLE are on-demand services.
 - Interaction logic: on the settings page, UP/DOWN selects an entry and OK enters it; during provisioning the screen shows the hotspot name, password, or a waiting state; long-press OK goes back one level on any settings sub-page.
 - Rule constraints: only 2.4 GHz Wi-Fi is supported; the device time can be synced online, set manually, or calibrated with the phone's time; the automatic screen-off duration is a single choice among the given options; the theme is a single choice among light, dark, and automatic, with automatic switching by fixed local-time periods (for example, dark from 19:00 to 07:00 the next day) and no sunset calculation that requires latitude/longitude; mute and volume levels are set independently; data backup and clearing provide categorized operations with a second confirmation before clearing.
 - Boundaries and exceptions: on provisioning failure, the entered information is retained and retry is allowed, without entering an infinite loop; wrong credentials give a clear prompt; clearing operations refresh the relevant pages after completion; backup export is done on the phone configuration page, and the device is only responsible for handing the data to the configuration page.
@@ -548,6 +561,24 @@ flowchart TD
 - Rule constraints: actions and lines use only ASCII and common emoticons, so no new font is needed. The figure keeps one skeleton ratio and line width to stay recognizably the same character; segment lengths are percentages of the canvas height (torso 20%, upper arm 13%, forearm 11%, thigh/shin 15% each, head radius 6%, neck 4%, hip at 60% of the canvas), and at any size the head, torso, and limbs stay inside the canvas, so it still reads as a figure at small sizes. Two geometric rules keep the drawing readable: an elbow never crosses the head circle (a raised arm whose upper segment is too close to vertical draws a line through the head), and the standing pose keeps the legs and arms clear of the torso centreline (a limb drawn within a couple of pixels of the torso merges with it into one thick line). Both are asserted per action in the host test. Action keyframes are `static const` tables, so all 51 actions live in flash and cost no RAM (`.data`/`.bss` stay at zero; the whole feature costs about 7 KB of flash and 96 bytes of resident state, against 2.4 KB and 88 bytes for the previous 15 actions). The redraw cadence is 50 ms (20 fps): the shortest keyframe transition is 110 ms, and at the previous 120 ms cadence such a segment could be skipped entirely, which reads as a jump rather than a motion. Rendering uses line widgets rather than a canvas bitmap: a 60×60 RGB565 canvas would cost 7 KB of resident memory, while lines cost less and only invalidate the small area they cross, which is less likely to drop frames with a single DMA buffer.
 - Boundaries and exceptions: nothing is redrawn while the screen is off, and the pet settles back to standing on the first tick after wake; when the drawing-rig limit is exceeded the pet is skipped without failing the page; the pet holds no heap memory and is destroyed with the page.
 
+#### 6.4.10 Offline novel (feature 29)
+
+```
+┌──────────────────────────────────────────────────────┐
+│ 14:32   ▓▓ 76%                                       │  ← Status bar
+├──────────────────────────────────────────────────────┤
+│ Novel title                                     42%  │  ← Title and reading progress
+│ …26 half-width units per line                        │
+│ …10 lines per page, turning a page moves to the next  │
+├──────────────────────────────────────────────────────┤
+│ ↑↓ Page  OK Contents  Long↑↓ Start/End  LongOK Back  │  ← Hint bar
+└──────────────────────────────────────────────────────┘
+```
+
+- Business logic: the text is uploaded from the phone configuration page (system settings → enable provisioning → novel) and the device then reads it offline, page by page, with no network and no external reading service. Pagination is measured in "half-width units": a half-width character is 1 unit, a full-width one (including CJK characters and full-width punctuation) is 2, a tab is 4; a line holds 26 units and a page holds 10 lines. Because pagination only depends on an integer budget it is decoupled from the concrete font: the same text paginates identically on any device and a CJK character is never split in half. While uploading, the device also scans chapter headings (a line that starts with the Chinese ordinal marker and contains one of the chapter / volume / section keywords within its first 16 characters, and is no longer than 40 characters) and writes an index into the partition header, at most 96 chapters, so opening the table of contents needs no re-scan.
+- Interaction logic: on the reading page, a short UP/DOWN turns the page and a short OK opens the table of contents; in the contents, UP/DOWN selects a chapter and OK jumps to it; long-press UP/DOWN jumps straight to the start or end of the book; long-press OK returns to the home page. When no chapter headings were found the contents degrade to five jumps: 10% / 25% / 50% / 75% / 90% of the book.
+- Rule constraints: only UTF-8 plain text is accepted; the upload is validated chunk by chunk and a single invalid byte discards the whole book instead of silently storing half of it. The text limit is 1 MB (a 1 MB novel partition minus the 4 KB header and index area) and re-uploading replaces the same single book. The reading position is stored as "text byte offset + text CRC" in a small NVS blob: changing the book (a different CRC) starts from the beginning, pages save it throttled, and leaving the page always saves once. The text is not copied into RAM; a read-only mapping feeds the UI directly.
+- Boundaries and exceptions: with no novel uploaded the page shows an empty state with the upload path; when the novel partition is unavailable or the mapping fails it says the novel cannot be opened without blocking anything else; characters outside the font's coverage (rare CJK characters beyond GB2312) are replaced with □ so the reader can tell that one character is not being displayed rather than seeing a blank.
 ### 6.5 Storage, offline, and data strategy
 
 This product treats offline usability as an architectural premise. All user data and the esports cache are stored in the device's non-volatile storage, and the device is a fully functional tool with no network and no phone.
@@ -557,6 +588,7 @@ This product treats offline usability as an architectural premise. All user data
 | Time base | Last time-sync time, time zone, manually set time | Yes (depends on the device clock, which may drift) | Overwritten by the base after NTP time sync |
 | Personal configuration | Badge data, routine table, reminders, Pomodoro configuration and records, followed teams | Yes | Does not take part in sync; read and written only on the phone configuration page |
 | Security data | Dynamic-passcode secret and recovery code | Yes (generated fully offline) | No network |
+| Offline novel | One UTF-8 plain-text novel (its own partition) plus the reading position (NVS) | Yes (text and position are both local) | No network |
 | Esports cache | The most recent successfully fetched schedule, scores, standings, and team information | Yes (read-only, freshness labeled) | Overwritten and the sync time recorded after a successful fetch |
 
 Runtime persistence. The Pomodoro remaining time, timer state, and last page are written to non-volatile storage, so after a light-sleep resume or a deep-sleep restart the device returns to the state before the interruption and does not throw away the operation the user was performing.
@@ -569,7 +601,7 @@ Backup and restore. Badges, routine tables, dynamic-passcode secrets, and recove
 
 The device has 8 MB Flash and no PSRAM, and a bitmap Chinese font occupies considerable space, which is the real constraint behind the community feedback "it would be even better if it supported Chinese." The first revision once proposed a compromise of showing a warning when user-defined text had a missing glyph, but this makes the UI look incomplete and has been discarded.
 
-By calculation, fully covering the common Chinese characters is affordable within the Flash budget: at 16×16 dot matrix, the GB2312 common-character set is about 6763 characters and the font is about 216 KB; at 24×24 dot matrix it is about 487 KB. Relative to the 8 MB Flash and the application partition, this usage is entirely acceptable. Therefore this product requires that UI copy and user-defined text (badge, routine node names, reminders, team names) all use the same complete font, with no missing-glyph warnings. For rare characters beyond the font's range, a placeholder plus pinyin is used, and such characters are very few.
+By calculation, fully covering the common Chinese characters is affordable within the Flash budget: at 16×16 dot matrix, the GB2312 common-character set is about 6763 characters and the font is about 216 KB; at 24×24 dot matrix it is about 487 KB. Relative to the 8 MB Flash and the application partition, this usage is entirely acceptable. Therefore this product requires that UI copy and user-defined text (badge, routine node names, reminders, team names) all use the same complete font, with no missing-glyph warnings. For rare characters beyond the font's range, a placeholder plus pinyin is used, and such characters are very few. A novel's text, however, is arbitrary: characters outside the font's coverage (rare CJK characters beyond GB2312) are shown as □ on the reading page so the reader can tell that one character is not being displayed, rather than seeing a blank spot.
 
 On memory, having no PSRAM means render buffers and image assets must be restrained: esports data is loaded in pages to avoid reading the entire schedule and standings into memory at once; UI changes redraw only the affected regions, accommodating a single DMA buffer.
 
@@ -703,11 +735,20 @@ Empty state. Explains why it is empty and the next action, never a purely blank 
 
 ### 8.6 Motion
 
-Page transitions fade in over 150 milliseconds; list scrolling has no extra animation; the ring progress refreshes every 100 milliseconds; a top progress bar appears during refresh; screen-off fades out over 200 milliseconds; node switching and reminders are presented with a 300-millisecond hint bar plus an optional alert tone. Motion is restrained to avoid dropped frames on a device without PSRAM. The desktop stick-figure pet (6.4.9) is the only continuously moving element: it refreshes its skeleton lines on a 120-millisecond tick and only redraws while the screen is on; apart from it there is no decorative animation.
+Page transitions fade in over 150 milliseconds; list scrolling has no extra animation; the ring progress refreshes
+       every 100 milliseconds; a top progress bar appears during refresh; screen-off fades out over 200 milliseconds;
+       routine node changes and reminders appear as a 300-millisecond hint bar plus an optional chime. Motion stays
+       restrained to avoid dropping frames on a device without PSRAM. The desktop pet (6.4.9) is the only
+       continuously moving element, refreshing its skeleton at a 120-millisecond beat and only while the screen is on;
+       apart from it there is no decorative animation.
 
 ### 8.7 Key screen list
 
-Screens that need mockups: home page, perpetual calendar, time progress, stopwatch and timer, Pomodoro timer, reminder list, routine timeline, routine configuration, electronic badge, dynamic passcode, hardware self-test, esports schedule, standings, team detail, match detail, first-time guidance and time setting, provisioning guidance, system settings, quick panel, empty state, and offline state. The corresponding interactive prototype is in the companion file [`passport-toolbox-ui-prototype.html`](passport-toolbox-ui-prototype.html), which already covers all of the screens above.
+Screens that need mockups: home page, perpetual calendar, time progress, stopwatch and timer, Pomodoro timer,
+       reminder list, routine timeline, routine configuration, electronic badge, dynamic passcode, hardware self-test,
+       esports schedule, standings, team detail, match detail, novel reading and chapter contents, first-boot guide and
+       time setting, provisioning guide, system settings, quick panel, empty and offline states. The interactive
+       prototype is provided alongside in [`passport-toolbox-ui-prototype.html`](passport-toolbox-ui-prototype.html).
 
 ---
 

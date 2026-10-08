@@ -111,6 +111,13 @@ app_reminder_list_t *app_state_reminders(void);
 app_pomodoro_t     *app_state_pomodoro(void);
 app_esport_cache_t *app_state_esports(void);
 
+// ---- 小说阅读进度 ----
+// 记住"读到正文第几个字节"，并与那本书的 data_crc 绑定：换了书（CRC 不同）时界面
+// 会从头开始，而不是拿旧偏移切到新正文中间。翻页会频繁更新，因此单独一个小 blob。
+uint32_t app_state_novel_offset(void);
+uint32_t app_state_novel_crc(void);
+void     app_state_set_novel_pos(uint32_t offset, uint32_t data_crc);
+
 // 密码本。明文与加密两种模式的容器都由 logic/app_vault 定义；这里只负责在 NVS 里
 // 存取字节流，解锁状态是运行态、重启即回到锁定（加密模式）。
 app_vault_t        *app_state_vault(void);

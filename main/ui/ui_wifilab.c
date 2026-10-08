@@ -108,12 +108,23 @@ static int lab_sig(void)
 static void update_status(void)
 {
     if (!s.status_lbl) return;
-    char stat[48];
+    char stat[96];
     if (app_net_wifilab_last_error() != ESP_OK) {
         snprintf(stat, sizeof(stat), "状态：未开启");
     } else if (app_net_wifilab_running()) {
-        snprintf(stat, sizeof(stat), "状态：发射中  已发 %u 帧",
-                 (unsigned)app_net_wifilab_packets_sent());
+        // "已发"只统计驱动接受的帧。有帧被拒时同时显示失败数与首个错误码：设备上拿不到
+        // 串口日志时，这行字就是唯一能说清"为什么没有效果"的地方。
+        unsigned sent = (unsigned)app_net_wifilab_packets_sent();
+        unsigned failed = (unsigned)app_net_wifilab_packets_failed();
+        const char *txerr = app_net_wifilab_tx_error_text();
+        if (failed == 0) {
+            snprintf(stat, sizeof(stat), "状态：发射中  已发 %u 帧", sent);
+        } else if (txerr) {
+            snprintf(stat, sizeof(stat), "状态：发射中  已发 %u 失败 %u（%s）",
+                     sent, failed, txerr);
+        } else {
+            snprintf(stat, sizeof(stat), "状态：发射中  已发 %u 失败 %u", sent, failed);
+        }
     } else {
         snprintf(stat, sizeof(stat), "状态：已停止");
     }

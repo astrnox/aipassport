@@ -98,7 +98,7 @@ static struct {
 
 // 节点编辑器当前目标：-1 表示新增，否则是今日节点下标。编辑器回调读取它。
 static int s_edit_index = -1;
-static int s_edit_values[5];
+static int s_edit_values[6];
 
 // 数据变更后重建今日/编辑页并刷新一周页。定义在编辑视图之后，这里前置声明。
 static void after_data_change(void);
@@ -550,21 +550,35 @@ static void node_edit_done(bool saved, void *user)
     int start = s_edit_values[0] * 60 + s_edit_values[1];
     int end   = s_edit_values[2] * 60 + s_edit_values[3];
     int type  = s_edit_values[4];
+    int name_pick = s_edit_values[5];
     if (type < 0 || type >= 7) type = APP_NODE_CUSTOM;
+    if (name_pick < 0 || name_pick >= APP_ROUTINE_NAME_PRESET_COUNT) name_pick = 0;
     if (end > 1440 || end <= start) {
         ui_hint_flash("结束时间要晚于开始时间，未保存", 2200);
         return;
     }
+
+    app_routine_day_t *day = edit_day();
+    if (!day) return;
 
     app_routine_node_t node;
     memset(&node, 0, sizeof(node));
     node.start_min = start;
     node.end_min = end;
     node.type = (app_node_type_t)type;
-    app_utf8_copy_prefix(app_node_type_name(node.type), 8, node.name, sizeof(node.name));
 
-    app_routine_day_t *day = edit_day();
-    if (!day) return;
+    // 名称：选了预设科目就用它；选"跟随类型"时，新增节点按类型取名，编辑节点保留原名
+    // （手机端导入的自定义名字不会因为改一次时间就被改掉）。
+    if (name_pick > 0) {
+        app_utf8_copy_prefix(APP_ROUTINE_NAME_PRESETS[name_pick], 8, node.name,
+                             sizeof(node.name));
+    } else if (s_edit_index >= 0 && s_edit_index < day->count &&
+               day->nodes[s_edit_index].name[0]) {
+        app_utf8_copy_prefix(day->nodes[s_edit_index].name, 8, node.name, sizeof(node.name));
+    }
+    if (!node.name[0]) {
+        app_utf8_copy_prefix(app_node_type_name(node.type), 8, node.name, sizeof(node.name));
+    }
 
     if (s_edit_index < 0) {
         if (app_routine_add_node(day, &node) < 0) {
@@ -604,6 +618,7 @@ static void edit_open(int index)
         s_edit_values[2] = start / 60 + 1;
         s_edit_values[3] = start % 60;
         s_edit_values[4] = APP_NODE_CLASS;
+        s_edit_values[5] = 0;                 // 跟随类型
     } else {
         const app_routine_node_t *n = &day->nodes[index];
         s_edit_values[0] = n->start_min / 60;
@@ -611,17 +626,21 @@ static void edit_open(int index)
         s_edit_values[2] = n->end_min / 60;
         s_edit_values[3] = n->end_min % 60;
         s_edit_values[4] = (int)n->type;
+        // 名字是预设科目就预选中它；是手机端自由写的名字则显示"跟随类型"（保存时保留原名）。
+        int preset = app_routine_name_preset_index(n->name);
+        s_edit_values[5] = preset > 0 ? preset : 0;
     }
 
-    static const ui_timeedit_field_t fields[5] = {
+    static const ui_timeedit_field_t fields[6] = {
         { "开始时", 0, 23, 1, NULL },
         { "开始分", 0, 59, 5, NULL },
         { "结束时", 0, 24, 1, NULL },
         { "结束分", 0, 59, 5, NULL },
         { "类型",   0, 6,  1, RT_TYPE_NAMES },
+        { "名称",   0, APP_ROUTINE_NAME_PRESET_COUNT - 1, 1, APP_ROUTINE_NAME_PRESETS },
     };
     ui_timeedit_open(s.page.scr, index < 0 ? "新增作息节点" : "编辑作息节点",
-                     fields, s_edit_values, 5, node_edit_done, NULL);
+                     fields, s_edit_values, 6, node_edit_done, NULL);
 }
 
 static void node_delete_confirm(bool confirmed, void *user)

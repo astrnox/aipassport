@@ -20,6 +20,7 @@
 
 #include "app_assets.h"
 #include "app_metrics.h"
+#include "app_novel.h"
 #include "app_state.h"
 #include "logic/app_vault.h"
 #include "net/app_net.h"
@@ -147,6 +148,11 @@ void app_main(void)
     // 失败不影响离线功能，只是动图不可用。
     if (app_assets_init() != ESP_OK) {
         ESP_LOGW(TAG, "动图资源分区不可用，名片将只显示文字");
+    }
+
+    // 小说分区：挂在界面之前，进入小说页时才能判断"有没有书"。
+    if (app_novel_init() != ESP_OK) {
+        ESP_LOGW(TAG, "小说分区不可用，小说页将提示存储不可用");
     }
 
     // 联网基础设施（默认事件循环与 netif）只准备一次，不打开射频。

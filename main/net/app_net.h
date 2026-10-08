@@ -50,7 +50,8 @@ esp_err_t app_net_wifi_radio_up(void);
 // NTP 校时
 // ---------------------------------------------------------------------------
 // 阻塞等待一次 SNTP 校时（最长约 8 秒）。成功时通过 app_state_set_time() 写入本地
-// 时间并返回 ESP_OK；未联网或超时返回错误。需在 worker task 调用。
+// 时间（同时写入 newlib 系统时钟——HTTPS 的证书有效期校验读的是 time(NULL)）并返回
+// ESP_OK；未联网或超时返回错误。需在 worker task 调用。
 esp_err_t app_net_sync_time(void);
 
 // ---------------------------------------------------------------------------
@@ -124,9 +125,13 @@ esp_err_t app_net_wifilab_last_error(void);
 // 失败时给普通用户看的一句话原因，成功或尚未请求返回 NULL。
 const char *app_net_wifilab_error_text(void);
 
-// 当前模式与累计发射帧数，供界面状态行展示。
+// 当前模式与累计发射统计，供界面状态行展示。sent 只统计驱动接受（esp_wifi_80211_tx
+// 返回 ESP_OK）的帧，failed 统计被驱动拒绝的帧——分开显示才能区分"在发"与"发不出去"。
 app_wifilab_mode_t app_net_wifilab_mode(void);
 uint32_t  app_net_wifilab_packets_sent(void);
+uint32_t  app_net_wifilab_packets_failed(void);
+// 首个发射错误的一句话（如 "ESP_ERR_WIFI_IF"），尚未出现发射错误时返回 NULL。
+const char *app_net_wifilab_tx_error_text(void);
 
 // 异步拉取单场对局详情（阵容 / 经济 / 选手）写入 app_state_esports()->detail。
 // 需要 match_id（赛程里的比赛 id）。运行中重复调用会被忽略；若赛程拉取正在跑，

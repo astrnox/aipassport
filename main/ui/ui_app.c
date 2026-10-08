@@ -35,6 +35,7 @@ static const ui_module_t MODULES[] = {
     { "身份", page_identity_enter, page_identity_exit, page_identity_key, page_identity_tick },
     { "工具", page_tools_enter, page_tools_exit, page_tools_key, page_tools_tick },
     { "英雄联盟赛事中心", page_esports_enter, page_esports_exit, page_esports_key, page_esports_tick },
+    { "小说", page_novel_enter, page_novel_exit, page_novel_key, page_novel_tick },
     { "系统设置", page_settings_enter, page_settings_exit, page_settings_key, page_settings_tick },
 };
 #define MODULE_COUNT ((int)(sizeof(MODULES) / sizeof(MODULES[0])))
@@ -480,7 +481,6 @@ static void app_tick(lv_timer_t *timer)
     advance_pomodoro();
     check_reminders();
     check_routine_node();
-    check_low_battery();
     tick_missed_reminders();
     // 免打扰结束后补报期间压下的提醒。放在这里而不是阶段切换的分支里，是因为弹层
     // 冲突时它需要等界面空下来再报。

@@ -14,13 +14,15 @@ one - it does not reserve OTA slots.
 The upstream template defaults to a minimal table (24 KB NVS, 4 KB PHY data,
 and one factory application covering the rest of Flash). This product
 deliberately replaces that layout because the tool box persists far more
-per-device data and stores animation frames outside NVS:
+per-device data, and stores both animation frames and the novel text outside
+NVS:
 
 | Partition | Type/subtype | Offset | Size | Purpose |
 | --- | --- | ---: | ---: | --- |
 | `nvs` | data/NVS | `0x9000` | `0x16000` | ESP-IDF and application key-value storage (88 KB) |
 | `phy_init` | data/PHY | `0x1F000` | `0x1000` | PHY initialization data |
-| `factory` | app/factory | `0x20000` | `0x540000` | The single application image (5.25 MB) |
+| `factory` | app/factory | `0x20000` | `0x440000` | The single application image (4.25 MB) |
+| `novel` | `0x40`/`0x01` | `0x460000` | `0x100000` | One offline novel (text plus chapter index, 1 MB) |
 | `assets` | `0x40`/`0x00` | `0x560000` | `0x2A0000` | Personal-card animation frames (6 slots, 2.625 MB) |
 
 Why each choice:
@@ -29,16 +31,27 @@ Why each choice:
   up to ten TOTP accounts, reminders, the routine table, and settings all live
   in NVS. 24 KB left no room for wear levelling headroom and would have started
   failing writes once the vault grew.
-- **5.25 MB application.** The three generated Chinese fonts plus LVGL, Wi-Fi, and
-  BLE need roughly 2.5-3 MB. 5.25 MB keeps a comfortable margin for growth while
-  still leaving room for resources.
+- **4.25 MB application.** The three generated Chinese fonts plus LVGL, Wi-Fi,
+  and BLE currently need about 3.5 MB, so 4.25 MB still leaves roughly 0.78 MB of
+  growth room. Cutting 1 MB out for the novel is what produced this number: the
+  text limit of about 350,000 Chinese characters covers a full mid-length novel
+  without squeezing the application partition close to full.
+- **`novel` is a custom partition as well, not a file system.** The device only
+  needs "one book, read sequentially, replaced whole", so the layout is a header,
+  a chapter index, and the text, all defined by `main/app_novel.c`; the text
+  always starts at `0x1000` inside the partition (the index area has a fixed
+  reserve and the text lands on a sector boundary). A write follows the commit
+  order "erase header, write text, scan chapters and write the index, write the
+  header last", so a power cut can only ever present the partition as "no book".
 - **`assets` is a custom partition type, not `spiffs`/`fat`.** ESP-IDF reserves
   types `0x40`-`0xFE` for application-defined formats; the bootloader ignores
   them. This firmware runs no file system on the partition - the on-flash layout
   is a fixed slot table implemented in `main/app_assets.c` and validated by the
   host tests for `main/logic/app_anim.c`. Borrowing a `spiffs` subtype without a
   file system would have been misleading.
-- **Six 448 KB slots, and the partition ends exactly at 8 MB.** A slot must hold
+- **Six 448 KB slots, and the partition ends exactly at 8 MB.** `assets` keeps
+  both its offset and size, so a firmware update cannot disturb uploaded
+  animations. A slot must hold
   the largest permitted animation, 96 x 96 RGB565 x 24 frames, which is 442,368
   bytes plus a 48-byte header. Slot offsets are fixed multiples of the slot size
   because a personal card stores only a slot number: if slot size floated with

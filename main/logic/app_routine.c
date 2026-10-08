@@ -14,41 +14,51 @@ typedef struct {
 } routine_template_entry_t;
 
 // 走读模板：每天相同，仅工作日记入；周六/周日留空。
+// 上课节点不预置"第一节/第二节"这类编号：课程名由用户自己定（设备端从下面的预设里选，
+// 手机端可自由写"08:00-08:45 语文"），模板只给一个中性的"上课"。
 static const routine_template_entry_t DAY_SCHOOL_TEMPLATE[] = {
     { 470,  480,  APP_NODE_ARRIVE, "到校"   },
-    { 480,  525,  APP_NODE_CLASS,  "第一节" },
+    { 480,  525,  APP_NODE_CLASS,  "上课"   },
     { 525,  535,  APP_NODE_BREAK,  "课间"   },
-    { 535,  580,  APP_NODE_CLASS,  "第二节" },
-    { 580,  625,  APP_NODE_CLASS,  "第三节" },
+    { 535,  580,  APP_NODE_CLASS,  "上课"   },
+    { 580,  625,  APP_NODE_CLASS,  "上课"   },
     { 625,  640,  APP_NODE_BREAK,  "课间"   },
-    { 640,  685,  APP_NODE_CLASS,  "第四节" },
-    { 685,  715,  APP_NODE_CLASS,  "第五节" },
+    { 640,  685,  APP_NODE_CLASS,  "上课"   },
+    { 685,  715,  APP_NODE_CLASS,  "上课"   },
     { 715,  840,  APP_NODE_LUNCH,  "午休"   },
-    { 840,  885,  APP_NODE_CLASS,  "第六节" },
+    { 840,  885,  APP_NODE_CLASS,  "上课"   },
     { 885,  900,  APP_NODE_BREAK,  "课间"   },
-    { 900,  945,  APP_NODE_CLASS,  "第七节" },
-    { 945,  990,  APP_NODE_CLASS,  "第八节" },
+    { 900,  945,  APP_NODE_CLASS,  "上课"   },
+    { 945,  990,  APP_NODE_CLASS,  "上课"   },
     { 1050, 1060, APP_NODE_LEAVE,  "放学"   },
 };
 
 // 住校模板：在工作日基础上加两节晚自习，放学挪到最后一节之后。
 static const routine_template_entry_t BOARDING_TEMPLATE[] = {
     { 470,  480,  APP_NODE_ARRIVE, "到校"   },
-    { 480,  525,  APP_NODE_CLASS,  "第一节" },
+    { 480,  525,  APP_NODE_CLASS,  "上课"   },
     { 525,  535,  APP_NODE_BREAK,  "课间"   },
-    { 535,  580,  APP_NODE_CLASS,  "第二节" },
-    { 580,  625,  APP_NODE_CLASS,  "第三节" },
+    { 535,  580,  APP_NODE_CLASS,  "上课"   },
+    { 580,  625,  APP_NODE_CLASS,  "上课"   },
     { 625,  640,  APP_NODE_BREAK,  "课间"   },
-    { 640,  685,  APP_NODE_CLASS,  "第四节" },
-    { 685,  715,  APP_NODE_CLASS,  "第五节" },
+    { 640,  685,  APP_NODE_CLASS,  "上课"   },
+    { 685,  715,  APP_NODE_CLASS,  "上课"   },
     { 715,  840,  APP_NODE_LUNCH,  "午休"   },
-    { 840,  885,  APP_NODE_CLASS,  "第六节" },
+    { 840,  885,  APP_NODE_CLASS,  "上课"   },
     { 885,  900,  APP_NODE_BREAK,  "课间"   },
-    { 900,  945,  APP_NODE_CLASS,  "第七节" },
-    { 945,  990,  APP_NODE_CLASS,  "第八节" },
+    { 900,  945,  APP_NODE_CLASS,  "上课"   },
+    { 945,  990,  APP_NODE_CLASS,  "上课"   },
     { 1140, 1230, APP_NODE_STUDY,  "晚自习" },
     { 1230, 1260, APP_NODE_STUDY,  "晚自习" },
     { 1260, 1270, APP_NODE_LEAVE,  "放学"   },
+};
+
+// 设备端"名称"字段的可选项。第 0 项是"跟随类型"，其余是常用科目。
+const char *const APP_ROUTINE_NAME_PRESETS[APP_ROUTINE_NAME_PRESET_COUNT] = {
+    "跟随类型",
+    "语文", "数学", "英语", "物理", "化学", "生物", "信息",
+    "历史", "地理", "政治", "科学", "体育", "音乐", "美术",
+    "自习", "早读", "班会",
 };
 
 void app_routine_init(app_routine_t *r)
@@ -269,9 +279,26 @@ static app_node_type_t derive_type(const char *name)
     if (strstr(name, "课间")) return APP_NODE_BREAK;
     if (strstr(name, "午休") || strstr(name, "午间")) return APP_NODE_LUNCH;
     if (strstr(name, "晚自习")) return APP_NODE_STUDY;
+    if (strstr(name, "自习")) return APP_NODE_STUDY;
     if (strstr(name, "上课")) return APP_NODE_CLASS;
     if (strstr(name, "第") && strstr(name, "节")) return APP_NODE_CLASS;
+
+    // 预设科目名按"上课"归类：手机端写"08:00-08:45 语文"与设备端选"语文"必须得到
+    // 同一种节点，否则同一份作息在两处的颜色与排序会不一样。
+    for (int i = 1; i < APP_ROUTINE_NAME_PRESET_COUNT; i++) {
+        if (strcmp(name, APP_ROUTINE_NAME_PRESETS[i]) == 0) return APP_NODE_CLASS;
+    }
     return APP_NODE_CUSTOM;
+}
+
+// 名称在预设表里的下标；不在表里返回 -1（编辑已有节点时用来预选，避免改类型就丢名字）。
+int app_routine_name_preset_index(const char *name)
+{
+    if (!name || !name[0]) return -1;
+    for (int i = 1; i < APP_ROUTINE_NAME_PRESET_COUNT; i++) {
+        if (strcmp(name, APP_ROUTINE_NAME_PRESETS[i]) == 0) return i;
+    }
+    return -1;
 }
 
 bool app_routine_parse_line(const char *line, app_routine_node_t *out)

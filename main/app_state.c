@@ -10,6 +10,8 @@
 // 但标记为未同步，直到 NTP 或手机/手动再次校准，避免把过期时间伪装成已同步。
 // 重启后的误差等于"上次落盘到断电"的时长，所以运行期由 ui_app 的 1 秒节拍每分钟调用
 // app_state_save_clock() 落盘一次，把误差压到一分钟以内；联网时开机还会自动校时一次。
+// 每次校准都会同时写入 newlib 系统时钟：HTTPS/TLS 的证书有效期校验读的是 time(NULL)，
+// 只写 epoch_base 只能让界面时间变对，联网请求仍会因"证书尚未生效"失败。
 //
 // 密钥约定：动态口令的密钥必须在开机后自动可用（用户不可能每次开机先解一次锁），
 // 因此不能像密码本那样用口令加密，只能用"设备绑定"：eFuse MAC 与本机随机种子一起喂进
@@ -33,6 +35,7 @@
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/time.h>
 
 static const char *TAG = "app_state";
 
@@ -91,6 +94,11 @@ typedef struct {
     app_net_state_t net;
     char            ssid[33];
     int             battery;
+
+    // 小说阅读进度：正文里的字节偏移 + 那本书的 data_crc。绑定 CRC 是为了让"换了书"
+    // 自动从头开始，而不是拿着旧偏移切到新正文中间。
+    uint32_t novel_offset;
+    uint32_t novel_crc;
 
     int64_t epoch_base;   // uptime 为 0 时对应的 Unix 秒
     bool    loaded;
@@ -377,6 +385,8 @@ static void runtime_defaults(void)
     s.net = APP_NET_OFF;
     s.ssid[0] = '\0';
     s.battery = -1;
+    s.novel_offset = 0;
+    s.novel_crc = 0;
     s.epoch_base = DEFAULT_EPOCH;
 }
 
@@ -431,6 +441,17 @@ esp_err_t app_state_init(void)
             memset(&s.esports, 0, sizeof(s.esports));
         }
         totp_load();
+
+        // 小说阅读进度。与书的 CRC 一起读出来：换了书就该从头开始。
+        struct {
+            uint32_t offset;
+            uint32_t crc;
+        } novel_pos = { 0, 0 };
+        if (blob_load("novelpos", &novel_pos, sizeof(novel_pos), &got) == ESP_OK &&
+            got == sizeof(novel_pos)) {
+            s.novel_offset = novel_pos.offset;
+            s.novel_crc = novel_pos.crc;
+        }
 
         // 密码本：容器长度可变，按记录的长度读出来再解析。解析失败会被重置成空本，
         // 因此损坏或旧版本的字节不会留下半个可用的密码本。
@@ -505,6 +526,13 @@ void app_state_set_time(const app_datetime_t *dt, const char *source)
     strncpy(s.settings.time_source, source ? source : "手动",
             sizeof(s.settings.time_source) - 1);
     s.settings.time_source[sizeof(s.settings.time_source) - 1] = '\0';
+
+    // 同时写入 newlib 系统时钟。TLS 证书校验（mbedTLS 的 notBefore/notAfter 检查）读的是
+    // time(NULL)：设备没有 RTC，重启后它是 1970，若只记 epoch_base，界面时间是对的，但
+    // 所有 HTTPS 请求都会以"证书尚未生效"失败。三个校准入口（NTP / 手机 / 手动）都经过
+    // 这里，因此在这一处兜住即可。
+    struct timeval tv = { .tv_sec = (time_t)unix_utc, .tv_usec = 0 };
+    settimeofday(&tv, NULL);
 
     app_state_save_clock();
     app_state_save_settings();
@@ -633,6 +661,23 @@ void app_state_save_routine(void)  { blob_save("routine", &s.routine, sizeof(s.r
 void app_state_save_reminders(void){ blob_save("reminders", &s.reminders, sizeof(s.reminders)); }
 void app_state_save_pomodoro(void) { blob_save("pomodoro", &s.pomodoro, sizeof(s.pomodoro)); }
 void app_state_save_esports(void)  { blob_save("esports", &s.esports, sizeof(s.esports)); }
+
+// 小说阅读进度：8 字节的独立 blob。翻页会频繁更新，放在 NVS（有磨损均衡）而不是
+// 反复擦写 novel 分区。
+uint32_t app_state_novel_offset(void) { return s.novel_offset; }
+uint32_t app_state_novel_crc(void)    { return s.novel_crc; }
+
+void app_state_set_novel_pos(uint32_t offset, uint32_t data_crc)
+{
+    s.novel_offset = offset;
+    s.novel_crc = data_crc;
+
+    struct {
+        uint32_t offset;
+        uint32_t crc;
+    } pos = { offset, data_crc };
+    blob_save("novelpos", &pos, sizeof(pos));
+}
 
 // 动态口令的落盘必须整体重排（密钥要逐条密封），因此不直接 dump 内存结构，而是先
 // 组装密封容器再写。缓冲从堆上取：容器约 1.8KB，压在任务栈上不划算。
